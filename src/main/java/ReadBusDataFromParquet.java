@@ -12,8 +12,9 @@ public class ReadBusDataFromParquet {
         Dataset<Row> data = spark.read().parquet("bus-data-parquet/");
         data.createOrReplaceTempView("buses");
 
-        spark.sql("SELECT realRouteNumber, g AS plate, eventTime, x AS longitude, y AS latitude, s AS speed " +
-                        "FROM buses WHERE realRouteNumber = '10А' AND eventTime > '2025-05-31 13:00:00'")
+        spark.sql("SELECT realRouteNumber, plate, eventTime, longitude, latitude, speed " +
+                        "FROM buses " +
+                        "WHERE realRouteNumber = '10А' AND eventTime > '2025-05-31 13:00:00'")
                 .show();
     }
 }
