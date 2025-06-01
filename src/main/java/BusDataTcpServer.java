@@ -19,6 +19,11 @@ public class BusDataTcpServer {
     }
 
     public synchronized void sendData(String jsonData) {
+        if (writer == null) {
+            System.err.println("⏳ Ожидание подключения Spark...");
+            return;
+        }
+
         try {
             writer.write(jsonData);
             writer.newLine();
@@ -28,3 +33,4 @@ public class BusDataTcpServer {
         }
     }
 }
+

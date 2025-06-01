@@ -17,7 +17,6 @@
     </properties>
 
     <dependencies>
-
         <!-- Spark dependencies -->
         <dependency>
             <groupId>org.apache.spark</groupId>
@@ -79,7 +78,7 @@
             </exclusions>
         </dependency>
 
-        <!-- Explicit Jackson dependencies -->
+        <!-- Явно нужная версия Jackson -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-core</artifactId>
@@ -98,14 +97,14 @@
             <version>${jackson.version}</version>
         </dependency>
 
-        <!-- JSON Library -->
+        <!-- JSON библиотека -->
         <dependency>
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
             <version>20240303</version>
         </dependency>
 
-        <!-- OkHttp client -->
+        <!-- OkHttp клиент -->
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp</artifactId>
@@ -118,11 +117,11 @@
             <version>4.12.0</version>
         </dependency>
 
-        <!-- Socket.IO Client -->
+        <!-- Socket.IO клиент -->
         <dependency>
             <groupId>io.socket</groupId>
             <artifactId>socket.io-client</artifactId>
-            <version>2.1.0</version>
+            <version>1.0.1</version>
         </dependency>
 
     </dependencies>
