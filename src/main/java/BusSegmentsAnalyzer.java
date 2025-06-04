@@ -30,11 +30,12 @@ public class BusSegmentsAnalyzer {
                 .config("spark.executor.memory", "8g")
                 .getOrCreate();
 
-        Dataset<Row> busData = spark.read().parquet("bus-data-parquet/");
+        //Dataset<Row> busData = spark.read().parquet("bus-data-parquet/");
+        Dataset<Row> busData = spark.read().parquet("D:/bus-data-parquet/");
         busData.createOrReplaceTempView("bus_data");
         System.out.println("=== busData ===");
         busData.show(5, false);
-        busData.write().mode("overwrite").parquet("output/busData.parquet");
+        busData.write().mode("overwrite").parquet("D:/parquet/busData.parquet");
 
         String jsonString = Files.readString(Paths.get("src/main/resources/routes.json"));
         JSONObject jsonRoot = new JSONObject(jsonString);
@@ -60,7 +61,7 @@ public class BusSegmentsAnalyzer {
         stopsDF.createOrReplaceTempView("stops");
         System.out.println("=== stopsDF ===");
         stopsDF.show(5, false);
-        stopsDF.write().mode("overwrite").parquet("output/stopsDF.parquet");
+        stopsDF.write().mode("overwrite").parquet("D:/parquet/stopsDF.parquet");
 
         JSONObject routeJson = jsonRoot.getJSONObject("route");
         List<Row> routeRows = new ArrayList<>();
@@ -82,7 +83,7 @@ public class BusSegmentsAnalyzer {
         routesDF.createOrReplaceTempView("routes");
         System.out.println("=== routesDF ===");
         routesDF.show(5, false);
-        routesDF.write().mode("overwrite").parquet("output/routesDF.parquet");
+        routesDF.write().mode("overwrite").parquet("D:/parquet/routesDF.parquet");
 
         spark.udf().register("haversine", (UDF4<Double, Double, Double, Double, Double>)
                 BusSegmentsAnalyzer::haversine, DataTypes.DoubleType);
@@ -98,7 +99,7 @@ public class BusSegmentsAnalyzer {
         dataWithStops.createOrReplaceTempView("data_with_stops");
         System.out.println("=== dataWithStops ===");
         dataWithStops.show(5, false);
-        dataWithStops.write().mode("overwrite").parquet("output/dataWithStops.parquet");
+        dataWithStops.write().mode("overwrite").parquet("D:/parquet/dataWithStops.parquet");
 
         Dataset<Row> aggregatedStops = spark.sql(
                 "SELECT plate, stopId, stopName, routeId, stopOrder, " +
@@ -111,7 +112,7 @@ public class BusSegmentsAnalyzer {
         aggregatedStops.createOrReplaceTempView("aggregated_stops");
         System.out.println("=== aggregatedStops ===");
         aggregatedStops.show(5, false);
-        aggregatedStops.write().mode("overwrite").parquet("output/aggregatedStops.parquet");
+        aggregatedStops.write().mode("overwrite").parquet("D:/parquet/aggregatedStops.parquet");
 
         Dataset<Row> segments = spark.sql(
                 "SELECT s1.plate, s1.stopId AS start_stop, s2.stopId AS end_stop, s1.stopName AS start_name, s2.stopName AS end_name, " +
@@ -127,7 +128,7 @@ public class BusSegmentsAnalyzer {
         segments.createOrReplaceTempView("segments");
         System.out.println("=== segments ===");
         segments.show(5, false);
-        segments.write().mode("overwrite").parquet("output/segments.parquet");
+        segments.write().mode("overwrite").parquet("D:/parquet/segments.parquet");
 
         Dataset<Row> speedStats = spark.sql(
                 "SELECT " +
@@ -164,7 +165,7 @@ public class BusSegmentsAnalyzer {
         speedStats.createOrReplaceTempView("speed_stats");
         System.out.println("=== speedStats ===");
         speedStats.show(5, false);
-        speedStats.write().mode("overwrite").parquet("output/speedStats.parquet");
+        speedStats.write().mode("overwrite").parquet("D:/parquet/speedStats.parquet");
 
 
         System.out.println("=== ТОП-20 сегментов с наибольшим различием скоростей ===");
