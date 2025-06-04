@@ -107,28 +107,66 @@ public class BusSegmentsAnalyzer {
         Dataset<Row> aggregatedStops = spark.sql(
                 "SELECT plate, stopId, stopName, routeId, stopOrder, realRouteNumber, " +
                         "window(eventTime, '30 minutes').start as window_start, " +
-                        "min(eventTime) as first_seen, max(eventTime) as last_seen " +
+                        "MIN(eventTime) as first_seen, MAX(eventTime) as last_seen, " +
+                        "FIRST(latitude) AS first_lat, FIRST(longitude) AS first_lon, " +
+                        "LAST(latitude) AS last_lat, LAST(longitude) AS last_lon " +
                         "FROM data_with_stops " +
                         "GROUP BY plate, stopId, stopName, routeId, stopOrder, realRouteNumber, window(eventTime, '30 minutes')"
         );
         aggregatedStops.createOrReplaceTempView("aggregated_stops");
+
         System.out.println("=== aggregatedStops ===");
         aggregatedStops.show(5, false);
 
-        // Segments
+// Создание сегментов с координатами и средней скоростью между остановками
         Dataset<Row> segments = spark.sql(
-                "SELECT s1.plate, s1.stopId AS start_stop, s2.stopId AS end_stop, " +
-                        "s1.stopName AS start_name, s2.stopName AS end_name, s1.last_seen AS departure_time, " +
-                        "s2.first_seen AS arrival_time, s1.routeId, s1.realRouteNumber " +
+                "SELECT s1.plate, " +
+                        "s1.stopId AS start_stop, s2.stopId AS end_stop, " +
+                        "s1.stopName AS start_name, s2.stopName AS end_name, " +
+                        "s1.last_seen AS departure_time, s2.first_seen AS arrival_time, " +
+                        "s1.routeId, s1.realRouteNumber, " +
+                        "s1.last_lat AS start_lat, s1.last_lon AS start_lon, " +
+                        "s2.first_lat AS end_lat, s2.first_lon AS end_lon, " +
+                        "(haversine(s1.last_lat, s1.last_lon, s2.first_lat, s2.first_lon) / " +
+                        "(unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen))) * 3.6 AS avg_segment_speed_kmh " +
                         "FROM aggregated_stops s1 " +
-                        "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId " +
-                        "AND s1.realRouteNumber = s2.realRouteNumber " +
+                        "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId AND s1.realRouteNumber = s2.realRouteNumber " +
                         "WHERE s2.first_seen > s1.last_seen AND s2.stopOrder = s1.stopOrder + 1"
         );
+        segments.createOrReplaceTempView("segments");
+
         System.out.println("=== segments ===");
         segments.show(5, false);
 
-        // Detailed Segment Info
+// Последняя часть (детальные точки маршрута)
+        for (Row segment : segments.limit(5).collectAsList()) {
+            String plate = segment.getString(0);
+            Timestamp departure = segment.getTimestamp(5);
+            Timestamp arrival = segment.getTimestamp(6);
+            String startName = segment.getString(3);
+            String endName = segment.getString(4);
+
+            Dataset<Row> points = spark.sql(
+                    "SELECT DISTINCT latitude, longitude, speed, eventTime FROM bus_data " +
+                            "WHERE plate = '" + plate + "' AND eventTime BETWEEN '" + departure + "' AND '" + arrival + "'"
+            );
+            points.createOrReplaceTempView("segment_points");
+
+            Row coords = spark.sql(
+                    "SELECT " +
+                            "(SELECT latitude FROM segment_points ORDER BY eventTime ASC LIMIT 1) AS start_lat, " +
+                            "(SELECT longitude FROM segment_points ORDER BY eventTime ASC LIMIT 1) AS start_lon, " +
+                            "(SELECT latitude FROM segment_points ORDER BY eventTime DESC LIMIT 1) AS end_lat, " +
+                            "(SELECT longitude FROM segment_points ORDER BY eventTime DESC LIMIT 1) AS end_lon, " +
+                            "AVG(speed) AS avg_speed FROM segment_points"
+            ).first();
+
+            System.out.printf("\n=== Сегмент %s (%s → %s) ===\n", plate, startName, endName);
+            System.out.printf("Start coords: %.6f, %.6f\n", coords.getDouble(0), coords.getDouble(1));
+            System.out.printf("End coords: %.6f, %.6f\n", coords.getDouble(2), coords.getDouble(3));
+            System.out.printf("Avg speed: %.2f km/h\n", coords.getDouble(4));
+            points.orderBy("eventTime").show(false);
+        }
         for (Row segment : segments.limit(5).collectAsList()) {
             String plate = segment.getString(0);
             Timestamp departure = segment.getTimestamp(5);
