@@ -8,7 +8,7 @@ import java.sql.Timestamp;
 import java.util.*;
 
 public class BusSegmentsAnalyzer {
-    static final double STOP_RADIUS = 150.0;
+    static final double STOP_RADIUS = 50.0;
 
     private static double haversine(double lat1, double lon1, double lat2, double lon2) {
         double R = 6371000;
@@ -96,7 +96,7 @@ public class BusSegmentsAnalyzer {
                 "SELECT bd.*, s.stopId, s.name AS stopName, r.routeId, r.stopOrder, r.direction, bd.realRouteNumber, " +
                         "haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) AS dist_to_stop " +
                         "FROM bus_data bd CROSS JOIN stops s " +
-                        "JOIN routes r ON r.stopId = s.stopId " +
+                        "JOIN routes r ON r.stopId = s.stopId AND bd.internalRouteId = r.routeId " +
                         "WHERE haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) <= " + STOP_RADIUS
         );
         dataWithStops.createOrReplaceTempView("data_with_stops");
@@ -124,6 +124,7 @@ public class BusSegmentsAnalyzer {
                         "s1.stopId AS start_stop, s2.stopId AS end_stop, " +
                         "s1.stopName AS start_name, s2.stopName AS end_name, " +
                         "s1.last_seen AS departure_time, s2.first_seen AS arrival_time, " +
+                        "CAST((unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) AS INT) AS duration_sec, " +
                         "s1.routeId, s1.realRouteNumber, " +
                         "s1.last_lat AS start_lat, s1.last_lon AS start_lon, " +
                         "s2.first_lat AS end_lat, s2.first_lon AS end_lon, " +
