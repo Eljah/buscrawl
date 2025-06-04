@@ -197,6 +197,51 @@ public class BusSegmentsAnalyzer {
             points.orderBy("eventTime").show(false);
         }
 
+        Dataset<Row> speedStats = spark.sql(
+                "SELECT " +
+                        "fast.start_stop, fast.end_stop, fast.start_name, fast.end_name, " +
+                        "fast.plate AS fast_plate, fast.routeId AS fast_routeId, fast.realRouteNumber AS fast_realRouteNumber, " +
+                        "fast.avg_segment_speed_kmh AS max_speed, " +
+                        "slow.plate AS slow_plate, slow.routeId AS slow_routeId, slow.realRouteNumber AS slow_realRouteNumber, " +
+                        "slow.avg_segment_speed_kmh AS min_speed, " +
+                        "(fast.avg_segment_speed_kmh / slow.avg_segment_speed_kmh) AS speed_ratio " +
+                        "FROM ( " +
+                        "SELECT *, ROW_NUMBER() OVER (PARTITION BY start_stop, end_stop ORDER BY avg_segment_speed_kmh DESC) AS rn_fast " +
+                        "FROM segments" +
+                        ") fast " +
+                        "JOIN ( " +
+                        "SELECT *, ROW_NUMBER() OVER (PARTITION BY start_stop, end_stop ORDER BY avg_segment_speed_kmh ASC) AS rn_slow " +
+                        "FROM segments" +
+                        ") slow " +
+                        "ON fast.start_stop = slow.start_stop AND fast.end_stop = slow.end_stop " +
+                        "WHERE fast.rn_fast = 1 AND slow.rn_slow = 1 " +
+                        "AND fast.plate <> slow.plate"
+        );
+
+        speedStats.createOrReplaceTempView("speed_stats");
+
+
+        speedStats.createOrReplaceTempView("speed_stats");
+
+        Dataset<Row> extremeSegments = spark.sql(
+                "SELECT DISTINCT s.* FROM segments s " +
+                        "JOIN speed_stats stats ON s.start_stop = stats.start_stop AND s.end_stop = stats.end_stop " +
+                        "WHERE s.avg_segment_speed_kmh = stats.max_speed OR s.avg_segment_speed_kmh = stats.min_speed"
+        );
+
+        extremeSegments.createOrReplaceTempView("extreme_segments");
+
+        System.out.println("=== ТОП-20 сегментов с наибольшим различием скоростей ===");
+        spark.sql(
+                "SELECT * FROM speed_stats ORDER BY speed_ratio DESC LIMIT 20"
+        ).show(false);
+
+        System.out.println("=== ТОП-20 сегментов с наименьшим различием скоростей ===");
+        spark.sql(
+                "SELECT * FROM speed_stats ORDER BY speed_ratio ASC LIMIT 20"
+        ).show(false);
+
+
         spark.stop();
     }
 }
