@@ -30,23 +30,24 @@ public class BusSegmentsAnalyzer {
                 .config("spark.executor.memory", "8g")
                 .getOrCreate();
 
+        // Bus telemetry
         Dataset<Row> busData = spark.read().parquet("bus-data-parquet/");
         busData.createOrReplaceTempView("bus_data");
+        System.out.println("=== busData ===");
+        busData.show(5, false);
 
+        // JSON data loading
         String jsonString = Files.readString(Paths.get("src/main/resources/routes.json"));
         JSONObject jsonRoot = new JSONObject(jsonString);
 
-        // Загрузка остановок
+        // Loading stops
         JSONObject nbusstop = jsonRoot.getJSONObject("nbusstop");
         List<Row> stopRows = new ArrayList<>();
         for (String stopId : nbusstop.keySet()) {
             JSONArray arr = nbusstop.getJSONArray(stopId);
             stopRows.add(RowFactory.create(
-                    stopId,
-                    arr.getString(0),
-                    arr.getDouble(2), // latitude
-                    arr.getDouble(1), // longitude
-                    arr.getString(3)
+                    stopId, arr.getString(0),
+                    arr.getDouble(2), arr.getDouble(1), arr.getString(3)
             ));
         }
 
@@ -60,20 +61,17 @@ public class BusSegmentsAnalyzer {
 
         Dataset<Row> stopsDF = spark.createDataFrame(stopRows, stopSchema);
         stopsDF.createOrReplaceTempView("stops");
-
-        System.out.println("== stopsDF ==");
+        System.out.println("=== stopsDF ===");
         stopsDF.show(5, false);
 
-        // Загрузка маршрутов
+        // Loading routes
         JSONObject routeJson = jsonRoot.getJSONObject("route");
         List<Row> routeRows = new ArrayList<>();
         for (String routeStopKey : routeJson.keySet()) {
             JSONArray routeArr = routeJson.getJSONArray(routeStopKey);
             routeRows.add(RowFactory.create(
-                    routeArr.getInt(0),                          // routeId
-                    String.valueOf(routeArr.getInt(1)),          // stopId
-                    routeArr.getInt(2),                          // direction
-                    routeArr.getInt(3)                           // stopOrder
+                    routeArr.getInt(0), String.valueOf(routeArr.getInt(1)),
+                    routeArr.getInt(2), routeArr.getInt(3)
             ));
         }
 
@@ -86,13 +84,14 @@ public class BusSegmentsAnalyzer {
 
         Dataset<Row> routesDF = spark.createDataFrame(routeRows, routeSchema);
         routesDF.createOrReplaceTempView("routes");
-
-        System.out.println("== routesDF ==");
+        System.out.println("=== routesDF ===");
         routesDF.show(5, false);
 
+        // Register UDF
         spark.udf().register("haversine", (UDF4<Double, Double, Double, Double, Double>)
                 BusSegmentsAnalyzer::haversine, DataTypes.DoubleType);
 
+        // Telemetry joined with stops and routes
         Dataset<Row> dataWithStops = spark.sql(
                 "SELECT bd.*, s.stopId, s.name AS stopName, r.routeId, r.stopOrder, r.direction, bd.realRouteNumber, " +
                         "haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) AS dist_to_stop " +
@@ -101,10 +100,10 @@ public class BusSegmentsAnalyzer {
                         "WHERE haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) <= " + STOP_RADIUS
         );
         dataWithStops.createOrReplaceTempView("data_with_stops");
-
-        System.out.println("== dataWithStops ==");
+        System.out.println("=== dataWithStops ===");
         dataWithStops.show(5, false);
 
+        // Aggregated stops
         Dataset<Row> aggregatedStops = spark.sql(
                 "SELECT plate, stopId, stopName, routeId, stopOrder, realRouteNumber, " +
                         "window(eventTime, '30 minutes').start as window_start, " +
@@ -113,38 +112,50 @@ public class BusSegmentsAnalyzer {
                         "GROUP BY plate, stopId, stopName, routeId, stopOrder, realRouteNumber, window(eventTime, '30 minutes')"
         );
         aggregatedStops.createOrReplaceTempView("aggregated_stops");
-
-        System.out.println("== aggregatedStops ==");
+        System.out.println("=== aggregatedStops ===");
         aggregatedStops.show(5, false);
 
+        // Segments
         Dataset<Row> segments = spark.sql(
                 "SELECT s1.plate, s1.stopId AS start_stop, s2.stopId AS end_stop, " +
-                        "s1.stopName AS start_name, s2.stopName AS end_name, " +
-                        "s1.last_seen AS departure_time, s2.first_seen AS arrival_time, s1.routeId, s1.realRouteNumber " +
+                        "s1.stopName AS start_name, s2.stopName AS end_name, s1.last_seen AS departure_time, " +
+                        "s2.first_seen AS arrival_time, s1.routeId, s1.realRouteNumber " +
                         "FROM aggregated_stops s1 " +
-                        "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId AND s1.realRouteNumber = s2.realRouteNumber " +
+                        "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId " +
+                        "AND s1.realRouteNumber = s2.realRouteNumber " +
                         "WHERE s2.first_seen > s1.last_seen AND s2.stopOrder = s1.stopOrder + 1"
         );
-        segments.createOrReplaceTempView("segments");
+        System.out.println("=== segments ===");
+        segments.show(5, false);
 
-        System.out.println("== segments ==");
-        segments.show(10, false);
-
-        // Получение точек отдельно по небольшим батчам (например, по 5 сегментов)
-        List<Row> segmentList = segments.limit(5).collectAsList();
-        for (Row segment : segmentList) {
-            String plate = segment.getAs("plate");
-            Timestamp departure = segment.getAs("departure_time");
-            Timestamp arrival = segment.getAs("arrival_time");
+        // Detailed Segment Info
+        for (Row segment : segments.limit(5).collectAsList()) {
+            String plate = segment.getString(0);
+            Timestamp departure = segment.getTimestamp(5);
+            Timestamp arrival = segment.getTimestamp(6);
+            String startName = segment.getString(3);
+            String endName = segment.getString(4);
 
             Dataset<Row> points = spark.sql(
-                    "SELECT latitude, longitude, speed, eventTime FROM bus_data " +
-                            "WHERE plate = '" + plate + "' " +
-                            "AND eventTime BETWEEN '" + departure + "' AND '" + arrival + "'"
+                    "SELECT DISTINCT latitude, longitude, speed, eventTime FROM bus_data " +
+                            "WHERE plate = '" + plate + "' AND eventTime BETWEEN '" + departure + "' AND '" + arrival + "'"
             );
+            points.createOrReplaceTempView("segment_points");
 
-            System.out.println("== Детали сегмента автобуса " + plate + " от " + departure + " до " + arrival + " ==");
-            points.show(false);
+            Row coords = spark.sql(
+                    "SELECT " +
+                            "(SELECT latitude FROM segment_points ORDER BY eventTime ASC LIMIT 1) AS start_lat, " +
+                            "(SELECT longitude FROM segment_points ORDER BY eventTime ASC LIMIT 1) AS start_lon, " +
+                            "(SELECT latitude FROM segment_points ORDER BY eventTime DESC LIMIT 1) AS end_lat, " +
+                            "(SELECT longitude FROM segment_points ORDER BY eventTime DESC LIMIT 1) AS end_lon, " +
+                            "AVG(speed) AS avg_speed FROM segment_points"
+            ).first();
+
+            System.out.printf("\n=== Сегмент %s (%s → %s) ===\n", plate, startName, endName);
+            System.out.printf("Start coords: %.6f, %.6f\n", coords.getDouble(0), coords.getDouble(1));
+            System.out.printf("End coords: %.6f, %.6f\n", coords.getDouble(2), coords.getDouble(3));
+            System.out.printf("Avg speed: %.2f km/h\n", coords.getDouble(4));
+            points.orderBy("eventTime").show(false);
         }
 
         spark.stop();
