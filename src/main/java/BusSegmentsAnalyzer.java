@@ -26,8 +26,8 @@ public class BusSegmentsAnalyzer {
         SparkSession spark = SparkSession.builder()
                 .appName("BusSegmentsAnalyzer")
                 .master("local[*]")
-                .config("spark.driver.memory", "8g")
-                .config("spark.executor.memory", "8g")
+                .config("spark.driver.memory", "14g")
+                .config("spark.executor.memory", "14g")
                 .getOrCreate();
 
         //Dataset<Row> busData = spark.read().parquet("bus-data-parquet/");
