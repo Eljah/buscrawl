@@ -20,7 +20,7 @@ public class BusSegmentsHeatmapNoLegend {
                 .master("local[*]")
                 .getOrCreate();
 
-        Dataset<Row> speedStats = spark.read().parquet("D:/parquet/speedStats.parquet");
+        Dataset<Row> speedStats = spark.read().parquet("D:/parquet/speedStats_adj.parquet");
 
 // Сортируем датасет по speed_ratio по возрастанию
         List<Row> segments = speedStats.select(

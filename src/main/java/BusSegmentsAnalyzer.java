@@ -10,7 +10,7 @@ import java.util.*;
 public class BusSegmentsAnalyzer {
     static final double STOP_RADIUS = 50.0;
 
-    private static double haversine(double lat1, double lon1, double lat2, double lon2) {
+    protected static double haversine(double lat1, double lon1, double lat2, double lon2) {
         double R = 6371000;
         double phi1 = Math.toRadians(lat1);
         double phi2 = Math.toRadians(lat2);

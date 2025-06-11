@@ -153,7 +153,7 @@ public class BusSegmentsAnalyzerAdjacent {
                             "(unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen))) * 3.6 AS avg_segment_speed_kmh " +
                             "FROM aggregated_stops s1 " +
                             "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId AND s2.stopOrder = s1.stopOrder + 1 " +
-                            "WHERE s2.first_seen > s1.last_seen AND (unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) <= 1800"
+                            "WHERE s2.first_seen > s1.last_seen AND (unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) <= 1200"
             ).checkpoint();
             segments.write().mode("overwrite").parquet("D:/parquet/segments_adj.parquet");
         }
