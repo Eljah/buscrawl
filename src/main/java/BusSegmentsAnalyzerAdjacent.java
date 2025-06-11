@@ -109,7 +109,8 @@ public class BusSegmentsAnalyzerAdjacent {
         } else {
             dataWithStops = spark.sql(
                     "SELECT bd.*, s.stopId, s.name AS stopName, s.latitude AS stopLat, s.longitude AS stopLon, " +
-                            "r.routeId, r.stopOrder, haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) AS dist_to_stop " +
+                            "r.routeId, r.direction, r.stopOrder, " +
+                            "haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) AS dist_to_stop " +
                             "FROM bus_data bd " +
                             "CROSS JOIN stops s " +
                             "JOIN routes r ON r.stopId = s.stopId AND bd.internalRouteId = r.routeId " +
@@ -126,12 +127,12 @@ public class BusSegmentsAnalyzerAdjacent {
             aggregatedStops = spark.read().parquet("D:/parquet/aggregatedStops.parquet");
         } else {
             aggregatedStops = spark.sql(
-                    "SELECT plate, stopId, stopName, routeId, stopOrder, " +
+                    "SELECT plate, stopId, stopName, routeId, direction, stopOrder, " +
                             "window(eventTime, '15 minutes').start as window_start, " +
                             "MIN(eventTime) as first_seen, MAX(eventTime) as last_seen, " +
                             "FIRST(stopLat) AS stop_lat, FIRST(stopLon) AS stop_lon " +
                             "FROM data_with_stops " +
-                            "GROUP BY plate, stopId, stopName, routeId, stopOrder, window(eventTime, '15 minutes')"
+                            "GROUP BY plate, stopId, stopName, routeId, direction, stopOrder, window(eventTime, '15 minutes')"
             ).checkpoint();
             aggregatedStops.write().mode("overwrite").parquet("D:/parquet/aggregatedStops.parquet");
         }
@@ -147,13 +148,15 @@ public class BusSegmentsAnalyzerAdjacent {
             segments = spark.sql(
                     "SELECT s1.plate, s1.stopId AS start_stop, s2.stopId AS end_stop, s1.stopName AS start_name, s2.stopName AS end_name, " +
                             "s1.last_seen AS departure_time, s2.first_seen AS arrival_time, " +
-                            "(unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) AS duration_sec, s1.routeId, " +
+                            "(unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) AS duration_sec, " +
+                            "s1.routeId, s1.direction, " +
                             "s1.stop_lat AS start_stop_lat, s1.stop_lon AS start_stop_lon, s2.stop_lat AS end_stop_lat, s2.stop_lon AS end_stop_lon, " +
                             "(haversine(s1.stop_lat, s1.stop_lon, s2.stop_lat, s2.stop_lon) / " +
                             "(unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen))) * 3.6 AS avg_segment_speed_kmh " +
                             "FROM aggregated_stops s1 " +
-                            "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId AND s2.stopOrder = s1.stopOrder + 1 " +
-                            "WHERE s2.first_seen > s1.last_seen AND (unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) <= 1200"
+                            "JOIN aggregated_stops s2 ON s1.plate = s2.plate AND s1.routeId = s2.routeId " +
+                            "AND s1.direction = s2.direction AND s2.stopOrder = s1.stopOrder + 1 " +
+                            "WHERE s2.first_seen > s1.last_seen AND (unix_timestamp(s2.first_seen) - unix_timestamp(s1.last_seen)) <= 1800"
             ).checkpoint();
             segments.write().mode("overwrite").parquet("D:/parquet/segments_adj.parquet");
         }
