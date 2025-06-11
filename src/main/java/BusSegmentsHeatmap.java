@@ -11,7 +11,9 @@ import org.jfree.data.xy.*;
 
 import javax.swing.*;
 import java.awt.*;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class BusSegmentsHeatmap {
     public static void main(String[] args) {
@@ -31,6 +33,7 @@ public class BusSegmentsHeatmap {
 
 
         XYSeriesCollection dataset = new XYSeriesCollection();
+        Map<String, Integer> labelCount = new HashMap<>();
 
         double minRatio = segments.stream().mapToDouble(r -> r.getDouble(4)).min().orElse(1);
         double maxRatio = segments.stream().mapToDouble(r -> r.getDouble(4)).max().orElse(1);
@@ -57,7 +60,13 @@ public class BusSegmentsHeatmap {
             String endName = segment.getAs("end_name");
             String label = startName + " → " + endName;
 
-            XYSeries series = new XYSeries(label, false); // false позволяет иметь одинаковые имена
+            int count = labelCount.getOrDefault(label, 0);
+            labelCount.put(label, count + 1);
+            if (count > 0) {
+                label = label + " (" + count + ")";
+            }
+
+            XYSeries series = new XYSeries(label, false); // autoSort disabled
             seriesIndex++;
             series.add(startLon, startLat);
             series.add(endLon, endLat);
