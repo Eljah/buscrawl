@@ -28,6 +28,7 @@ public class BusSegmentsAnalyzerAdjacent {
                 .master("local[*]")
                 .config("spark.driver.memory", "14g")
                 .config("spark.executor.memory", "14g")
+                .config("spark.local.dir", "D:/parquet/temp")
                 .getOrCreate();
 
         spark.sparkContext().setCheckpointDir("D:/parquet/checkpoints");
@@ -99,6 +100,7 @@ public class BusSegmentsAnalyzerAdjacent {
         routesDF.createOrReplaceTempView("routes");
         System.out.println("=== routesDF ===");
         routesDF.show(5, false);
+        routesDF.cache();
 
         spark.udf().register("haversine", (UDF4<Double, Double, Double, Double, Double>)
                 BusSegmentsAnalyzer::haversine, DataTypes.DoubleType);
@@ -115,7 +117,7 @@ public class BusSegmentsAnalyzerAdjacent {
                             "CROSS JOIN stops s " +
                             "JOIN routes r ON r.stopId = s.stopId AND bd.internalRouteId = r.routeId " +
                             "WHERE haversine(bd.latitude, bd.longitude, s.latitude, s.longitude) <= " + STOP_RADIUS
-            ).repartition(200).checkpoint();
+            ).coalesce(200).checkpoint();
             dataWithStops.write().mode("overwrite").parquet("D:/parquet/dataWithStops.parquet");
         }
         dataWithStops.createOrReplaceTempView("data_with_stops");
