@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Active Buses</title>
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --panel: rgba(255, 250, 242, 0.94);
+      --ink: #1d2a38;
+      --muted: #5e6b78;
+      --shadow: 0 16px 40px rgba(29, 42, 56, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #f8d7b8 0, transparent 28%),
+        linear-gradient(180deg, #efe7db 0%, var(--bg) 100%);
+    }
+    .wrap {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 28px 18px 34px;
+    }
+    .hero {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .topline {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4.8vw, 52px);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+    }
+    .links {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .links a {
+      color: var(--ink);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(29, 42, 56, 0.25);
+      font-size: 15px;
+    }
+    .subtitle {
+      margin: 0;
+      max-width: 860px;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.45;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 16px;
+      align-items: start;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+    .map-card {
+      padding: 16px;
+    }
+    .map-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .map-shell {
+      position: relative;
+      height: min(76vh, 900px);
+      min-height: 520px;
+      overflow: hidden;
+      border-radius: 18px;
+      background: #6d7277;
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      cursor: grab;
+      user-select: none;
+    }
+    .map-shell.dragging { cursor: grabbing; }
+    .tile-layer, .overlay-layer {
+      position: absolute;
+      inset: 0;
+    }
+    .tile-layer img {
+      position: absolute;
+      width: 256px;
+      height: 256px;
+    }
+    .overlay-layer {
+      pointer-events: none;
+      overflow: visible;
+    }
+    .empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255,255,255,0.88);
+      text-align: center;
+      padding: 24px;
+      background: rgba(34, 39, 44, 0.22);
+      backdrop-filter: blur(2px);
+    }
+    .sidebar {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .sidebar h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+    .sidebar-meta {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .bus-list {
+      display: grid;
+      gap: 8px;
+      max-height: calc(min(76vh, 900px) - 130px);
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .bus-item {
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.52);
+      padding: 12px 13px;
+      cursor: pointer;
+    }
+    .bus-item.active {
+      border-color: rgba(214, 113, 58, 0.65);
+      box-shadow: 0 0 0 2px rgba(214, 113, 58, 0.15);
+    }
+    .bus-item:hover {
+      background: rgba(255,255,255,0.72);
+    }
+    .bus-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .bus-plate {
+      font-size: 18px;
+    }
+    .bus-route {
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .bus-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .legend {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 1080px) {
+      .layout { grid-template-columns: 1fr; }
+      .bus-list { max-height: none; }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding-left: 12px; padding-right: 12px; }
+      .map-card, .sidebar { padding: 14px; }
+      .map-shell { min-height: 420px; height: 62vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="topline">
+        <h1>Активные автобусы на карте</h1>
+        <div class="links">
+          <a href="./">К основному дашборду</a>
+          <a href="./routes-last-movement">К последнему движению по маршрутам</a>
+        </div>
+      </div>
+      <p class="subtitle">На карте показываются автобусы, по которым были точки за последние 10 минут. Для каждого автобуса выводятся последние 100 точек: самые новые ярче, более старые постепенно затухают.</p>
+    </section>
+
+    <section class="layout">
+      <article class="card map-card">
+        <div class="map-meta">
+          <div id="updatedAt">Обновление: ...</div>
+          <div id="windowMeta">Окно: ...</div>
+          <div id="countMeta">Автобусов: ...</div>
+        </div>
+        <div class="map-shell" id="map">
+          <div class="tile-layer" id="tiles"></div>
+          <svg class="overlay-layer" id="overlay"></svg>
+          <div class="empty" id="emptyState">Загрузка карты и кеша автобусов...</div>
+        </div>
+        <div class="legend">
+          <div>Серый фон и линии дорог/рельсов отрисованы из локальных PNG-тайлов.</div>
+          <div>Колесо мыши меняет масштаб, перетаскивание двигает карту.</div>
+        </div>
+      </article>
+
+      <aside class="card sidebar">
+        <h2>Список автобусов</h2>
+        <div class="sidebar-meta" id="sidebarMeta">Выбери автобус в списке, чтобы центрировать карту на его последней точке.</div>
+        <div class="bus-list" id="busList">
+          <div class="bus-note">Загрузка...</div>
+        </div>
+      </aside>
+    </section>
+  </div>
+
+  <script>
+    const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+
+    const mapEl = document.getElementById('map');
+    const tilesEl = document.getElementById('tiles');
+    const overlayEl = document.getElementById('overlay');
+    const emptyEl = document.getElementById('emptyState');
+    const busListEl = document.getElementById('busList');
+
+    const state = {
+      config: null,
+      traces: null,
+      centerLon: null,
+      centerLat: null,
+      zoom: null,
+      selectedPlate: null,
+      dragging: false,
+      dragStartX: 0,
+      dragStartY: 0,
+      dragStartCenterX: 0,
+      dragStartCenterY: 0
+    };
+
+    function formatDate(value) {
+      if (!value) return 'нет данных';
+      return `${dateTimeFormatter.format(new Date(value))} МСК`;
+    }
+
+    function lonToWorldX(lon, zoom) {
+      return ((lon + 180) / 360) * 256 * Math.pow(2, zoom);
+    }
+
+    function latToWorldY(lat, zoom) {
+      const sin = Math.sin(lat * Math.PI / 180);
+      return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, zoom);
+    }
+
+    function worldToLon(x, zoom) {
+      return x / (256 * Math.pow(2, zoom)) * 360 - 180;
+    }
+
+    function worldToLat(y, zoom) {
+      const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, zoom));
+      return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+    }
+
+    function project(lat, lon, zoom) {
+      return { x: lonToWorldX(lon, zoom), y: latToWorldY(lat, zoom) };
+    }
+
+    function tileUrl(z, x, y) {
+      return state.config.tileUrlTemplate
+        .replace('{z}', String(z))
+        .replace('{x}', String(x))
+        .replace('{y}', String(y));
+    }
+
+    function hashHue(input) {
+      let hash = 0;
+      for (let i = 0; i < input.length; i++) {
+        hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+      }
+      return hash % 360;
+    }
+
+    function fitBounds() {
+      const bounds = state.config.bounds;
+      const width = mapEl.clientWidth || 900;
+      const height = mapEl.clientHeight || 600;
+      let chosenZoom = state.config.initialZoom;
+      for (let zoom = state.config.maxZoom; zoom >= state.config.minZoom; zoom--) {
+        const west = project(bounds.south, bounds.west, zoom).x;
+        const east = project(bounds.south, bounds.east, zoom).x;
+        const north = project(bounds.north, bounds.west, zoom).y;
+        const south = project(bounds.south, bounds.west, zoom).y;
+        if ((east - west) <= width * 0.88 && (south - north) <= height * 0.88) {
+          chosenZoom = zoom;
+          break;
+        }
+      }
+      state.zoom = chosenZoom;
+      state.centerLon = state.config.center.longitude;
+      state.centerLat = state.config.center.latitude;
+    }
+
+    function getViewportOrigin() {
+      const center = project(state.centerLat, state.centerLon, state.zoom);
+      return {
+        left: center.x - mapEl.clientWidth / 2,
+        top: center.y - mapEl.clientHeight / 2
+      };
+    }
+
+    function renderTiles() {
+      const zoom = state.zoom;
+      const scale = Math.pow(2, zoom);
+      const maxTile = scale - 1;
+      const origin = getViewportOrigin();
+      const minTileX = Math.floor(origin.left / 256);
+      const maxTileX = Math.floor((origin.left + mapEl.clientWidth) / 256);
+      const minTileY = Math.floor(origin.top / 256);
+      const maxTileY = Math.floor((origin.top + mapEl.clientHeight) / 256);
+
+      let html = '';
+      for (let x = minTileX; x <= maxTileX; x++) {
+        for (let y = minTileY; y <= maxTileY; y++) {
+          if (y < 0 || y > maxTile) continue;
+          const wrappedX = ((x % scale) + scale) % scale;
+          const left = x * 256 - origin.left;
+          const top = y * 256 - origin.top;
+          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
+        }
+      }
+      tilesEl.innerHTML = html;
+    }
+
+    function renderOverlay() {
+      overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+      overlayEl.setAttribute('width', mapEl.clientWidth);
+      overlayEl.setAttribute('height', mapEl.clientHeight);
+
+      if (!state.traces || !state.traces.buses || !state.traces.buses.length) {
+        overlayEl.innerHTML = '';
+        emptyEl.style.display = 'grid';
+        emptyEl.textContent = state.traces && state.traces.message ? state.traces.message : 'Нет активных автобусов в последнем окне.';
+        return;
+      }
+
+      emptyEl.style.display = 'none';
+      const origin = getViewportOrigin();
+      const parts = [];
+
+      for (const bus of state.traces.buses) {
+        const hue = hashHue((bus.routeNumber || '') + ':' + bus.plate);
+        const selected = state.selectedPlate === bus.plate;
+        const points = bus.points || [];
+        for (let i = 0; i < points.length; i++) {
+          const point = points[i];
+          const projected = project(point.latitude, point.longitude, state.zoom);
+          const x = projected.x - origin.left;
+          const y = projected.y - origin.top;
+          if (x < -8 || y < -8 || x > mapEl.clientWidth + 8 || y > mapEl.clientHeight + 8) continue;
+
+          const fade = points.length <= 1 ? 1 : i / (points.length - 1);
+          const opacity = 0.03 + fade * 0.92;
+          const radius = 1.5 + fade * 3.4;
+          const stroke = selected && i === points.length - 1 ? 'rgba(255,255,255,0.95)' : 'none';
+          const strokeWidth = selected && i === points.length - 1 ? 1.6 : 0;
+          parts.push(
+            `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${radius.toFixed(2)}" fill="hsla(${hue}, 82%, 54%, ${opacity.toFixed(3)})" stroke="${stroke}" stroke-width="${strokeWidth}"></circle>`
+          );
+        }
+
+        if (selected && points.length) {
+          const latest = points[points.length - 1];
+          const projected = project(latest.latitude, latest.longitude, state.zoom);
+          const x = projected.x - origin.left;
+          const y = projected.y - origin.top;
+          parts.push(
+            `<text x="${(x + 10).toFixed(2)}" y="${(y - 10).toFixed(2)}" fill="white" font-size="13" font-family="Georgia, serif" paint-order="stroke" stroke="rgba(29,42,56,0.75)" stroke-width="3">${escapeHtml(`${bus.routeNumber || 'без маршрута'} · ${bus.plate}`)}</text>`
+          );
+        }
+      }
+
+      overlayEl.innerHTML = parts.join('');
+    }
+
+    function renderBusList() {
+      if (!state.traces || !state.traces.buses || !state.traces.buses.length) {
+        busListEl.innerHTML = '<div class="bus-note">Нет автобусов в последнем окне.</div>';
+        return;
+      }
+
+      busListEl.innerHTML = state.traces.buses.map(bus => {
+        const active = state.selectedPlate === bus.plate ? ' active' : '';
+        return `
+          <div class="bus-item${active}" data-plate="${escapeAttr(bus.plate)}">
+            <div class="bus-title">
+              <div class="bus-plate">${escapeHtml(bus.plate)}</div>
+              <div class="bus-route">${escapeHtml(bus.routeNumber || 'без маршрута')}</div>
+            </div>
+            <div class="bus-note">Последняя точка: ${formatDate(bus.lastSeen)}</div>
+            <div class="bus-note">Точек в хвосте: ${bus.pointCount}</div>
+          </div>
+        `;
+      }).join('');
+
+      for (const item of busListEl.querySelectorAll('.bus-item')) {
+        item.addEventListener('click', () => {
+          state.selectedPlate = item.dataset.plate;
+          centerOnSelectedBus();
+          renderBusList();
+          renderOverlay();
+        });
+      }
+    }
+
+    function centerOnSelectedBus() {
+      if (!state.selectedPlate || !state.traces || !state.traces.buses) {
+        return;
+      }
+      const bus = state.traces.buses.find(item => item.plate === state.selectedPlate);
+      if (!bus || bus.latestLatitude == null || bus.latestLongitude == null) {
+        return;
+      }
+      state.centerLat = bus.latestLatitude;
+      state.centerLon = bus.latestLongitude;
+      renderTiles();
+      renderOverlay();
+    }
+
+    function refreshMeta() {
+      document.getElementById('updatedAt').textContent = `Обновление: ${formatDate(state.traces.updatedAt)}`;
+      document.getElementById('windowMeta').textContent = `Окно: последние ${state.traces.windowMinutes} минут, до ${state.traces.maxPointsPerBus} точек на автобус`;
+      document.getElementById('countMeta').textContent = `Автобусов: ${state.traces.busCount || 0}`;
+      document.getElementById('sidebarMeta').textContent = `Список отсортирован по последнему времени точки. Сейчас активны ${(state.traces.busCount || 0)} автобусов.`;
+    }
+
+    async function loadAll() {
+      const [configResponse, tracesResponse] = await Promise.all([
+        fetch('./api/map-config', { cache: 'no-store' }),
+        fetch('./api/bus-traces', { cache: 'no-store' })
+      ]);
+      state.config = await configResponse.json();
+      state.traces = await tracesResponse.json();
+
+      if (state.config.status !== 'ok') {
+        emptyEl.style.display = 'grid';
+        emptyEl.textContent = state.config.message || 'Конфигурация карты недоступна.';
+        return;
+      }
+
+      if (state.centerLon == null || state.centerLat == null || state.zoom == null) {
+        fitBounds();
+      }
+      if (!state.selectedPlate && state.traces.buses && state.traces.buses.length) {
+        state.selectedPlate = state.traces.buses[0].plate;
+      }
+      refreshMeta();
+      renderTiles();
+      renderBusList();
+      renderOverlay();
+    }
+
+    async function refreshTraces() {
+      try {
+        const response = await fetch('./api/bus-traces', { cache: 'no-store' });
+        state.traces = await response.json();
+        if (!state.selectedPlate && state.traces.buses && state.traces.buses.length) {
+          state.selectedPlate = state.traces.buses[0].plate;
+        }
+        refreshMeta();
+        renderBusList();
+        renderOverlay();
+      } catch (error) {
+        emptyEl.style.display = 'grid';
+        emptyEl.textContent = `Не удалось обновить кеш автобусов: ${error}`;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replaceAll("'", '&#39;');
+    }
+
+    function onWheel(event) {
+      if (!state.config) return;
+      event.preventDefault();
+      const delta = event.deltaY < 0 ? 1 : -1;
+      const newZoom = Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom + delta));
+      if (newZoom === state.zoom) return;
+
+      const rect = mapEl.getBoundingClientRect();
+      const cursorX = event.clientX - rect.left;
+      const cursorY = event.clientY - rect.top;
+      const origin = getViewportOrigin();
+      const worldX = origin.left + cursorX;
+      const worldY = origin.top + cursorY;
+      const lon = worldToLon(worldX, state.zoom);
+      const lat = worldToLat(worldY, state.zoom);
+
+      state.zoom = newZoom;
+      const newWorldX = lonToWorldX(lon, state.zoom);
+      const newWorldY = latToWorldY(lat, state.zoom);
+      state.centerLon = worldToLon(newWorldX - cursorX + mapEl.clientWidth / 2, state.zoom);
+      state.centerLat = worldToLat(newWorldY - cursorY + mapEl.clientHeight / 2, state.zoom);
+
+      renderTiles();
+      renderOverlay();
+    }
+
+    function onPointerDown(event) {
+      state.dragging = true;
+      mapEl.classList.add('dragging');
+      state.dragStartX = event.clientX;
+      state.dragStartY = event.clientY;
+      const center = project(state.centerLat, state.centerLon, state.zoom);
+      state.dragStartCenterX = center.x;
+      state.dragStartCenterY = center.y;
+    }
+
+    function onPointerMove(event) {
+      if (!state.dragging) return;
+      const dx = event.clientX - state.dragStartX;
+      const dy = event.clientY - state.dragStartY;
+      const centerX = state.dragStartCenterX - dx;
+      const centerY = state.dragStartCenterY - dy;
+      state.centerLon = worldToLon(centerX, state.zoom);
+      state.centerLat = worldToLat(centerY, state.zoom);
+      renderTiles();
+      renderOverlay();
+    }
+
+    function onPointerUp() {
+      state.dragging = false;
+      mapEl.classList.remove('dragging');
+    }
+
+    mapEl.addEventListener('wheel', onWheel, { passive: false });
+    mapEl.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('resize', () => {
+      if (!state.config) return;
+      renderTiles();
+      renderOverlay();
+    });
+
+    loadAll().then(() => {
+      setInterval(refreshTraces, 15000);
+    }).catch(error => {
+      emptyEl.style.display = 'grid';
+      emptyEl.textContent = `Не удалось загрузить карту: ${error}`;
+    });
+  </script>
+</body>
+</html>

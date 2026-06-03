@@ -41,6 +41,11 @@
       gap: 16px;
       flex-wrap: wrap;
     }
+    .links {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
     h1 {
       margin: 0;
       font-size: clamp(30px, 4.8vw, 52px);
@@ -133,7 +138,10 @@
     <section class="hero">
       <div class="topline">
         <h1>Последнее движение по маршрутам</h1>
-        <a class="back" href="./">К основному дашборду</a>
+        <div class="links">
+          <a class="back" href="./">К основному дашборду</a>
+          <a class="back" href="./bus-traces-map">К карте активных автобусов</a>
+        </div>
       </div>
       <p class="subtitle">Для каждого маршрута показывается последнее наблюдение автобуса в движении. Сначала берутся текущие сутки, а если в них движения еще не было, выводится последнее время из предыдущих суток.</p>
     </section>

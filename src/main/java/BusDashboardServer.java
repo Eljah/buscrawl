@@ -24,15 +24,31 @@ public class BusDashboardServer {
 
     private final AtomicReference<byte[]> cachedStatsJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedTraceJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedMapConfigJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedIndexHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedTraceMapHtml = new AtomicReference<>();
     private final Path statsCacheFile;
     private final Path routeMovementCacheFile;
+    private final Path traceCacheFile;
+    private final Path mapConfigFile;
+    private final Path tileRoot;
     private final int port;
 
-    public BusDashboardServer(Path statsCacheFile, Path routeMovementCacheFile, int port) {
+    public BusDashboardServer(
+            Path statsCacheFile,
+            Path routeMovementCacheFile,
+            Path traceCacheFile,
+            Path mapConfigFile,
+            Path tileRoot,
+            int port
+    ) {
         this.statsCacheFile = statsCacheFile;
         this.routeMovementCacheFile = routeMovementCacheFile;
+        this.traceCacheFile = traceCacheFile;
+        this.mapConfigFile = mapConfigFile;
+        this.tileRoot = tileRoot;
         this.port = port;
     }
 
@@ -45,15 +61,35 @@ public class BusDashboardServer {
                 "BUS_DASHBOARD_ROUTE_CACHE_FILE",
                 statsCacheFile.resolveSibling("route-last-movement.json").toString()
         ));
+        Path traceCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_TRACE_CACHE_FILE",
+                statsCacheFile.resolveSibling("bus-traces.json").toString()
+        ));
+        Path mapConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAP_CONFIG_FILE",
+                statsCacheFile.resolveSibling("map-config.json").toString()
+        ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TILE_DIR",
+                statsCacheFile.resolveSibling("tiles/base").toString()
+        ));
         int port = Integer.parseInt(System.getenv().getOrDefault("BUS_DASHBOARD_PORT", "8061"));
 
-        BusDashboardServer server = new BusDashboardServer(statsCacheFile, routeMovementCacheFile, port);
+        BusDashboardServer server = new BusDashboardServer(
+                statsCacheFile,
+                routeMovementCacheFile,
+                traceCacheFile,
+                mapConfigFile,
+                tileRoot,
+                port
+        );
         server.start();
     }
 
     private void start() throws Exception {
         cachedIndexHtml.set(loadResourceBytes("dashboard/index.html"));
         cachedRouteMovementHtml.set(loadResourceBytes("dashboard/routes-last-movement.html"));
+        cachedTraceMapHtml.set(loadResourceBytes("dashboard/bus-traces-map.html"));
         refreshCache();
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -63,7 +99,11 @@ public class BusDashboardServer {
         server.createContext("/health", new TextHandler("ok\n", "text/plain; charset=utf-8"));
         server.createContext("/api/stats", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedStatsJson.get()));
         server.createContext("/api/route-last-movement", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRouteMovementJson.get()));
+        server.createContext("/api/bus-traces", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedTraceJson.get()));
+        server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
+        server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
+        server.createContext("/tiles/base", this::handleTileRequest);
         server.createContext("/", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedIndexHtml.get()));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
@@ -85,6 +125,12 @@ public class BusDashboardServer {
         )));
         cachedRouteMovementJson.set(loadJsonCache(routeMovementCacheFile, emptyRouteMovementPayload(
                 "Route cache file not found: " + routeMovementCacheFile
+        )));
+        cachedTraceJson.set(loadJsonCache(traceCacheFile, emptyTracePayload(
+                "Trace cache file not found: " + traceCacheFile
+        )));
+        cachedMapConfigJson.set(loadJsonCache(mapConfigFile, emptyMapConfigPayload(
+                "Map config file not found: " + mapConfigFile
         )));
     }
 
@@ -120,6 +166,33 @@ public class BusDashboardServer {
         return payload;
     }
 
+    private static Map<String, Object> emptyTracePayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("windowMinutes", 10);
+        payload.put("maxPointsPerBus", 100);
+        payload.put("busCount", 0);
+        payload.put("buses", List.of());
+        return payload;
+    }
+
+    private static Map<String, Object> emptyMapConfigPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("tileSize", 256);
+        payload.put("minZoom", 11);
+        payload.put("maxZoom", 17);
+        payload.put("initialZoom", 12);
+        payload.put("tileUrlTemplate", "./tiles/base/{z}/{x}/{y}.png");
+        payload.put("bounds", null);
+        payload.put("center", null);
+        return payload;
+    }
+
     private byte[] loadResourceBytes(String resourcePath) throws IOException {
         try (InputStream inputStream = BusDashboardServer.class.getClassLoader().getResourceAsStream(resourcePath)) {
             if (inputStream == null) {
@@ -127,6 +200,32 @@ public class BusDashboardServer {
             }
             return inputStream.readAllBytes();
         }
+    }
+
+    private void handleTileRequest(HttpExchange exchange) throws IOException {
+        String contextPath = exchange.getHttpContext().getPath();
+        String requestPath = exchange.getRequestURI().getPath();
+        String suffix = requestPath.substring(contextPath.length());
+        if (suffix.startsWith("/")) {
+            suffix = suffix.substring(1);
+        }
+        if (suffix.isEmpty() || suffix.contains("..")) {
+            writeResponse(exchange, 404, "text/plain; charset=utf-8", "Tile not found\n".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+
+        Path tilePath = tileRoot.resolve(suffix).normalize();
+        if (!tilePath.startsWith(tileRoot) || !Files.isRegularFile(tilePath)) {
+            writeResponse(exchange, 404, "text/plain; charset=utf-8", "Tile not found\n".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+
+        byte[] body = Files.readAllBytes(tilePath);
+        exchange.getResponseHeaders().set("Content-Type", "image/png");
+        exchange.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
+        exchange.sendResponseHeaders(200, body.length);
+        exchange.getResponseBody().write(body);
+        exchange.close();
     }
 
     private static void writeResponse(HttpExchange exchange, int status, String contentType, byte[] body) throws IOException {

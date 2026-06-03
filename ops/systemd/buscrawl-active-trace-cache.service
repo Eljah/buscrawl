@@ -1,0 +1,17 @@
+[Unit]
+Description=Buscrawl active trace cache
+After=network.target buscrawl-stream.service
+Wants=buscrawl-stream.service
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-active-trace-cache.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/trace-cache.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/trace-cache.log
+
+[Install]
+WantedBy=multi-user.target
