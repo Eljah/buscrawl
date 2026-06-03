@@ -1,0 +1,577 @@
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.FileVisitOption;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.max;
+import static org.apache.spark.sql.functions.window;
+
+public class BusDashboardCacheJob {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final Duration STATS_WINDOW = Duration.ofHours(24);
+    private static final Duration FILE_LOOKBACK_SLACK = Duration.ofMinutes(30);
+    private static final ZoneId CITY_ZONE = ZoneId.of(
+            System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow")
+    );
+    private static final DateTimeFormatter BUCKET_LABEL = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    public static void main(String[] args) throws Exception {
+        Path parquetDir = Path.of(System.getenv().getOrDefault("BUS_PARQUET_DIR", "./var/bus/bus-data-parquet"));
+        Path statsCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_CACHE_FILE",
+                "./var/bus/dashboard-cache/stats.json"
+        ));
+        Path routeMovementCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_ROUTE_CACHE_FILE",
+                "./var/bus/dashboard-cache/route-last-movement.json"
+        ));
+        Path stateFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_STATE_FILE",
+                statsCacheFile.resolveSibling("cache-state.json").toString()
+        ));
+        Path sparkLocalDir = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_SPARK_LOCAL_DIR",
+                "./var/bus/dashboard-spark-temp"
+        ));
+        String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
+
+        Files.createDirectories(statsCacheFile.getParent());
+        Files.createDirectories(routeMovementCacheFile.getParent());
+        Files.createDirectories(stateFile.getParent());
+        Files.createDirectories(sparkLocalDir);
+
+        if (!Files.exists(parquetDir)) {
+            writeJsonAtomic(statsCacheFile, emptyStatsPayload("Parquet directory not found: " + parquetDir));
+            writeJsonAtomic(routeMovementCacheFile, emptyRoutePayload("Parquet directory not found: " + parquetDir));
+            writeJsonAtomic(stateFile, emptyState());
+            return;
+        }
+
+        Instant now = Instant.now();
+        LocalDate today = now.atZone(CITY_ZONE).toLocalDate();
+        LocalDate yesterday = today.minusDays(1);
+        Instant statsStart = now.minus(STATS_WINDOW);
+        Instant previousDayStart = yesterday.atStartOfDay(CITY_ZONE).toInstant();
+        Instant nextDayStart = today.plusDays(1).atStartOfDay(CITY_ZONE).toInstant();
+        Instant fileCutoff = minInstant(statsStart, previousDayStart).minus(FILE_LOOKBACK_SLACK);
+
+        List<ParquetFileInfo> candidateFiles = listRecentParquetFiles(parquetDir, fileCutoff);
+        DashboardState state = loadState(stateFile, fileCutoff, statsCacheFile, routeMovementCacheFile);
+        List<ParquetFileInfo> newFiles = selectNewFiles(candidateFiles, state.lastProcessedModifiedAt);
+
+        Map<Instant, Long> statsBuckets = loadStatsBuckets(statsCacheFile, statsStart);
+        RouteCache routeCache = loadRouteCache(routeMovementCacheFile, today, yesterday);
+
+        System.out.printf(
+                "BusDashboardCacheJob: %d candidate parquet files, %d new files since %s%n",
+                candidateFiles.size(),
+                newFiles.size(),
+                fileCutoff
+        );
+
+        if (!newFiles.isEmpty()) {
+            SparkSession spark = SparkSession.builder()
+                    .appName("BusDashboardCacheJob")
+                    .master(sparkMaster)
+                    .config("spark.local.dir", sparkLocalDir.toAbsolutePath().toString())
+                    .config("spark.driver.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_DRIVER_MEMORY", "2g"))
+                    .config("spark.executor.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_EXECUTOR_MEMORY", "2g"))
+                    .getOrCreate();
+
+            spark.sparkContext().setLogLevel("WARN");
+
+            try {
+                Dataset<Row> newBusData = spark.read()
+                        .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
+                        .select("realRouteNumber", "eventTime", "speed")
+                        .filter(col("eventTime").isNotNull());
+
+                mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
+                mergeRouteCache(routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+            } finally {
+                spark.stop();
+            }
+        }
+
+        pruneStatsBuckets(statsBuckets, statsStart);
+
+        Map<String, Object> statsPayload = buildStatsPayload(statsBuckets, statsStart, now);
+        Map<String, Object> routePayload = buildRoutePayload(routeCache, today, yesterday);
+
+        state.updatedAt = now.atOffset(ZoneOffset.UTC).toString();
+        state.lastProcessedModifiedAt = candidateFiles.isEmpty()
+                ? state.lastProcessedModifiedAt
+                : candidateFiles.get(candidateFiles.size() - 1).modifiedAt;
+
+        writeJsonAtomic(statsCacheFile, statsPayload);
+        writeJsonAtomic(routeMovementCacheFile, routePayload);
+        writeJsonAtomic(stateFile, state);
+    }
+
+    private static void mergeStatsBuckets(Map<Instant, Long> statsBuckets, Dataset<Row> newBusData, Instant statsStart, Instant rangeEnd) {
+        Timestamp rangeStartTs = Timestamp.from(statsStart);
+        Timestamp rangeEndTs = Timestamp.from(rangeEnd);
+
+        List<Row> rows = newBusData
+                .filter(col("eventTime").geq(rangeStartTs).and(col("eventTime").leq(rangeEndTs)))
+                .withColumn("bucket_time", window(col("eventTime"), "5 minutes").getField("start"))
+                .groupBy("bucket_time")
+                .count()
+                .collectAsList();
+
+        for (Row row : rows) {
+            Timestamp bucketTime = row.getTimestamp(0);
+            long points = row.getLong(1);
+            statsBuckets.merge(bucketTime.toInstant(), points, Long::sum);
+        }
+    }
+
+    private static void mergeRouteCache(RouteCache routeCache, Dataset<Row> newBusData, Instant previousDayStart, Instant currentDayStart, Instant nextDayStart) {
+        Dataset<Row> movingData = newBusData
+                .filter(col("speed").gt(0))
+                .filter(col("eventTime").geq(Timestamp.from(previousDayStart))
+                        .and(col("eventTime").lt(Timestamp.from(nextDayStart))));
+
+        Map<String, Instant> currentDayMap = collectMaxEventTimeByRoute(
+                movingData.filter(col("eventTime").geq(Timestamp.from(currentDayStart)))
+        );
+        Map<String, Instant> previousDayMap = collectMaxEventTimeByRoute(
+                movingData.filter(col("eventTime").geq(Timestamp.from(previousDayStart))
+                        .and(col("eventTime").lt(Timestamp.from(currentDayStart))))
+        );
+
+        currentDayMap.forEach((routeNumber, instant) -> routeCache.currentDay.merge(routeNumber, instant, BusDashboardCacheJob::maxInstant));
+        previousDayMap.forEach((routeNumber, instant) -> routeCache.previousDay.merge(routeNumber, instant, BusDashboardCacheJob::maxInstant));
+    }
+
+    private static Map<String, Object> buildStatsPayload(Map<Instant, Long> statsBuckets, Instant rangeStart, Instant rangeEnd) {
+        List<Map<String, Object>> series = new ArrayList<>();
+        long totalPoints = 0;
+
+        for (Map.Entry<Instant, Long> entry : new TreeMap<>(statsBuckets).entrySet()) {
+            long points = entry.getValue();
+            totalPoints += points;
+
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("label", BUCKET_LABEL.format(entry.getKey().atZone(CITY_ZONE)));
+            item.put("points", points);
+            series.add(item);
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", Instant.now().atOffset(ZoneOffset.UTC).toString());
+        payload.put("status", series.isEmpty() ? "empty" : "ok");
+        if (series.isEmpty()) {
+            payload.put("message", "No points found in the last 24 hours");
+        }
+        payload.put("totalPoints", totalPoints);
+        payload.put("bucket", "5 minutes");
+        payload.put("downsampled", false);
+        payload.put("rangeStart", rangeStart.toString());
+        payload.put("rangeEnd", rangeEnd.toString());
+        payload.put("series", series);
+        return payload;
+    }
+
+    private static Map<String, Object> buildRoutePayload(RouteCache routeCache, LocalDate today, LocalDate yesterday) throws IOException {
+        List<String> routeNumbers = loadRouteNumbers();
+        LinkedHashSet<String> allRoutes = new LinkedHashSet<>(routeNumbers);
+        List<String> extraRoutes = new ArrayList<>();
+        extraRoutes.addAll(routeCache.currentDay.keySet());
+        extraRoutes.addAll(routeCache.previousDay.keySet());
+        extraRoutes.sort(Comparator.comparing(BusDashboardCacheJob::routeSortKey));
+        allRoutes.addAll(extraRoutes);
+
+        List<Map<String, Object>> routes = new ArrayList<>();
+        for (String routeNumber : allRoutes) {
+            Instant current = routeCache.currentDay.get(routeNumber);
+            Instant previous = routeCache.previousDay.get(routeNumber);
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("routeNumber", routeNumber);
+            row.put("currentDayLastMovement", current == null ? null : current.toString());
+            row.put("previousDayLastMovement", previous == null ? null : previous.toString());
+            row.put("displayLastMovement", current != null ? current.toString() : previous == null ? null : previous.toString());
+            row.put("sourceDay", current != null ? "current" : previous != null ? "previous" : "none");
+            routes.add(row);
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", Instant.now().atOffset(ZoneOffset.UTC).toString());
+        payload.put("status", "ok");
+        payload.put("today", today.toString());
+        payload.put("yesterday", yesterday.toString());
+        payload.put("routes", routes);
+        return payload;
+    }
+
+    private static Map<String, Instant> collectMaxEventTimeByRoute(Dataset<Row> dataset) {
+        Map<String, Instant> result = new LinkedHashMap<>();
+        List<Row> rows = dataset.groupBy("realRouteNumber")
+                .agg(max("eventTime").alias("last_movement"))
+                .collectAsList();
+
+        for (Row row : rows) {
+            String routeNumber = row.getString(0);
+            Timestamp lastMovement = row.getTimestamp(1);
+            if (routeNumber != null && lastMovement != null) {
+                result.put(routeNumber, lastMovement.toInstant());
+            }
+        }
+        return result;
+    }
+
+    private static Map<Instant, Long> loadStatsBuckets(Path statsCacheFile, Instant statsStart) throws IOException {
+        Map<Instant, Long> buckets = new TreeMap<>();
+        if (!Files.exists(statsCacheFile)) {
+            return buckets;
+        }
+
+        Map<String, Object> payload = readJsonMap(statsCacheFile);
+        Object seriesObject = payload.get("series");
+        if (!(seriesObject instanceof Collection<?>)) {
+            return buckets;
+        }
+
+        for (Object itemObject : (Collection<?>) seriesObject) {
+            if (!(itemObject instanceof Map<?, ?>)) {
+                continue;
+            }
+            Map<?, ?> item = (Map<?, ?>) itemObject;
+            Object labelObject = item.get("label");
+            Object pointsObject = item.get("points");
+            if (labelObject == null || pointsObject == null) {
+                continue;
+            }
+
+            Instant bucketStart = parseBucketLabel(String.valueOf(labelObject));
+            if (bucketStart == null || bucketStart.isBefore(statsStart)) {
+                continue;
+            }
+
+            buckets.put(bucketStart, ((Number) pointsObject).longValue());
+        }
+        return buckets;
+    }
+
+    private static RouteCache loadRouteCache(Path routeCacheFile, LocalDate today, LocalDate yesterday) throws IOException {
+        RouteCache routeCache = new RouteCache();
+        routeCache.today = today;
+        routeCache.yesterday = yesterday;
+
+        if (!Files.exists(routeCacheFile)) {
+            return routeCache;
+        }
+
+        Map<String, Object> payload = readJsonMap(routeCacheFile);
+        LocalDate cachedToday = parseLocalDate(payload.get("today"));
+        LocalDate cachedYesterday = parseLocalDate(payload.get("yesterday"));
+
+        Map<String, Instant> cachedCurrent = new LinkedHashMap<>();
+        Map<String, Instant> cachedPrevious = new LinkedHashMap<>();
+
+        Object routesObject = payload.get("routes");
+        if (routesObject instanceof Collection<?>) {
+            for (Object routeObject : (Collection<?>) routesObject) {
+                if (!(routeObject instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> route = (Map<?, ?>) routeObject;
+                Object routeNumberObject = route.get("routeNumber");
+                if (routeNumberObject == null) {
+                    continue;
+                }
+                String routeNumber = String.valueOf(routeNumberObject);
+                Instant current = parseInstant(route.get("currentDayLastMovement"));
+                Instant previous = parseInstant(route.get("previousDayLastMovement"));
+                if (current != null) {
+                    cachedCurrent.put(routeNumber, current);
+                }
+                if (previous != null) {
+                    cachedPrevious.put(routeNumber, previous);
+                }
+            }
+        }
+
+        if (today.equals(cachedToday) && yesterday.equals(cachedYesterday)) {
+            routeCache.currentDay.putAll(cachedCurrent);
+            routeCache.previousDay.putAll(cachedPrevious);
+            return routeCache;
+        }
+
+        if (yesterday.equals(cachedToday)) {
+            routeCache.previousDay.putAll(cachedCurrent);
+        }
+
+        return routeCache;
+    }
+
+    private static DashboardState loadState(
+            Path stateFile,
+            Instant fileCutoff,
+            Path statsCacheFile,
+            Path routeCacheFile
+    ) throws IOException {
+        DashboardState state;
+        if (Files.exists(stateFile)) {
+            state = MAPPER.readValue(stateFile.toFile(), DashboardState.class);
+        } else {
+            state = seedStateFromExistingCaches(statsCacheFile, routeCacheFile);
+        }
+        if (state.lastProcessedModifiedAt != null) {
+            Instant lastProcessed = parseInstant(state.lastProcessedModifiedAt);
+            if (lastProcessed != null && lastProcessed.isBefore(fileCutoff)) {
+                state.lastProcessedModifiedAt = fileCutoff.toString();
+            }
+        }
+
+        return state;
+    }
+
+    private static DashboardState seedStateFromExistingCaches(
+            Path statsCacheFile,
+            Path routeCacheFile
+    ) throws IOException {
+        DashboardState state = emptyState();
+        Instant cacheBaseline = latestExistingCacheInstant(statsCacheFile, routeCacheFile);
+        if (cacheBaseline == null) {
+            return state;
+        }
+
+        state.updatedAt = cacheBaseline.atOffset(ZoneOffset.UTC).toString();
+        state.lastProcessedModifiedAt = cacheBaseline.toString();
+        return state;
+    }
+
+    private static Instant latestExistingCacheInstant(Path statsCacheFile, Path routeCacheFile) throws IOException {
+        Instant latest = null;
+        if (Files.exists(statsCacheFile)) {
+            latest = Files.getLastModifiedTime(statsCacheFile).toInstant();
+        }
+        if (Files.exists(routeCacheFile)) {
+            Instant routeInstant = Files.getLastModifiedTime(routeCacheFile).toInstant();
+            latest = latest == null || routeInstant.isAfter(latest) ? routeInstant : latest;
+        }
+        return latest;
+    }
+
+    private static List<ParquetFileInfo> selectNewFiles(List<ParquetFileInfo> candidateFiles, String lastProcessedModifiedAtText) {
+        Instant lastProcessedModifiedAt = parseInstant(lastProcessedModifiedAtText);
+        List<ParquetFileInfo> newFiles = new ArrayList<>();
+        for (ParquetFileInfo file : candidateFiles) {
+            Instant fileModifiedAt = parseInstant(file.modifiedAt);
+            if (fileModifiedAt != null && (lastProcessedModifiedAt == null || fileModifiedAt.isAfter(lastProcessedModifiedAt))) {
+                newFiles.add(file);
+            }
+        }
+        return newFiles;
+    }
+
+    private static List<ParquetFileInfo> listRecentParquetFiles(Path parquetDir, Instant modifiedSince) throws IOException {
+        FileTime modifiedSinceTime = FileTime.from(modifiedSince);
+        try (Stream<Path> files = Files.walk(parquetDir, FileVisitOption.FOLLOW_LINKS)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".parquet"))
+                    .map(path -> toParquetFileInfo(path, modifiedSinceTime))
+                    .filter(file -> file != null)
+                    .sorted(Comparator.comparing((ParquetFileInfo file) -> parseInstant(file.modifiedAt)).thenComparing(file -> file.path))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    private static ParquetFileInfo toParquetFileInfo(Path path, FileTime modifiedSinceTime) {
+        try {
+            FileTime modifiedAt = Files.getLastModifiedTime(path);
+            if (Files.size(path) <= 4 || modifiedAt.compareTo(modifiedSinceTime) < 0) {
+                return null;
+            }
+            ParquetFileInfo file = new ParquetFileInfo();
+            file.path = path.toAbsolutePath().toString();
+            file.modifiedAt = modifiedAt.toInstant().toString();
+            return file;
+        } catch (IOException e) {
+            System.err.println("Skipping parquet file " + path + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static List<String> loadRouteNumbers() throws IOException {
+        List<String> routeNumbers = new ArrayList<>();
+        try (InputStream inputStream = BusDashboardCacheJob.class.getClassLoader().getResourceAsStream("routes.json")) {
+            if (inputStream == null) {
+                return routeNumbers;
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> root = MAPPER.readValue(inputStream, Map.class);
+            Object busSection = root.get("bus");
+            if (!(busSection instanceof Map)) {
+                return routeNumbers;
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> buses = (Map<String, Object>) busSection;
+            for (Object value : buses.values()) {
+                if (!(value instanceof List)) {
+                    continue;
+                }
+                List<?> busData = (List<?>) value;
+                if (busData.size() > 1 && busData.get(1) != null) {
+                    routeNumbers.add(String.valueOf(busData.get(1)));
+                }
+            }
+        }
+
+        routeNumbers.sort(Comparator.comparing(BusDashboardCacheJob::routeSortKey));
+        List<String> uniqueRoutes = new ArrayList<>();
+        String previous = null;
+        for (String routeNumber : routeNumbers) {
+            if (!routeNumber.equals(previous)) {
+                uniqueRoutes.add(routeNumber);
+                previous = routeNumber;
+            }
+        }
+        return uniqueRoutes;
+    }
+
+    private static void pruneStatsBuckets(Map<Instant, Long> statsBuckets, Instant statsStart) {
+        statsBuckets.entrySet().removeIf(entry -> entry.getKey().isBefore(statsStart));
+    }
+
+    private static Map<String, Object> emptyStatsPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", Instant.now().atOffset(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("totalPoints", 0);
+        payload.put("bucket", "5 minutes");
+        payload.put("downsampled", false);
+        payload.put("rangeStart", null);
+        payload.put("rangeEnd", null);
+        payload.put("series", List.of());
+        return payload;
+    }
+
+    private static Map<String, Object> emptyRoutePayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", Instant.now().atOffset(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("today", null);
+        payload.put("yesterday", null);
+        payload.put("routes", List.of());
+        return payload;
+    }
+
+    private static DashboardState emptyState() {
+        DashboardState state = new DashboardState();
+        state.updatedAt = Instant.now().atOffset(ZoneOffset.UTC).toString();
+        state.lastProcessedModifiedAt = null;
+        return state;
+    }
+
+    private static Instant parseBucketLabel(String label) {
+        try {
+            LocalDateTime localDateTime = LocalDateTime.parse(label, BUCKET_LABEL);
+            return localDateTime.atZone(CITY_ZONE).toInstant();
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    private static Instant parseInstant(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(String.valueOf(value));
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    private static LocalDate parseLocalDate(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(String.valueOf(value));
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    private static Map<String, Object> readJsonMap(Path path) throws IOException {
+        return MAPPER.readValue(path.toFile(), MAP_TYPE);
+    }
+
+    private static String routeSortKey(String routeNumber) {
+        String digits = routeNumber.replaceAll("[^0-9]", "");
+        String suffix = routeNumber.replaceAll("[0-9]", "");
+        String numberPart = digits.isEmpty() ? "9999" : String.format("%04d", Integer.parseInt(digits));
+        return numberPart + ":" + suffix + ":" + routeNumber;
+    }
+
+    private static Instant minInstant(Instant left, Instant right) {
+        return left.compareTo(right) <= 0 ? left : right;
+    }
+
+    private static Instant maxInstant(Instant left, Instant right) {
+        return left.compareTo(right) >= 0 ? left : right;
+    }
+
+    private static void writeJsonAtomic(Path targetFile, Object payload) throws IOException {
+        Files.createDirectories(targetFile.getParent());
+        Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
+        MAPPER.writeValue(tempFile.toFile(), payload);
+        Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    public static final class DashboardState {
+        public String updatedAt;
+        public String lastProcessedModifiedAt;
+    }
+
+    public static final class ParquetFileInfo {
+        public String path;
+        public String modifiedAt;
+    }
+
+    private static final class RouteCache {
+        private LocalDate today;
+        private LocalDate yesterday;
+        private final Map<String, Instant> currentDay = new LinkedHashMap<>();
+        private final Map<String, Instant> previousDay = new LinkedHashMap<>();
+    }
+}

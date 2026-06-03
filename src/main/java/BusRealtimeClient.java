@@ -9,25 +9,30 @@ import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BusRealtimeClient {
-    private static final SimpleDateFormat dateFormat =
+    private static final SimpleDateFormat DATE_FORMAT =
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+    private static final boolean VERBOSE_BUS_LOG =
+            Boolean.parseBoolean(System.getenv().getOrDefault("BUS_VERBOSE_LOG", "false"));
+    private static final Set<String> SUBSCRIBED_ROUTE_IDS = ConcurrentHashMap.newKeySet();
 
     public static void main(String[] args) throws Exception {
         String url = "https://ru.busti.me";
 
-        RouteMapper routeMapper = new RouteMapper("src/main/resources/routes.json");
-        BusDataTcpServer tcpServer = new BusDataTcpServer(9999);
+        RouteMapper routeMapper = new RouteMapper(System.getenv("ROUTES_JSON_PATH"));
+        int tcpPort = Integer.parseInt(System.getenv().getOrDefault("BUS_TCP_PORT", "9999"));
+        BusDataTcpServer tcpServer = new BusDataTcpServer(tcpPort);
 
-        // Запускаем TCP-сервер
         new Thread(() -> {
             try {
                 tcpServer.start();
             } catch (Exception e) {
                 e.printStackTrace();
             }
-        }).start();
+        }, "bus-data-tcp-server").start();
 
         OkHttpClient client = new OkHttpClient.Builder()
                 .addInterceptor(chain -> {
@@ -51,7 +56,8 @@ public class BusRealtimeClient {
         Socket socket = IO.socket(url, options);
 
         socket.on(Socket.EVENT_CONNECT, args1 -> {
-            System.out.println("✅ Connected successfully");
+            System.out.println("Connected successfully");
+            SUBSCRIBED_ROUTE_IDS.clear();
 
             send(socket, "2probe");
             send(socket, "3probe");
@@ -66,28 +72,30 @@ public class BusRealtimeClient {
             emit(socket, "join", "ru.bustime.taxi__10");
             emit(socket, "join", "ru.bustime.reload_soft__10");
 
-            JSONObject rpc_mode10 = new JSONObject()
+            JSONObject rpcMode10 = new JSONObject()
                     .put("bus_id", "960")
                     .put("mode", 10)
                     .put("mobile", 0);
-            emit(socket, "rpc_bdata", rpc_mode10);
+            emit(socket, "rpc_bdata", rpcMode10);
 
-            JSONObject rpc_mode11 = new JSONObject()
+            JSONObject rpcMode11 = new JSONObject()
                     .put("bus_id", "960")
                     .put("mode", 11)
                     .put("mobile", 0);
-            emit(socket, "rpc_bdata", rpc_mode11);
+            emit(socket, "rpc_bdata", rpcMode11);
         });
 
         socket.on("ru.bustime.bus_amounts__10", args1 -> {
             JSONObject data = (JSONObject) args1[0];
             JSONObject amounts = data.getJSONObject("busamounts");
 
-            System.out.println("📊 Bus amounts received: " + amounts);
+            System.out.println("Bus amounts received: " + amounts);
 
             for (String key : amounts.keySet()) {
                 String internalRouteId = key.split("_")[0];
-                subscribeRoute(socket, routeMapper, tcpServer, internalRouteId);
+                if (SUBSCRIBED_ROUTE_IDS.add(internalRouteId)) {
+                    subscribeRoute(socket, routeMapper, tcpServer, internalRouteId);
+                }
             }
         });
 
@@ -113,6 +121,7 @@ public class BusRealtimeClient {
                                       String internalRouteId, JSONObject busData) {
         JSONArray buses = busData.getJSONArray("l");
         String realRouteNumber = routeMapper.getRealRouteNumber(internalRouteId);
+        System.out.printf("Route update: %s (ID: %s), buses: %d%n", realRouteNumber, internalRouteId, buses.length());
 
         for (int i = 0; i < buses.length(); i++) {
             JSONObject bus = buses.getJSONObject(i);
@@ -121,7 +130,7 @@ public class BusRealtimeClient {
             int speed = bus.getInt("s");
             String plate = bus.getString("g");
             long timestampSec = bus.getLong("ts");
-            String readableTime = dateFormat.format(new Date(timestampSec * 1000));
+            String readableTime = DATE_FORMAT.format(new Date(timestampSec * 1000));
 
             JSONObject jsonBusData = new JSONObject()
                     .put("internalRouteId", internalRouteId)
@@ -133,27 +142,28 @@ public class BusRealtimeClient {
                     .put("timestamp", timestampSec)
                     .put("readableTime", readableTime);
 
-            // Отправляем данные в Spark через TCP
             tcpServer.sendData(jsonBusData.toString());
 
-            System.out.printf(
-                    "🚌 Маршрут: %s (ID: %s), автобус: %s%n" +
-                            "    📍 Координаты: [%.6f, %.6f]%n" +
-                            "    ⏰ Время обновления: %s%n" +
-                            "    🚀 Скорость: %d км/ч%n%n",
-                    realRouteNumber, internalRouteId, plate,
-                    latitude, longitude, readableTime, speed
-            );
+            if (VERBOSE_BUS_LOG) {
+                System.out.printf(
+                        "Bus route: %s (ID: %s), bus: %s%n" +
+                                "    Coordinates: [%.6f, %.6f]%n" +
+                                "    Updated at: %s%n" +
+                                "    Speed: %d km/h%n%n",
+                        realRouteNumber, internalRouteId, plate,
+                        latitude, longitude, readableTime, speed
+                );
+            }
         }
     }
 
     private static void emit(Socket socket, String event, Object payload) {
-        System.out.printf("📤 [CLIENT -> SERVER] Emit: %s, Payload: %s%n", event, payload);
+        System.out.printf("Emit: %s, Payload: %s%n", event, payload);
         socket.emit(event, payload);
     }
 
     private static void send(Socket socket, String message) {
-        System.out.printf("📤 [CLIENT -> SERVER] Send: %s%n", message);
+        System.out.printf("Send: %s%n", message);
         socket.send(message);
     }
 }

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Route Activity</title>
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --panel: #fffaf2;
+      --ink: #1d2a38;
+      --muted: #5e6b78;
+      --grid: #d7d1c7;
+      --ok: #1f7a5f;
+      --warn: #9f6b1a;
+      --empty: #8a4b4b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #f8d7b8 0, transparent 28%),
+        linear-gradient(180deg, #efe7db 0%, var(--bg) 100%);
+    }
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .hero {
+      display: grid;
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    .topline {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4.8vw, 52px);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+    }
+    a.back {
+      color: var(--ink);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(29, 42, 56, 0.25);
+    }
+    .subtitle {
+      margin: 0;
+      max-width: 860px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.45;
+    }
+    .card {
+      background: rgba(255, 250, 242, 0.96);
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 16px 40px rgba(29, 42, 56, 0.08);
+    }
+    .meta {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .table-wrap {
+      overflow: auto;
+      border-radius: 16px;
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      background: var(--panel);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #f7f0e6;
+      text-align: left;
+      font-size: 13px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    th, td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--grid);
+    }
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+    td.route {
+      font-size: 22px;
+      width: 120px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: white;
+    }
+    .badge-current { background: var(--ok); }
+    .badge-previous { background: var(--warn); }
+    .badge-none { background: var(--empty); }
+    .empty {
+      padding: 32px 20px;
+      text-align: center;
+      color: var(--muted);
+    }
+    @media (max-width: 640px) {
+      .wrap { padding-left: 14px; padding-right: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="topline">
+        <h1>Последнее движение по маршрутам</h1>
+        <a class="back" href="./">К основному дашборду</a>
+      </div>
+      <p class="subtitle">Для каждого маршрута показывается последнее наблюдение автобуса в движении. Сначала берутся текущие сутки, а если в них движения еще не было, выводится последнее время из предыдущих суток.</p>
+    </section>
+
+    <section class="card">
+      <div class="meta">
+        <div id="updatedAt">Обновление: ...</div>
+        <div id="dayMeta">Сутки: ...</div>
+        <div id="countMeta">Маршрутов: ...</div>
+      </div>
+      <div class="table-wrap" id="tableWrap">
+        <div class="empty">Загрузка данных...</div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+
+    function formatDate(value) {
+      if (!value) return 'нет данных';
+      return `${dateTimeFormatter.format(new Date(value))} МСК`;
+    }
+
+    function badge(sourceDay) {
+      if (sourceDay === 'current') {
+        return '<span class="badge badge-current">текущие сутки</span>';
+      }
+      if (sourceDay === 'previous') {
+        return '<span class="badge badge-previous">предыдущие сутки</span>';
+      }
+      return '<span class="badge badge-none">нет движения</span>';
+    }
+
+    function renderTable(routes) {
+      const tableWrap = document.getElementById('tableWrap');
+      if (!routes.length) {
+        tableWrap.innerHTML = '<div class="empty">Нет маршрутов для отображения.</div>';
+        return;
+      }
+
+      const rows = routes.map(route => `
+        <tr>
+          <td class="route">${route.routeNumber}</td>
+          <td>${formatDate(route.displayLastMovement)}</td>
+          <td>${badge(route.sourceDay)}</td>
+          <td>${formatDate(route.currentDayLastMovement)}</td>
+          <td>${formatDate(route.previousDayLastMovement)}</td>
+        </tr>
+      `).join('');
+
+      tableWrap.innerHTML = `
+        <table aria-label="Последнее движение автобусов по маршрутам">
+          <thead>
+            <tr>
+              <th>Маршрут</th>
+              <th>Показываемое время</th>
+              <th>Источник</th>
+              <th>Текущие сутки</th>
+              <th>Предыдущие сутки</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    async function load() {
+      const response = await fetch('./api/route-last-movement', { cache: 'no-store' });
+      const data = await response.json();
+      document.getElementById('updatedAt').textContent = `Обновление: ${formatDate(data.updatedAt)}`;
+
+      if (data.status === 'empty') {
+        document.getElementById('dayMeta').textContent = 'Сутки: нет данных';
+        document.getElementById('countMeta').textContent = 'Маршрутов: 0';
+        document.getElementById('tableWrap').innerHTML =
+          `<div class="empty">${data.message || 'Кэш последнего движения пока недоступен.'}</div>`;
+        return;
+      }
+
+      document.getElementById('dayMeta').textContent = `Сравниваются сутки: ${data.today} и ${data.yesterday}`;
+      document.getElementById('countMeta').textContent = `Маршрутов: ${(data.routes || []).length}`;
+      renderTable(data.routes || []);
+    }
+
+    load().catch(error => {
+      document.getElementById('tableWrap').innerHTML =
+        `<div class="empty">Не удалось загрузить кэш: ${error}</div>`;
+    });
+  </script>
+</body>
+</html>
