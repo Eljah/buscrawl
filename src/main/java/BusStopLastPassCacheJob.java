@@ -28,8 +28,17 @@ public class BusStopLastPassCacheJob {
                 "BUS_DASHBOARD_STOP_LAST_PASS_CACHE_FILE",
                 "./var/bus/dashboard-cache/stop-last-pass.json"
         ));
+        Path mapConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAP_CONFIG_FILE",
+                cacheFile.resolveSibling("map-config.json").toString()
+        ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TILE_ROOT",
+                cacheFile.resolveSibling("tiles").toString()
+        ));
 
         Files.createDirectories(cacheFile.getParent());
+        Files.createDirectories(tileRoot);
 
         Path dailyRouteDir = dataRoot.resolve("daily-route");
         Path dailyStopDir = dataRoot.resolve("daily-stop");
@@ -70,6 +79,7 @@ public class BusStopLastPassCacheJob {
             payload.put("stopsData", stops);
 
             writeJsonAtomic(cacheFile, payload);
+            DashboardOverlayTileRenderer.renderStopLastPassTiles(cacheFile, mapConfigFile, tileRoot);
         }
     }
 

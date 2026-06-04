@@ -98,14 +98,38 @@
       user-select: none;
     }
     .map-shell.dragging { cursor: grabbing; }
-    .tile-layer, .overlay-layer {
+    .map-zoom {
+      position: absolute;
+      right: 14px;
+      top: 14px;
+      z-index: 4;
+      display: grid;
+      gap: 8px;
+    }
+    .map-zoom button {
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(29, 42, 56, 0.16);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+      font: inherit;
+      font-size: 24px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 10px 24px rgba(29, 42, 56, 0.12);
+    }
+    .tile-layer, .overlay-tiles, .overlay-layer {
       position: absolute;
       inset: 0;
     }
-    .tile-layer img {
+    .tile-layer img, .overlay-tiles img {
       position: absolute;
       width: 256px;
       height: 256px;
+    }
+    .overlay-tiles {
+      pointer-events: none;
     }
     .overlay-layer {
       pointer-events: none;
@@ -205,7 +229,7 @@
           <a href="./routes-last-movement">К последнему движению по маршрутам</a>
         </div>
       </div>
-      <p class="subtitle">На карте показываются автобусы, по которым были точки за последние 10 минут. Для каждого автобуса выводятся последние 100 точек: самые новые ярче, более старые постепенно затухают.</p>
+      <p class="subtitle">Массовый слой автобусов теперь рисуется серверными PNG overlay-tiles поверх базовой подложки. В браузере остается только точечная подсветка выбранного автобуса.</p>
     </section>
 
     <section class="layout">
@@ -216,13 +240,18 @@
           <div id="countMeta">Автобусов: ...</div>
         </div>
         <div class="map-shell" id="map">
+          <div class="map-zoom">
+            <button type="button" id="zoomIn" aria-label="Приблизить">+</button>
+            <button type="button" id="zoomOut" aria-label="Отдалить">-</button>
+          </div>
           <div class="tile-layer" id="tiles"></div>
+          <div class="overlay-tiles" id="overlayTiles"></div>
           <svg class="overlay-layer" id="overlay"></svg>
           <div class="empty" id="emptyState">Загрузка карты и кеша автобусов...</div>
         </div>
         <div class="legend">
           <div>Серый фон и линии дорог/рельсов отрисованы из локальных PNG-тайлов.</div>
-          <div>Колесо мыши меняет масштаб, перетаскивание двигает карту.</div>
+          <div>Кнопки +/− меняют масштаб, перетаскивание двигает карту.</div>
         </div>
       </article>
 
@@ -249,6 +278,7 @@
 
     const mapEl = document.getElementById('map');
     const tilesEl = document.getElementById('tiles');
+    const overlayTilesEl = document.getElementById('overlayTiles');
     const overlayEl = document.getElementById('overlay');
     const emptyEl = document.getElementById('emptyState');
     const busListEl = document.getElementById('busList');
@@ -261,6 +291,7 @@
       zoom: null,
       selectedPlate: null,
       dragging: false,
+      dragMoved: false,
       dragStartX: 0,
       dragStartY: 0,
       dragStartCenterX: 0,
@@ -301,6 +332,11 @@
         .replace('{y}', String(y));
     }
 
+    function traceOverlayTileUrl(z, x, y) {
+      const version = encodeURIComponent(state.traces && state.traces.updatedAt ? state.traces.updatedAt : '');
+      return `./tiles/traces/current/${z}/${x}/${y}.png?v=${version}`;
+    }
+
     function hashHue(input) {
       let hash = 0;
       for (let i = 0; i < input.length; i++) {
@@ -337,7 +373,7 @@
       };
     }
 
-    function renderTiles() {
+    function renderTileLayer(target, urlFactory) {
       const zoom = state.zoom;
       const scale = Math.pow(2, zoom);
       const maxTile = scale - 1;
@@ -354,10 +390,18 @@
           const wrappedX = ((x % scale) + scale) % scale;
           const left = x * 256 - origin.left;
           const top = y * 256 - origin.top;
-          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
+          html += `<img src="${urlFactory(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
         }
       }
-      tilesEl.innerHTML = html;
+      target.innerHTML = html;
+    }
+
+    function renderTiles() {
+      renderTileLayer(tilesEl, tileUrl);
+    }
+
+    function renderOverlayTiles() {
+      renderTileLayer(overlayTilesEl, traceOverlayTileUrl);
     }
 
     function renderOverlay() {
@@ -373,40 +417,43 @@
       }
 
       emptyEl.style.display = 'none';
+      const selectedBus = state.selectedPlate
+        ? state.traces.buses.find(bus => bus.plate === state.selectedPlate)
+        : null;
+      if (!selectedBus || !selectedBus.points || !selectedBus.points.length) {
+        overlayEl.innerHTML = '';
+        return;
+      }
+
       const origin = getViewportOrigin();
+      const hue = hashHue((selectedBus.routeNumber || '') + ':' + selectedBus.plate);
+      const points = selectedBus.points || [];
       const parts = [];
 
-      for (const bus of state.traces.buses) {
-        const hue = hashHue((bus.routeNumber || '') + ':' + bus.plate);
-        const selected = state.selectedPlate === bus.plate;
-        const points = bus.points || [];
-        for (let i = 0; i < points.length; i++) {
-          const point = points[i];
-          const projected = project(point.latitude, point.longitude, state.zoom);
-          const x = projected.x - origin.left;
-          const y = projected.y - origin.top;
-          if (x < -8 || y < -8 || x > mapEl.clientWidth + 8 || y > mapEl.clientHeight + 8) continue;
+      for (let i = 0; i < points.length; i++) {
+        const point = points[i];
+        const projected = project(point.latitude, point.longitude, state.zoom);
+        const x = projected.x - origin.left;
+        const y = projected.y - origin.top;
+        if (x < -8 || y < -8 || x > mapEl.clientWidth + 8 || y > mapEl.clientHeight + 8) continue;
 
-          const fade = points.length <= 1 ? 1 : i / (points.length - 1);
-          const opacity = 0.03 + fade * 0.92;
-          const radius = 1.5 + fade * 3.4;
-          const stroke = selected && i === points.length - 1 ? 'rgba(255,255,255,0.95)' : 'none';
-          const strokeWidth = selected && i === points.length - 1 ? 1.6 : 0;
-          parts.push(
-            `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${radius.toFixed(2)}" fill="hsla(${hue}, 82%, 54%, ${opacity.toFixed(3)})" stroke="${stroke}" stroke-width="${strokeWidth}"></circle>`
-          );
-        }
-
-        if (selected && points.length) {
-          const latest = points[points.length - 1];
-          const projected = project(latest.latitude, latest.longitude, state.zoom);
-          const x = projected.x - origin.left;
-          const y = projected.y - origin.top;
-          parts.push(
-            `<text x="${(x + 10).toFixed(2)}" y="${(y - 10).toFixed(2)}" fill="white" font-size="13" font-family="Georgia, serif" paint-order="stroke" stroke="rgba(29,42,56,0.75)" stroke-width="3">${escapeHtml(`${bus.routeNumber || 'без маршрута'} · ${bus.plate}`)}</text>`
-          );
-        }
+        const fade = points.length <= 1 ? 1 : i / (points.length - 1);
+        const opacity = 0.18 + fade * 0.82;
+        const radius = 2.1 + fade * 3.8;
+        const stroke = i === points.length - 1 ? 'rgba(255,255,255,0.95)' : 'none';
+        const strokeWidth = i === points.length - 1 ? 1.8 : 0;
+        parts.push(
+          `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${radius.toFixed(2)}" fill="hsla(${hue}, 82%, 54%, ${opacity.toFixed(3)})" stroke="${stroke}" stroke-width="${strokeWidth}"></circle>`
+        );
       }
+
+      const latest = points[points.length - 1];
+      const projected = project(latest.latitude, latest.longitude, state.zoom);
+      const x = projected.x - origin.left;
+      const y = projected.y - origin.top;
+      parts.push(
+        `<text x="${(x + 10).toFixed(2)}" y="${(y - 10).toFixed(2)}" fill="white" font-size="13" font-family="Georgia, serif" paint-order="stroke" stroke="rgba(29,42,56,0.75)" stroke-width="3">${escapeHtml(`${selectedBus.routeNumber || 'без маршрута'} · ${selectedBus.plate}`)}</text>`
+      );
 
       overlayEl.innerHTML = parts.join('');
     }
@@ -452,6 +499,7 @@
       state.centerLat = bus.latestLatitude;
       state.centerLon = bus.latestLongitude;
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     }
 
@@ -484,6 +532,7 @@
       }
       refreshMeta();
       renderTiles();
+      renderOverlayTiles();
       renderBusList();
       renderOverlay();
     }
@@ -496,6 +545,7 @@
           state.selectedPlate = state.traces.buses[0].plate;
         }
         refreshMeta();
+        renderOverlayTiles();
         renderBusList();
         renderOverlay();
       } catch (error) {
@@ -516,34 +566,19 @@
       return escapeHtml(value).replaceAll("'", '&#39;');
     }
 
-    function onWheel(event) {
+    function adjustZoom(delta) {
       if (!state.config) return;
-      event.preventDefault();
-      const delta = event.deltaY < 0 ? 1 : -1;
       const newZoom = Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom + delta));
       if (newZoom === state.zoom) return;
-
-      const rect = mapEl.getBoundingClientRect();
-      const cursorX = event.clientX - rect.left;
-      const cursorY = event.clientY - rect.top;
-      const origin = getViewportOrigin();
-      const worldX = origin.left + cursorX;
-      const worldY = origin.top + cursorY;
-      const lon = worldToLon(worldX, state.zoom);
-      const lat = worldToLat(worldY, state.zoom);
-
       state.zoom = newZoom;
-      const newWorldX = lonToWorldX(lon, state.zoom);
-      const newWorldY = latToWorldY(lat, state.zoom);
-      state.centerLon = worldToLon(newWorldX - cursorX + mapEl.clientWidth / 2, state.zoom);
-      state.centerLat = worldToLat(newWorldY - cursorY + mapEl.clientHeight / 2, state.zoom);
-
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     }
 
     function onPointerDown(event) {
       state.dragging = true;
+      state.dragMoved = false;
       mapEl.classList.add('dragging');
       state.dragStartX = event.clientX;
       state.dragStartY = event.clientY;
@@ -554,6 +589,9 @@
 
     function onPointerMove(event) {
       if (!state.dragging) return;
+      if (Math.abs(event.clientX - state.dragStartX) > 3 || Math.abs(event.clientY - state.dragStartY) > 3) {
+        state.dragMoved = true;
+      }
       const dx = event.clientX - state.dragStartX;
       const dy = event.clientY - state.dragStartY;
       const centerX = state.dragStartCenterX - dx;
@@ -561,6 +599,7 @@
       state.centerLon = worldToLon(centerX, state.zoom);
       state.centerLat = worldToLat(centerY, state.zoom);
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     }
 
@@ -569,13 +608,15 @@
       mapEl.classList.remove('dragging');
     }
 
-    mapEl.addEventListener('wheel', onWheel, { passive: false });
+    document.getElementById('zoomIn').addEventListener('click', () => adjustZoom(1));
+    document.getElementById('zoomOut').addEventListener('click', () => adjustZoom(-1));
     mapEl.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('resize', () => {
       if (!state.config) return;
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     });
 

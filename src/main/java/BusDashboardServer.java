@@ -79,8 +79,8 @@ public class BusDashboardServer {
                 statsCacheFile.resolveSibling("map-config.json").toString()
         ));
         Path tileRoot = Path.of(System.getenv().getOrDefault(
-                "BUS_TILE_DIR",
-                statsCacheFile.resolveSibling("tiles/base").toString()
+                "BUS_TILE_ROOT",
+                statsCacheFile.resolveSibling("tiles").toString()
         ));
         int port = Integer.parseInt(System.getenv().getOrDefault("BUS_DASHBOARD_PORT", "8061"));
 
@@ -116,7 +116,7 @@ public class BusDashboardServer {
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
         server.createContext("/stop-last-pass", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedStopLastPassHtml.get()));
-        server.createContext("/tiles/base", this::handleTileRequest);
+        server.createContext("/tiles", this::handleTileRequest);
         server.createContext("/", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedIndexHtml.get()));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();

@@ -11,10 +11,6 @@
       --ink: #1d2a38;
       --muted: #5e6b78;
       --shadow: 0 16px 40px rgba(29, 42, 56, 0.1);
-      --line: #cc6234;
-      --line-dim: rgba(29, 42, 56, 0.16);
-      --point: #0d6b66;
-      --point-dim: rgba(13, 107, 102, 0.28);
     }
     * { box-sizing: border-box; }
     body {
@@ -139,14 +135,38 @@
       user-select: none;
     }
     .map-shell.dragging { cursor: grabbing; }
-    .tile-layer, .overlay-layer {
+    .map-zoom {
+      position: absolute;
+      right: 14px;
+      top: 14px;
+      z-index: 4;
+      display: grid;
+      gap: 8px;
+    }
+    .map-zoom button {
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(29, 42, 56, 0.16);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+      font: inherit;
+      font-size: 24px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 10px 24px rgba(29, 42, 56, 0.12);
+    }
+    .tile-layer, .overlay-tiles, .overlay-layer {
       position: absolute;
       inset: 0;
     }
-    .tile-layer img {
+    .tile-layer img, .overlay-tiles img {
       position: absolute;
       width: 256px;
       height: 256px;
+    }
+    .overlay-tiles {
+      pointer-events: none;
     }
     .overlay-layer {
       overflow: visible;
@@ -238,7 +258,7 @@
           <a href="./bus-traces-map">К карте активных автобусов</a>
         </div>
       </div>
-      <p class="subtitle">Слева карта, справа список. По умолчанию показаны маршруты и время их последнего прохода за прошедшие сутки. Можно переключаться между маршрутами и остановками, между прошедшими сутками, средним за все дни и средним по конкретному дню недели.</p>
+      <p class="subtitle">Массовый слой маршрутов и остановок рисуется backend overlay-tiles. При фильтрации или выборе конкретного объекта карта переключается на точечный SVG-слой только для нужного подмножества.</p>
     </section>
 
     <section class="layout">
@@ -271,7 +291,12 @@
           <div id="countMeta">Элементов: ...</div>
         </div>
         <div class="map-shell" id="map">
+          <div class="map-zoom">
+            <button type="button" id="zoomIn" aria-label="Приблизить">+</button>
+            <button type="button" id="zoomOut" aria-label="Отдалить">-</button>
+          </div>
           <div class="tile-layer" id="tiles"></div>
+          <div class="overlay-tiles" id="overlayTiles"></div>
           <svg class="overlay-layer" id="overlay"></svg>
           <div class="empty" id="emptyState">Загрузка карты и агрегатов...</div>
         </div>
@@ -298,9 +323,9 @@
       second: '2-digit'
     });
 
-    const weekdayShortFormatter = new Intl.DateTimeFormat('ru-RU', { weekday: 'short', timeZone: 'Europe/Moscow' });
     const mapEl = document.getElementById('map');
     const tilesEl = document.getElementById('tiles');
+    const overlayTilesEl = document.getElementById('overlayTiles');
     const overlayEl = document.getElementById('overlay');
     const emptyEl = document.getElementById('emptyState');
     const listEl = document.getElementById('list');
@@ -319,6 +344,7 @@
       filterText: '',
       selectedKey: null,
       dragging: false,
+      dragMoved: false,
       dragStartX: 0,
       dragStartY: 0,
       dragStartCenterX: 0,
@@ -359,6 +385,12 @@
         .replace('{y}', String(y));
     }
 
+    function stopOverlayTileUrl(z, x, y) {
+      const version = encodeURIComponent(state.payload && state.payload.updatedAt ? state.payload.updatedAt : '');
+      const periodSegment = state.periodMode === 'weekday' ? `weekday/${state.weekday}` : state.periodMode;
+      return `./tiles/stop-last-pass/${state.viewMode}/${periodSegment}/${z}/${x}/${y}.png?v=${version}`;
+    }
+
     function fitBounds() {
       const bounds = state.config.bounds;
       const width = mapEl.clientWidth || 900;
@@ -387,7 +419,7 @@
       };
     }
 
-    function renderTiles() {
+    function renderTileLayer(target, urlFactory) {
       const zoom = state.zoom;
       const scale = Math.pow(2, zoom);
       const maxTile = scale - 1;
@@ -404,33 +436,26 @@
           const wrappedX = ((x % scale) + scale) % scale;
           const left = x * 256 - origin.left;
           const top = y * 256 - origin.top;
-          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
+          html += `<img src="${urlFactory(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
         }
       }
-      tilesEl.innerHTML = html;
+      target.innerHTML = html;
     }
 
     function renderTiles() {
-      const zoom = state.zoom;
-      const scale = Math.pow(2, zoom);
-      const maxTile = scale - 1;
-      const origin = getViewportOrigin();
-      const minTileX = Math.floor(origin.left / 256);
-      const maxTileX = Math.floor((origin.left + mapEl.clientWidth) / 256);
-      const minTileY = Math.floor(origin.top / 256);
-      const maxTileY = Math.floor((origin.top + mapEl.clientHeight) / 256);
+      renderTileLayer(tilesEl, tileUrl);
+    }
 
-      let html = '';
-      for (let x = minTileX; x <= maxTileX; x++) {
-        for (let y = minTileY; y <= maxTileY; y++) {
-          if (y < 0 || y > maxTile) continue;
-          const wrappedX = ((x % scale) + scale) % scale;
-          const left = x * 256 - origin.left;
-          const top = y * 256 - origin.top;
-          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
-        }
+    function useTileOverlay() {
+      return !state.filterText.trim();
+    }
+
+    function renderOverlayTiles() {
+      if (!useTileOverlay() || !state.payload || state.payload.status !== 'ok') {
+        overlayTilesEl.innerHTML = '';
+        return;
       }
-      tilesEl.innerHTML = html;
+      renderTileLayer(overlayTilesEl, stopOverlayTileUrl);
     }
 
     function currentDataset() {
@@ -475,6 +500,14 @@
       return formatAverage(item);
     }
 
+    function findRouteShape(routeNumber) {
+      return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber);
+    }
+
+    function findStop(stopId) {
+      return (state.payload.stops || []).find(item => item.stopId === stopId);
+    }
+
     function renderOverlay() {
       overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
       overlayEl.setAttribute('width', mapEl.clientWidth);
@@ -492,36 +525,36 @@
 
       emptyEl.style.display = 'none';
       const origin = getViewportOrigin();
-      const visibleKeys = new Set(items.map(itemKey));
       const parts = [];
+      const queryActive = !useTileOverlay();
 
       if (state.viewMode === 'routes') {
-        for (const route of state.payload.routeShapes || []) {
-          if (!visibleKeys.has(route.routeNumber)) continue;
-          const active = state.selectedKey === route.routeNumber;
-          const stroke = active ? 'rgba(204,98,52,0.95)' : 'rgba(29,42,56,0.18)';
-          const strokeWidth = active ? 4.2 : 2.2;
-          const opacity = active ? 1 : 0.85;
+        const highlighted = queryActive
+          ? items
+          : state.selectedKey ? items.filter(item => item.routeNumber === state.selectedKey) : [];
+        for (const item of highlighted) {
+          const route = findRouteShape(item.routeNumber);
+          if (!route) continue;
           for (const path of route.paths || []) {
             const polyline = path.map(point => {
               const projected = project(point.latitude, point.longitude, state.zoom);
               return `${(projected.x - origin.left).toFixed(2)},${(projected.y - origin.top).toFixed(2)}`;
             }).join(' ');
             parts.push(
-              `<polyline class="route-shape" data-key="${escapeAttr(route.routeNumber)}" points="${polyline}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" style="pointer-events:auto; cursor:pointer"></polyline>`
+              `<polyline class="route-shape" data-key="${escapeAttr(item.routeNumber)}" points="${polyline}" fill="none" stroke="rgba(204,98,52,0.95)" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`
             );
           }
         }
       } else {
-        for (const stop of state.payload.stops || []) {
-          if (!visibleKeys.has(stop.stopId)) continue;
-          const projected = project(stop.latitude, stop.longitude, state.zoom);
+        const highlighted = queryActive
+          ? items
+          : state.selectedKey ? items.filter(item => item.stopId === state.selectedKey) : [];
+        for (const item of highlighted) {
+          const projected = project(item.latitude, item.longitude, state.zoom);
           const x = projected.x - origin.left;
           const y = projected.y - origin.top;
-          if (x < -8 || y < -8 || x > mapEl.clientWidth + 8 || y > mapEl.clientHeight + 8) continue;
-          const active = state.selectedKey === stop.stopId;
           parts.push(
-            `<circle class="stop-point" data-key="${escapeAttr(stop.stopId)}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${active ? 5.6 : 3.4}" fill="${active ? 'rgba(13,107,102,0.95)' : 'rgba(13,107,102,0.38)'}" stroke="${active ? 'rgba(255,255,255,0.92)' : 'none'}" stroke-width="1.3" style="pointer-events:auto; cursor:pointer"></circle>`
+            `<circle class="stop-point" data-key="${escapeAttr(item.stopId)}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="6.2" fill="rgba(13,107,102,0.95)" stroke="rgba(255,255,255,0.92)" stroke-width="1.5" style="pointer-events:auto; cursor:pointer"></circle>`
           );
         }
       }
@@ -531,15 +564,7 @@
         element.addEventListener('click', event => {
           event.stopPropagation();
           const key = element.dataset.key;
-          state.selectedKey = key;
-          if (state.viewMode === 'routes') {
-            state.filterText = key;
-          } else {
-            const stop = (state.payload.stops || []).find(item => item.stopId === key);
-            state.filterText = stop ? stop.stopName : key;
-          }
-          filterInput.value = state.filterText;
-          renderAll();
+          applyMapSelection(key);
         });
       });
     }
@@ -578,7 +603,9 @@
 
       listEl.querySelectorAll('.item').forEach(element => {
         element.addEventListener('click', () => {
-          state.selectedKey = element.dataset.key;
+          const key = element.dataset.key;
+          state.selectedKey = key;
+          centerOnSelection();
           renderAll();
         });
       });
@@ -594,8 +621,8 @@
       document.getElementById('sidebarTitle').textContent = state.viewMode === 'routes' ? 'Маршруты' : 'Остановки';
       document.getElementById('sidebarMeta').textContent =
         state.viewMode === 'routes'
-          ? 'Клик по линии маршрута или строке списка применяет фильтр по маршруту.'
-          : 'Клик по точке остановки или строке списка применяет фильтр по остановке.';
+          ? 'Клик по строке списка или по линии на карте фильтрует маршрут.'
+          : 'Клик по строке списка или по точке на карте фильтрует остановку.';
     }
 
     function selectedWeekdayLabel() {
@@ -606,6 +633,7 @@
     function renderAll() {
       renderMeta();
       renderTiles();
+      renderOverlayTiles();
       renderList();
       renderOverlay();
     }
@@ -629,34 +657,19 @@
       return escapeHtml(value).replaceAll("'", '&#39;');
     }
 
-    function onWheel(event) {
+    function adjustZoom(delta) {
       if (!state.config) return;
-      event.preventDefault();
-      const delta = event.deltaY < 0 ? 1 : -1;
       const newZoom = Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom + delta));
       if (newZoom === state.zoom) return;
-
-      const rect = mapEl.getBoundingClientRect();
-      const cursorX = event.clientX - rect.left;
-      const cursorY = event.clientY - rect.top;
-      const origin = getViewportOrigin();
-      const worldX = origin.left + cursorX;
-      const worldY = origin.top + cursorY;
-      const lon = worldToLon(worldX, state.zoom);
-      const lat = worldToLat(worldY, state.zoom);
-
       state.zoom = newZoom;
-      const newWorldX = lonToWorldX(lon, state.zoom);
-      const newWorldY = latToWorldY(lat, state.zoom);
-      state.centerLon = worldToLon(newWorldX - cursorX + mapEl.clientWidth / 2, state.zoom);
-      state.centerLat = worldToLat(newWorldY - cursorY + mapEl.clientHeight / 2, state.zoom);
-
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     }
 
     function onPointerDown(event) {
       state.dragging = true;
+      state.dragMoved = false;
       mapEl.classList.add('dragging');
       state.dragStartX = event.clientX;
       state.dragStartY = event.clientY;
@@ -667,6 +680,9 @@
 
     function onPointerMove(event) {
       if (!state.dragging) return;
+      if (Math.abs(event.clientX - state.dragStartX) > 3 || Math.abs(event.clientY - state.dragStartY) > 3) {
+        state.dragMoved = true;
+      }
       const dx = event.clientX - state.dragStartX;
       const dy = event.clientY - state.dragStartY;
       const centerX = state.dragStartCenterX - dx;
@@ -674,6 +690,7 @@
       state.centerLon = worldToLon(centerX, state.zoom);
       state.centerLat = worldToLat(centerY, state.zoom);
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     }
 
@@ -682,11 +699,118 @@
       mapEl.classList.remove('dragging');
     }
 
+    function pointToSegmentDistance(px, py, ax, ay, bx, by) {
+      const dx = bx - ax;
+      const dy = by - ay;
+      if (dx === 0 && dy === 0) {
+        return Math.hypot(px - ax, py - ay);
+      }
+      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
+      const cx = ax + t * dx;
+      const cy = ay + t * dy;
+      return Math.hypot(px - cx, py - cy);
+    }
+
+    function hitTestRoute(screenX, screenY) {
+      const visibleRoutes = new Set(currentDataset().map(item => item.routeNumber));
+      const origin = getViewportOrigin();
+      let best = null;
+      let bestDistance = 10;
+      for (const route of state.payload.routeShapes || []) {
+        if (!visibleRoutes.has(route.routeNumber)) continue;
+        for (const path of route.paths || []) {
+          for (let i = 1; i < path.length; i++) {
+            const a = project(path[i - 1].latitude, path[i - 1].longitude, state.zoom);
+            const b = project(path[i].latitude, path[i].longitude, state.zoom);
+            const distance = pointToSegmentDistance(
+              screenX,
+              screenY,
+              a.x - origin.left,
+              a.y - origin.top,
+              b.x - origin.left,
+              b.y - origin.top
+            );
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              best = route.routeNumber;
+            }
+          }
+        }
+      }
+      return best;
+    }
+
+    function hitTestStop(screenX, screenY) {
+      const visibleStops = new Set(currentDataset().map(item => item.stopId));
+      const origin = getViewportOrigin();
+      let best = null;
+      let bestDistance = 10;
+      for (const stop of state.payload.stops || []) {
+        if (!visibleStops.has(stop.stopId)) continue;
+        const projected = project(stop.latitude, stop.longitude, state.zoom);
+        const distance = Math.hypot(screenX - (projected.x - origin.left), screenY - (projected.y - origin.top));
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = stop.stopId;
+        }
+      }
+      return best;
+    }
+
+    function applyMapSelection(key) {
+      state.selectedKey = key;
+      if (state.viewMode === 'routes') {
+        state.filterText = key || '';
+      } else {
+        const stop = findStop(key);
+        state.filterText = stop ? stop.stopName : (key || '');
+      }
+      filterInput.value = state.filterText;
+      centerOnSelection();
+      renderAll();
+    }
+
+    function centerOnSelection() {
+      if (!state.selectedKey) return;
+      if (state.viewMode === 'routes') {
+        const route = findRouteShape(state.selectedKey);
+        if (!route || !route.paths || !route.paths.length || !route.paths[0].length) return;
+        const firstPoint = route.paths[0][0];
+        state.centerLat = firstPoint.latitude;
+        state.centerLon = firstPoint.longitude;
+      } else {
+        const stop = findStop(state.selectedKey);
+        if (!stop) return;
+        state.centerLat = stop.latitude;
+        state.centerLon = stop.longitude;
+      }
+    }
+
+    function onMapClick(event) {
+      if (!state.payload || state.payload.status !== 'ok' || state.dragMoved) {
+        return;
+      }
+      if (!useTileOverlay()) {
+        return;
+      }
+      const rect = mapEl.getBoundingClientRect();
+      const screenX = event.clientX - rect.left;
+      const screenY = event.clientY - rect.top;
+      const key = state.viewMode === 'routes'
+        ? hitTestRoute(screenX, screenY)
+        : hitTestStop(screenX, screenY);
+      if (key) {
+        applyMapSelection(key);
+      }
+    }
+
     function bindControls() {
       document.querySelectorAll('input[name="viewMode"]').forEach(input => {
         input.addEventListener('change', () => {
           state.viewMode = input.value;
           state.selectedKey = null;
+          state.filterText = '';
+          filterInput.value = '';
           renderAll();
         });
       });
@@ -695,6 +819,8 @@
           state.periodMode = input.value;
           weekdaySelect.style.display = state.periodMode === 'weekday' ? 'inline-block' : 'none';
           state.selectedKey = null;
+          state.filterText = '';
+          filterInput.value = '';
           renderAll();
         });
       });
@@ -708,6 +834,8 @@
         state.selectedKey = null;
         renderAll();
       });
+      document.getElementById('zoomIn').addEventListener('click', () => adjustZoom(1));
+      document.getElementById('zoomOut').addEventListener('click', () => adjustZoom(-1));
     }
 
     async function loadAll() {
@@ -723,27 +851,29 @@
         emptyEl.textContent = state.config.message || 'Конфигурация карты недоступна.';
         return;
       }
+
       if (state.centerLon == null || state.centerLat == null || state.zoom == null) {
         fitBounds();
       }
       populateWeekdays();
-      bindControls();
       renderAll();
     }
 
-    mapEl.addEventListener('wheel', onWheel, { passive: false });
+    bindControls();
     mapEl.addEventListener('pointerdown', onPointerDown);
+    mapEl.addEventListener('click', onMapClick);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('resize', () => {
       if (!state.config) return;
       renderTiles();
+      renderOverlayTiles();
       renderOverlay();
     });
 
     loadAll().catch(error => {
       emptyEl.style.display = 'grid';
-      emptyEl.textContent = `Не удалось загрузить агрегаты: ${error}`;
+      emptyEl.textContent = `Не удалось загрузить карту: ${error}`;
     });
   </script>
 </body>

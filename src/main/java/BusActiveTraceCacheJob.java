@@ -1,16 +1,15 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -24,6 +23,8 @@ import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.apache.spark.sql.functions.col;
+
 public class BusActiveTraceCacheJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Duration TRACE_WINDOW = Duration.ofMinutes(
@@ -35,6 +36,9 @@ public class BusActiveTraceCacheJob {
     private static final int MAX_POINTS_PER_BUS = Integer.parseInt(
             System.getenv().getOrDefault("BUS_TRACE_POINTS_LIMIT", "100")
     );
+    private static final Duration FILE_LOOKBACK_SLACK = Duration.ofMinutes(
+            Long.parseLong(System.getenv().getOrDefault("BUS_TRACE_FILE_LOOKBACK_MINUTES", "30"))
+    );
 
     public static void main(String[] args) throws Exception {
         Path parquetDir = Path.of(System.getenv().getOrDefault("BUS_PARQUET_DIR", "./var/bus/bus-data-parquet"));
@@ -42,68 +46,93 @@ public class BusActiveTraceCacheJob {
                 "BUS_DASHBOARD_TRACE_CACHE_FILE",
                 "./var/bus/dashboard-cache/bus-traces.json"
         ));
+        Path mapConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAP_CONFIG_FILE",
+                traceCacheFile.resolveSibling("map-config.json").toString()
+        ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TILE_ROOT",
+                traceCacheFile.resolveSibling("tiles").toString()
+        ));
 
         Files.createDirectories(traceCacheFile.getParent());
+        Files.createDirectories(tileRoot);
 
         if (!Files.isDirectory(parquetDir)) {
             writeJsonAtomic(traceCacheFile, emptyPayload("Parquet directory not found: " + parquetDir));
             return;
         }
 
-        Class.forName("org.duckdb.DuckDBDriver");
         RouteMapper routeMapper = new RouteMapper(null);
+        SparkSession spark = SparkSession.builder()
+                .appName("BusActiveTraceCacheJob")
+                .master(System.getenv().getOrDefault("BUS_TRACE_SPARK_MASTER", "local[2]"))
+                .config("spark.local.dir", System.getenv().getOrDefault("BUS_TRACE_SPARK_LOCAL_DIR", "./var/bus/trace-cache-spark-temp"))
+                .config("spark.driver.memory", System.getenv().getOrDefault("BUS_TRACE_SPARK_DRIVER_MEMORY", "2g"))
+                .config("spark.executor.memory", System.getenv().getOrDefault("BUS_TRACE_SPARK_EXECUTOR_MEMORY", "2g"))
+                .config("spark.driver.host", "127.0.0.1")
+                .config("spark.driver.bindAddress", "127.0.0.1")
+                .getOrCreate();
+        spark.sparkContext().setLogLevel("WARN");
 
-        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
+        try {
             while (true) {
                 Instant now = Instant.now();
                 TraceStore traceStore = new TraceStore(MAX_POINTS_PER_BUS, TRACE_WINDOW);
-                rebuildRecentTraceStore(connection, parquetDir, routeMapper, traceStore, now);
+                rebuildRecentTraceStore(spark, parquetDir, routeMapper, traceStore, now);
                 writeTracePayload(traceCacheFile, traceStore, now);
+                DashboardOverlayTileRenderer.renderTraceTiles(traceCacheFile, mapConfigFile, tileRoot);
                 TimeUnit.MILLISECONDS.sleep(WRITE_INTERVAL.toMillis());
             }
+        } finally {
+            spark.stop();
         }
     }
 
     private static void rebuildRecentTraceStore(
-            Connection connection,
+            SparkSession spark,
             Path parquetDir,
             RouteMapper routeMapper,
             TraceStore traceStore,
             Instant now
     ) throws Exception {
-        String parquetGlob = parquetDir.resolve("*.parquet").toString().replace("'", "''");
-        long cutoffEpochSec = now.minus(TRACE_WINDOW).getEpochSecond();
-        String sql = "SELECT plate, internalRouteId, realRouteNumber, latitude, longitude, eventTime " +
-                "FROM read_parquet('" + parquetGlob + "') " +
-                "WHERE eventTime IS NOT NULL " +
-                "  AND plate IS NOT NULL " +
-                "  AND latitude IS NOT NULL " +
-                "  AND longitude IS NOT NULL " +
-                "  AND epoch(eventTime) >= " + cutoffEpochSec + " " +
-                "ORDER BY plate ASC, eventTime ASC";
+        List<IncrementalParquetSupport.ParquetFileInfo> recentFiles = IncrementalParquetSupport.listRecentParquetFiles(
+                parquetDir,
+                now.minus(TRACE_WINDOW).minus(FILE_LOOKBACK_SLACK)
+        );
+        if (recentFiles.isEmpty()) {
+            return;
+        }
 
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            try (ResultSet resultSet = statement.executeQuery()) {
-                while (resultSet.next()) {
-                    String plate = trimToNull(resultSet.getString(1));
-                    String internalRouteId = trimToNull(resultSet.getString(2));
-                    String routeNumber = routeMapper.getDisplayRouteNumber(internalRouteId, trimToNull(resultSet.getString(3)));
-                    double latitude = resultSet.getDouble(4);
-                    double longitude = resultSet.getDouble(5);
-                    LocalDateTime eventTime = resultSet.getObject(6, LocalDateTime.class);
-                    if (plate == null || eventTime == null) {
-                        continue;
-                    }
-                    traceStore.addPoint(
-                            plate,
-                            routeNumber,
-                            latitude,
-                            longitude,
-                            eventTime.toInstant(ZoneOffset.UTC),
-                            eventTime.toInstant(ZoneOffset.UTC)
-                    );
-                }
+        Dataset<Row> rows = spark.read()
+                .parquet(recentFiles.stream().map(file -> file.path).toArray(String[]::new))
+                .select("plate", "internalRouteId", "realRouteNumber", "latitude", "longitude", "eventTime")
+                .filter(col("eventTime").isNotNull())
+                .filter(col("plate").isNotNull())
+                .filter(col("latitude").isNotNull())
+                .filter(col("longitude").isNotNull())
+                .filter(col("eventTime").geq(java.sql.Timestamp.from(now.minus(TRACE_WINDOW))))
+                .orderBy(col("plate").asc(), col("eventTime").asc());
+
+        for (Row row : rows.collectAsList()) {
+            String plate = trimToNull(row.getString(0));
+            String internalRouteId = trimToNull(row.getString(1));
+            String routeNumber = routeMapper.getDisplayRouteNumber(internalRouteId, trimToNull(row.getString(2)));
+            double latitude = row.getDouble(3);
+            double longitude = row.getDouble(4);
+            java.sql.Timestamp eventTime = row.getTimestamp(5);
+            if (plate == null || eventTime == null) {
+                continue;
             }
+            Instant eventInstant = eventTime.toInstant();
+            traceStore.addPoint(
+                    plate,
+                    routeNumber,
+                    latitude,
+                    longitude,
+                    eventInstant,
+                    eventInstant
+            );
         }
     }
 
