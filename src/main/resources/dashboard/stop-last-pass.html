@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Stop Last Pass</title>
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --panel: rgba(255, 250, 242, 0.95);
+      --ink: #1d2a38;
+      --muted: #5e6b78;
+      --shadow: 0 16px 40px rgba(29, 42, 56, 0.1);
+      --line: #cc6234;
+      --line-dim: rgba(29, 42, 56, 0.16);
+      --point: #0d6b66;
+      --point-dim: rgba(13, 107, 102, 0.28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #f8d7b8 0, transparent 28%),
+        linear-gradient(180deg, #efe7db 0%, var(--bg) 100%);
+    }
+    .wrap {
+      max-width: 1460px;
+      margin: 0 auto;
+      padding: 28px 18px 36px;
+    }
+    .hero {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .topline {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4.8vw, 52px);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+    }
+    .links {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .links a {
+      color: var(--ink);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(29, 42, 56, 0.25);
+      font-size: 15px;
+    }
+    .subtitle {
+      margin: 0;
+      max-width: 980px;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.45;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 16px;
+      align-items: start;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+    .map-card {
+      padding: 16px;
+    }
+    .controls {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .control-row {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .control-row strong {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .radio-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .radio-group label {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      cursor: pointer;
+    }
+    select, input[type="text"] {
+      border: 1px solid rgba(29, 42, 56, 0.16);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.88);
+      padding: 9px 12px;
+      font: inherit;
+      color: var(--ink);
+    }
+    .map-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .map-shell {
+      position: relative;
+      height: min(78vh, 920px);
+      min-height: 520px;
+      overflow: hidden;
+      border-radius: 18px;
+      background: #6d7277;
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      cursor: grab;
+      user-select: none;
+    }
+    .map-shell.dragging { cursor: grabbing; }
+    .tile-layer, .overlay-layer {
+      position: absolute;
+      inset: 0;
+    }
+    .tile-layer img {
+      position: absolute;
+      width: 256px;
+      height: 256px;
+    }
+    .overlay-layer {
+      overflow: visible;
+    }
+    .empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255,255,255,0.9);
+      text-align: center;
+      padding: 24px;
+      background: rgba(34, 39, 44, 0.22);
+      backdrop-filter: blur(2px);
+    }
+    .sidebar {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .sidebar h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+    .sidebar-meta {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .list {
+      display: grid;
+      gap: 8px;
+      max-height: calc(min(78vh, 920px) - 150px);
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .item {
+      border: 1px solid rgba(29, 42, 56, 0.08);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.56);
+      padding: 12px 13px;
+      cursor: pointer;
+    }
+    .item.active {
+      border-color: rgba(214, 113, 58, 0.65);
+      box-shadow: 0 0 0 2px rgba(214, 113, 58, 0.15);
+    }
+    .item:hover {
+      background: rgba(255,255,255,0.72);
+    }
+    .item-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .item-name {
+      font-size: 18px;
+    }
+    .item-time {
+      color: var(--muted);
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    .item-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 1120px) {
+      .layout { grid-template-columns: 1fr; }
+      .list { max-height: none; }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding-left: 12px; padding-right: 12px; }
+      .map-card, .sidebar { padding: 14px; }
+      .map-shell { min-height: 420px; height: 62vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="topline">
+        <h1>Последние проезды через остановки</h1>
+        <div class="links">
+          <a href="./">К основному дашборду</a>
+          <a href="./routes-last-movement">К последнему движению по маршрутам</a>
+          <a href="./bus-traces-map">К карте активных автобусов</a>
+        </div>
+      </div>
+      <p class="subtitle">Слева карта, справа список. По умолчанию показаны маршруты и время их последнего прохода за прошедшие сутки. Можно переключаться между маршрутами и остановками, между прошедшими сутками, средним за все дни и средним по конкретному дню недели.</p>
+    </section>
+
+    <section class="layout">
+      <article class="card map-card">
+        <div class="controls">
+          <div class="control-row">
+            <strong>Режим</strong>
+            <div class="radio-group">
+              <label><input type="radio" name="viewMode" value="routes" checked> Маршруты</label>
+              <label><input type="radio" name="viewMode" value="stops"> Остановки</label>
+            </div>
+          </div>
+          <div class="control-row">
+            <strong>Период</strong>
+            <div class="radio-group">
+              <label><input type="radio" name="periodMode" value="previous" checked> Прошедшие сутки</label>
+              <label><input type="radio" name="periodMode" value="all"> Среднее за все дни</label>
+              <label><input type="radio" name="periodMode" value="weekday"> Среднее по дню недели</label>
+            </div>
+            <select id="weekdaySelect" style="display:none"></select>
+          </div>
+          <div class="control-row">
+            <strong>Фильтр</strong>
+            <input type="text" id="filterInput" placeholder="Номер маршрута или название остановки">
+          </div>
+        </div>
+        <div class="map-meta">
+          <div id="updatedAt">Обновление: ...</div>
+          <div id="modeMeta">Режим: ...</div>
+          <div id="countMeta">Элементов: ...</div>
+        </div>
+        <div class="map-shell" id="map">
+          <div class="tile-layer" id="tiles"></div>
+          <svg class="overlay-layer" id="overlay"></svg>
+          <div class="empty" id="emptyState">Загрузка карты и агрегатов...</div>
+        </div>
+      </article>
+
+      <aside class="card sidebar">
+        <h2 id="sidebarTitle">Маршруты</h2>
+        <div class="sidebar-meta" id="sidebarMeta">Загрузка...</div>
+        <div class="list" id="list">
+          <div class="item-note">Загрузка...</div>
+        </div>
+      </aside>
+    </section>
+  </div>
+
+  <script>
+    const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+
+    const weekdayShortFormatter = new Intl.DateTimeFormat('ru-RU', { weekday: 'short', timeZone: 'Europe/Moscow' });
+    const mapEl = document.getElementById('map');
+    const tilesEl = document.getElementById('tiles');
+    const overlayEl = document.getElementById('overlay');
+    const emptyEl = document.getElementById('emptyState');
+    const listEl = document.getElementById('list');
+    const filterInput = document.getElementById('filterInput');
+    const weekdaySelect = document.getElementById('weekdaySelect');
+
+    const state = {
+      config: null,
+      payload: null,
+      centerLon: null,
+      centerLat: null,
+      zoom: null,
+      viewMode: 'routes',
+      periodMode: 'previous',
+      weekday: '1',
+      filterText: '',
+      selectedKey: null,
+      dragging: false,
+      dragStartX: 0,
+      dragStartY: 0,
+      dragStartCenterX: 0,
+      dragStartCenterY: 0
+    };
+
+    function formatDate(value) {
+      if (!value) return 'нет данных';
+      return `${dateTimeFormatter.format(new Date(value))} МСК`;
+    }
+
+    function lonToWorldX(lon, zoom) {
+      return ((lon + 180) / 360) * 256 * Math.pow(2, zoom);
+    }
+
+    function latToWorldY(lat, zoom) {
+      const sin = Math.sin(lat * Math.PI / 180);
+      return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, zoom);
+    }
+
+    function worldToLon(x, zoom) {
+      return x / (256 * Math.pow(2, zoom)) * 360 - 180;
+    }
+
+    function worldToLat(y, zoom) {
+      const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, zoom));
+      return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+    }
+
+    function project(lat, lon, zoom) {
+      return { x: lonToWorldX(lon, zoom), y: latToWorldY(lat, zoom) };
+    }
+
+    function tileUrl(z, x, y) {
+      return state.config.tileUrlTemplate
+        .replace('{z}', String(z))
+        .replace('{x}', String(x))
+        .replace('{y}', String(y));
+    }
+
+    function fitBounds() {
+      const bounds = state.config.bounds;
+      const width = mapEl.clientWidth || 900;
+      const height = mapEl.clientHeight || 600;
+      let chosenZoom = state.config.initialZoom;
+      for (let zoom = state.config.maxZoom; zoom >= state.config.minZoom; zoom--) {
+        const west = project(bounds.south, bounds.west, zoom).x;
+        const east = project(bounds.south, bounds.east, zoom).x;
+        const north = project(bounds.north, bounds.west, zoom).y;
+        const south = project(bounds.south, bounds.west, zoom).y;
+        if ((east - west) <= width * 0.88 && (south - north) <= height * 0.88) {
+          chosenZoom = zoom;
+          break;
+        }
+      }
+      state.zoom = chosenZoom;
+      state.centerLon = state.config.center.longitude;
+      state.centerLat = state.config.center.latitude;
+    }
+
+    function getViewportOrigin() {
+      const center = project(state.centerLat, state.centerLon, state.zoom);
+      return {
+        left: center.x - mapEl.clientWidth / 2,
+        top: center.y - mapEl.clientHeight / 2
+      };
+    }
+
+    function renderTiles() {
+      const zoom = state.zoom;
+      const scale = Math.pow(2, zoom);
+      const maxTile = scale - 1;
+      const origin = getViewportOrigin();
+      const minTileX = Math.floor(origin.left / 256);
+      const maxTileX = Math.floor((origin.left + mapEl.clientWidth) / 256);
+      const minTileY = Math.floor(origin.top / 256);
+      const maxTileY = Math.floor((origin.top + mapEl.clientHeight) / 256);
+
+      let html = '';
+      for (let x = minTileX; x <= maxTileX; x++) {
+        for (let y = minTileY; y <= maxTileY; y++) {
+          if (y < 0 || y > maxTile) continue;
+          const wrappedX = ((x % scale) + scale) % scale;
+          const left = x * 256 - origin.left;
+          const top = y * 256 - origin.top;
+          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
+        }
+      }
+      tilesEl.innerHTML = html;
+    }
+
+    function renderTiles() {
+      const zoom = state.zoom;
+      const scale = Math.pow(2, zoom);
+      const maxTile = scale - 1;
+      const origin = getViewportOrigin();
+      const minTileX = Math.floor(origin.left / 256);
+      const maxTileX = Math.floor((origin.left + mapEl.clientWidth) / 256);
+      const minTileY = Math.floor(origin.top / 256);
+      const maxTileY = Math.floor((origin.top + mapEl.clientHeight) / 256);
+
+      let html = '';
+      for (let x = minTileX; x <= maxTileX; x++) {
+        for (let y = minTileY; y <= maxTileY; y++) {
+          if (y < 0 || y > maxTile) continue;
+          const wrappedX = ((x % scale) + scale) % scale;
+          const left = x * 256 - origin.left;
+          const top = y * 256 - origin.top;
+          html += `<img src="${tileUrl(zoom, wrappedX, y)}" style="left:${left}px; top:${top}px" alt="">`;
+        }
+      }
+      tilesEl.innerHTML = html;
+    }
+
+    function currentDataset() {
+      if (!state.payload) return [];
+      const branch = state.viewMode === 'routes' ? state.payload.routes : state.payload.stopsData;
+      if (!branch) return [];
+      if (state.periodMode === 'previous') return branch.previousDay || [];
+      if (state.periodMode === 'all') return branch.allDaysAverage || [];
+      return (branch.weekdayAverage && branch.weekdayAverage[state.weekday]) || [];
+    }
+
+    function normalize(value) {
+      return String(value || '').toLowerCase();
+    }
+
+    function itemKey(item) {
+      return state.viewMode === 'routes' ? item.routeNumber : item.stopId;
+    }
+
+    function itemFilterValue(item) {
+      if (state.viewMode === 'routes') {
+        return normalize(item.routeNumber);
+      }
+      return `${normalize(item.stopName)} ${normalize(item.lastRouteNumber)} ${normalize(item.averageLastPassTime)}`;
+    }
+
+    function filteredItems() {
+      const query = normalize(state.filterText).trim();
+      const items = currentDataset();
+      if (!query) return items;
+      return items.filter(item => itemFilterValue(item).includes(query));
+    }
+
+    function formatAverage(item) {
+      return item.averageLastPassTime ? `${item.averageLastPassTime} МСК` : 'нет данных';
+    }
+
+    function formatItemTime(item) {
+      if (state.periodMode === 'previous') {
+        return formatDate(item.lastPassAt);
+      }
+      return formatAverage(item);
+    }
+
+    function renderOverlay() {
+      overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+      overlayEl.setAttribute('width', mapEl.clientWidth);
+      overlayEl.setAttribute('height', mapEl.clientHeight);
+
+      const items = filteredItems();
+      if (!items.length) {
+        overlayEl.innerHTML = '';
+        emptyEl.style.display = 'grid';
+        emptyEl.textContent = state.payload && state.payload.status === 'empty'
+          ? (state.payload.message || 'Нет данных.')
+          : 'Нет элементов для выбранного режима и фильтра.';
+        return;
+      }
+
+      emptyEl.style.display = 'none';
+      const origin = getViewportOrigin();
+      const visibleKeys = new Set(items.map(itemKey));
+      const parts = [];
+
+      if (state.viewMode === 'routes') {
+        for (const route of state.payload.routeShapes || []) {
+          if (!visibleKeys.has(route.routeNumber)) continue;
+          const active = state.selectedKey === route.routeNumber;
+          const stroke = active ? 'rgba(204,98,52,0.95)' : 'rgba(29,42,56,0.18)';
+          const strokeWidth = active ? 4.2 : 2.2;
+          const opacity = active ? 1 : 0.85;
+          for (const path of route.paths || []) {
+            const polyline = path.map(point => {
+              const projected = project(point.latitude, point.longitude, state.zoom);
+              return `${(projected.x - origin.left).toFixed(2)},${(projected.y - origin.top).toFixed(2)}`;
+            }).join(' ');
+            parts.push(
+              `<polyline class="route-shape" data-key="${escapeAttr(route.routeNumber)}" points="${polyline}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" style="pointer-events:auto; cursor:pointer"></polyline>`
+            );
+          }
+        }
+      } else {
+        for (const stop of state.payload.stops || []) {
+          if (!visibleKeys.has(stop.stopId)) continue;
+          const projected = project(stop.latitude, stop.longitude, state.zoom);
+          const x = projected.x - origin.left;
+          const y = projected.y - origin.top;
+          if (x < -8 || y < -8 || x > mapEl.clientWidth + 8 || y > mapEl.clientHeight + 8) continue;
+          const active = state.selectedKey === stop.stopId;
+          parts.push(
+            `<circle class="stop-point" data-key="${escapeAttr(stop.stopId)}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${active ? 5.6 : 3.4}" fill="${active ? 'rgba(13,107,102,0.95)' : 'rgba(13,107,102,0.38)'}" stroke="${active ? 'rgba(255,255,255,0.92)' : 'none'}" stroke-width="1.3" style="pointer-events:auto; cursor:pointer"></circle>`
+          );
+        }
+      }
+
+      overlayEl.innerHTML = parts.join('');
+      overlayEl.querySelectorAll('.route-shape,.stop-point').forEach(element => {
+        element.addEventListener('click', event => {
+          event.stopPropagation();
+          const key = element.dataset.key;
+          state.selectedKey = key;
+          if (state.viewMode === 'routes') {
+            state.filterText = key;
+          } else {
+            const stop = (state.payload.stops || []).find(item => item.stopId === key);
+            state.filterText = stop ? stop.stopName : key;
+          }
+          filterInput.value = state.filterText;
+          renderAll();
+        });
+      });
+    }
+
+    function renderList() {
+      const items = filteredItems();
+      if (!items.length) {
+        listEl.innerHTML = '<div class="item-note">Нет элементов для выбранного режима.</div>';
+        return;
+      }
+
+      listEl.innerHTML = items.map(item => {
+        const key = itemKey(item);
+        const active = state.selectedKey === key ? ' active' : '';
+        if (state.viewMode === 'routes') {
+          return `
+            <div class="item${active}" data-key="${escapeAttr(key)}">
+              <div class="item-title">
+                <div class="item-name">${escapeHtml(item.routeNumber)}</div>
+                <div class="item-time">${escapeHtml(formatItemTime(item))}</div>
+              </div>
+              <div class="item-note">${state.periodMode === 'previous' ? `Последний проход за ${escapeHtml(state.payload.yesterday)}` : `Дней в агрегате: ${item.sampleDays}`}</div>
+            </div>
+          `;
+        }
+        return `
+          <div class="item${active}" data-key="${escapeAttr(key)}">
+            <div class="item-title">
+              <div class="item-name">${escapeHtml(item.stopName)}</div>
+              <div class="item-time">${escapeHtml(formatItemTime(item))}</div>
+            </div>
+            <div class="item-note">${state.periodMode === 'previous' ? `Последний маршрут: ${escapeHtml(item.lastRouteNumber || 'нет данных')}` : `Дней в агрегате: ${item.sampleDays}`}</div>
+          </div>
+        `;
+      }).join('');
+
+      listEl.querySelectorAll('.item').forEach(element => {
+        element.addEventListener('click', () => {
+          state.selectedKey = element.dataset.key;
+          renderAll();
+        });
+      });
+    }
+
+    function renderMeta() {
+      const items = filteredItems();
+      document.getElementById('updatedAt').textContent = `Обновление: ${formatDate(state.payload.updatedAt)}`;
+      document.getElementById('modeMeta').textContent =
+        `Режим: ${state.viewMode === 'routes' ? 'маршруты' : 'остановки'}, ` +
+        `${state.periodMode === 'previous' ? `прошедшие сутки (${state.payload.yesterday})` : state.periodMode === 'all' ? 'среднее за все дни' : `среднее по ${selectedWeekdayLabel()}`}`;
+      document.getElementById('countMeta').textContent = `Элементов: ${items.length}`;
+      document.getElementById('sidebarTitle').textContent = state.viewMode === 'routes' ? 'Маршруты' : 'Остановки';
+      document.getElementById('sidebarMeta').textContent =
+        state.viewMode === 'routes'
+          ? 'Клик по линии маршрута или строке списка применяет фильтр по маршруту.'
+          : 'Клик по точке остановки или строке списка применяет фильтр по остановке.';
+    }
+
+    function selectedWeekdayLabel() {
+      const option = weekdaySelect.options[weekdaySelect.selectedIndex];
+      return option ? option.textContent : 'дню недели';
+    }
+
+    function renderAll() {
+      renderMeta();
+      renderTiles();
+      renderList();
+      renderOverlay();
+    }
+
+    function populateWeekdays() {
+      weekdaySelect.innerHTML = (state.payload.weekdays || []).map(item =>
+        `<option value="${item.id}">${escapeHtml(item.label)}</option>`
+      ).join('');
+      weekdaySelect.value = state.weekday;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replaceAll("'", '&#39;');
+    }
+
+    function onWheel(event) {
+      if (!state.config) return;
+      event.preventDefault();
+      const delta = event.deltaY < 0 ? 1 : -1;
+      const newZoom = Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom + delta));
+      if (newZoom === state.zoom) return;
+
+      const rect = mapEl.getBoundingClientRect();
+      const cursorX = event.clientX - rect.left;
+      const cursorY = event.clientY - rect.top;
+      const origin = getViewportOrigin();
+      const worldX = origin.left + cursorX;
+      const worldY = origin.top + cursorY;
+      const lon = worldToLon(worldX, state.zoom);
+      const lat = worldToLat(worldY, state.zoom);
+
+      state.zoom = newZoom;
+      const newWorldX = lonToWorldX(lon, state.zoom);
+      const newWorldY = latToWorldY(lat, state.zoom);
+      state.centerLon = worldToLon(newWorldX - cursorX + mapEl.clientWidth / 2, state.zoom);
+      state.centerLat = worldToLat(newWorldY - cursorY + mapEl.clientHeight / 2, state.zoom);
+
+      renderTiles();
+      renderOverlay();
+    }
+
+    function onPointerDown(event) {
+      state.dragging = true;
+      mapEl.classList.add('dragging');
+      state.dragStartX = event.clientX;
+      state.dragStartY = event.clientY;
+      const center = project(state.centerLat, state.centerLon, state.zoom);
+      state.dragStartCenterX = center.x;
+      state.dragStartCenterY = center.y;
+    }
+
+    function onPointerMove(event) {
+      if (!state.dragging) return;
+      const dx = event.clientX - state.dragStartX;
+      const dy = event.clientY - state.dragStartY;
+      const centerX = state.dragStartCenterX - dx;
+      const centerY = state.dragStartCenterY - dy;
+      state.centerLon = worldToLon(centerX, state.zoom);
+      state.centerLat = worldToLat(centerY, state.zoom);
+      renderTiles();
+      renderOverlay();
+    }
+
+    function onPointerUp() {
+      state.dragging = false;
+      mapEl.classList.remove('dragging');
+    }
+
+    function bindControls() {
+      document.querySelectorAll('input[name="viewMode"]').forEach(input => {
+        input.addEventListener('change', () => {
+          state.viewMode = input.value;
+          state.selectedKey = null;
+          renderAll();
+        });
+      });
+      document.querySelectorAll('input[name="periodMode"]').forEach(input => {
+        input.addEventListener('change', () => {
+          state.periodMode = input.value;
+          weekdaySelect.style.display = state.periodMode === 'weekday' ? 'inline-block' : 'none';
+          state.selectedKey = null;
+          renderAll();
+        });
+      });
+      weekdaySelect.addEventListener('change', () => {
+        state.weekday = weekdaySelect.value;
+        state.selectedKey = null;
+        renderAll();
+      });
+      filterInput.addEventListener('input', () => {
+        state.filterText = filterInput.value;
+        state.selectedKey = null;
+        renderAll();
+      });
+    }
+
+    async function loadAll() {
+      const [configResponse, payloadResponse] = await Promise.all([
+        fetch('./api/map-config', { cache: 'no-store' }),
+        fetch('./api/stop-last-pass', { cache: 'no-store' })
+      ]);
+      state.config = await configResponse.json();
+      state.payload = await payloadResponse.json();
+
+      if (state.config.status !== 'ok') {
+        emptyEl.style.display = 'grid';
+        emptyEl.textContent = state.config.message || 'Конфигурация карты недоступна.';
+        return;
+      }
+      if (state.centerLon == null || state.centerLat == null || state.zoom == null) {
+        fitBounds();
+      }
+      populateWeekdays();
+      bindControls();
+      renderAll();
+    }
+
+    mapEl.addEventListener('wheel', onWheel, { passive: false });
+    mapEl.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('resize', () => {
+      if (!state.config) return;
+      renderTiles();
+      renderOverlay();
+    });
+
+    loadAll().catch(error => {
+      emptyEl.style.display = 'grid';
+      emptyEl.textContent = `Не удалось загрузить агрегаты: ${error}`;
+    });
+  </script>
+</body>
+</html>

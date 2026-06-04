@@ -51,12 +51,13 @@ public class BusActiveTraceCacheJob {
         }
 
         Class.forName("org.duckdb.DuckDBDriver");
+        RouteMapper routeMapper = new RouteMapper(null);
 
         try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
             while (true) {
                 Instant now = Instant.now();
                 TraceStore traceStore = new TraceStore(MAX_POINTS_PER_BUS, TRACE_WINDOW);
-                rebuildRecentTraceStore(connection, parquetDir, traceStore, now);
+                rebuildRecentTraceStore(connection, parquetDir, routeMapper, traceStore, now);
                 writeTracePayload(traceCacheFile, traceStore, now);
                 TimeUnit.MILLISECONDS.sleep(WRITE_INTERVAL.toMillis());
             }
@@ -66,12 +67,13 @@ public class BusActiveTraceCacheJob {
     private static void rebuildRecentTraceStore(
             Connection connection,
             Path parquetDir,
+            RouteMapper routeMapper,
             TraceStore traceStore,
             Instant now
     ) throws Exception {
         String parquetGlob = parquetDir.resolve("*.parquet").toString().replace("'", "''");
         long cutoffEpochSec = now.minus(TRACE_WINDOW).getEpochSecond();
-        String sql = "SELECT plate, realRouteNumber, latitude, longitude, eventTime " +
+        String sql = "SELECT plate, internalRouteId, realRouteNumber, latitude, longitude, eventTime " +
                 "FROM read_parquet('" + parquetGlob + "') " +
                 "WHERE eventTime IS NOT NULL " +
                 "  AND plate IS NOT NULL " +
@@ -84,10 +86,11 @@ public class BusActiveTraceCacheJob {
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     String plate = trimToNull(resultSet.getString(1));
-                    String routeNumber = trimToNull(resultSet.getString(2));
-                    double latitude = resultSet.getDouble(3);
-                    double longitude = resultSet.getDouble(4);
-                    LocalDateTime eventTime = resultSet.getObject(5, LocalDateTime.class);
+                    String internalRouteId = trimToNull(resultSet.getString(2));
+                    String routeNumber = routeMapper.getDisplayRouteNumber(internalRouteId, trimToNull(resultSet.getString(3)));
+                    double latitude = resultSet.getDouble(4);
+                    double longitude = resultSet.getDouble(5);
+                    LocalDateTime eventTime = resultSet.getObject(6, LocalDateTime.class);
                     if (plate == null || eventTime == null) {
                         continue;
                     }

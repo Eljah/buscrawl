@@ -92,6 +92,7 @@ public class BusDashboardCacheJob {
 
         Map<Instant, Long> statsBuckets = loadStatsBuckets(statsCacheFile, statsStart);
         RouteCache routeCache = loadRouteCache(routeMovementCacheFile, today, yesterday);
+        RouteMapper routeMapper = new RouteMapper(null);
 
         System.out.printf(
                 "BusDashboardCacheJob: %d candidate parquet files, %d new files since %s%n",
@@ -114,11 +115,11 @@ public class BusDashboardCacheJob {
             try {
                 Dataset<Row> newBusData = spark.read()
                         .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
-                        .select("realRouteNumber", "eventTime", "speed")
+                        .select("internalRouteId", "realRouteNumber", "eventTime", "speed")
                         .filter(col("eventTime").isNotNull());
 
                 mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
-                mergeRouteCache(routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+                mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
             } finally {
                 spark.stop();
             }
@@ -127,7 +128,7 @@ public class BusDashboardCacheJob {
         pruneStatsBuckets(statsBuckets, statsStart);
 
         Map<String, Object> statsPayload = buildStatsPayload(statsBuckets, statsStart, now);
-        Map<String, Object> routePayload = buildRoutePayload(routeCache, today, yesterday);
+        Map<String, Object> routePayload = buildRoutePayload(routeMapper, routeCache, today, yesterday);
 
         state.updatedAt = now.atOffset(ZoneOffset.UTC).toString();
         state.lastProcessedModifiedAt = candidateFiles.isEmpty()
@@ -157,16 +158,18 @@ public class BusDashboardCacheJob {
         }
     }
 
-    private static void mergeRouteCache(RouteCache routeCache, Dataset<Row> newBusData, Instant previousDayStart, Instant currentDayStart, Instant nextDayStart) {
+    private static void mergeRouteCache(RouteMapper routeMapper, RouteCache routeCache, Dataset<Row> newBusData, Instant previousDayStart, Instant currentDayStart, Instant nextDayStart) {
         Dataset<Row> movingData = newBusData
                 .filter(col("speed").gt(0))
                 .filter(col("eventTime").geq(Timestamp.from(previousDayStart))
                         .and(col("eventTime").lt(Timestamp.from(nextDayStart))));
 
         Map<String, Instant> currentDayMap = collectMaxEventTimeByRoute(
+                routeMapper,
                 movingData.filter(col("eventTime").geq(Timestamp.from(currentDayStart)))
         );
         Map<String, Instant> previousDayMap = collectMaxEventTimeByRoute(
+                routeMapper,
                 movingData.filter(col("eventTime").geq(Timestamp.from(previousDayStart))
                         .and(col("eventTime").lt(Timestamp.from(currentDayStart))))
         );
@@ -204,8 +207,8 @@ public class BusDashboardCacheJob {
         return payload;
     }
 
-    private static Map<String, Object> buildRoutePayload(RouteCache routeCache, LocalDate today, LocalDate yesterday) throws IOException {
-        List<String> routeNumbers = loadRouteNumbers();
+    private static Map<String, Object> buildRoutePayload(RouteMapper routeMapper, RouteCache routeCache, LocalDate today, LocalDate yesterday) {
+        List<String> routeNumbers = routeMapper.getAllDisplayRouteNumbers();
         LinkedHashSet<String> allRoutes = new LinkedHashSet<>(routeNumbers);
         List<String> extraRoutes = new ArrayList<>();
         extraRoutes.addAll(routeCache.currentDay.keySet());
@@ -236,17 +239,19 @@ public class BusDashboardCacheJob {
         return payload;
     }
 
-    private static Map<String, Instant> collectMaxEventTimeByRoute(Dataset<Row> dataset) {
+    private static Map<String, Instant> collectMaxEventTimeByRoute(RouteMapper routeMapper, Dataset<Row> dataset) {
         Map<String, Instant> result = new LinkedHashMap<>();
-        List<Row> rows = dataset.groupBy("realRouteNumber")
+        List<Row> rows = dataset.groupBy("internalRouteId", "realRouteNumber")
                 .agg(max("eventTime").alias("last_movement"))
                 .collectAsList();
 
         for (Row row : rows) {
-            String routeNumber = row.getString(0);
-            Timestamp lastMovement = row.getTimestamp(1);
+            String internalRouteId = row.getString(0);
+            String storedRouteNumber = row.getString(1);
+            Timestamp lastMovement = row.getTimestamp(2);
+            String routeNumber = routeMapper.getDisplayRouteNumber(internalRouteId, storedRouteNumber);
             if (routeNumber != null && lastMovement != null) {
-                result.put(routeNumber, lastMovement.toInstant());
+                result.merge(routeNumber, lastMovement.toInstant(), BusDashboardCacheJob::maxInstant);
             }
         }
         return result;
@@ -454,45 +459,6 @@ public class BusDashboardCacheJob {
                 && bytes[1] == 'A'
                 && bytes[2] == 'R'
                 && bytes[3] == '1';
-    }
-
-    private static List<String> loadRouteNumbers() throws IOException {
-        List<String> routeNumbers = new ArrayList<>();
-        try (InputStream inputStream = BusDashboardCacheJob.class.getClassLoader().getResourceAsStream("routes.json")) {
-            if (inputStream == null) {
-                return routeNumbers;
-            }
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> root = MAPPER.readValue(inputStream, Map.class);
-            Object busSection = root.get("bus");
-            if (!(busSection instanceof Map)) {
-                return routeNumbers;
-            }
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> buses = (Map<String, Object>) busSection;
-            for (Object value : buses.values()) {
-                if (!(value instanceof List)) {
-                    continue;
-                }
-                List<?> busData = (List<?>) value;
-                if (busData.size() > 1 && busData.get(1) != null) {
-                    routeNumbers.add(String.valueOf(busData.get(1)));
-                }
-            }
-        }
-
-        routeNumbers.sort(Comparator.comparing(BusDashboardCacheJob::routeSortKey));
-        List<String> uniqueRoutes = new ArrayList<>();
-        String previous = null;
-        for (String routeNumber : routeNumbers) {
-            if (!routeNumber.equals(previous)) {
-                uniqueRoutes.add(routeNumber);
-                previous = routeNumber;
-            }
-        }
-        return uniqueRoutes;
     }
 
     private static void pruneStatsBuckets(Map<Instant, Long> statsBuckets, Instant statsStart) {
