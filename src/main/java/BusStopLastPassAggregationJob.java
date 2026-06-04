@@ -11,7 +11,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.apache.spark.sql.functions.avg;
@@ -52,9 +56,14 @@ public class BusStopLastPassAggregationJob {
         Path sparkLocalDir = Path.of(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_SPARK_LOCAL_DIR", "./var/bus/stop-last-pass-spark-temp"));
         String sparkMaster = System.getenv().getOrDefault("BUS_STOP_LAST_PASS_SPARK_MASTER", "local[2]");
         String cityTimezone = System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow");
+        ZoneId cityZone = ZoneId.of(cityTimezone);
+        LocalDate today = LocalDate.now(cityZone);
         double stopRadiusMeters = Double.parseDouble(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_RADIUS_METERS", "50"));
         int visitGapSeconds = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_VISIT_MAX_GAP_SECONDS", "180"));
         int outputPartitions = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_OUTPUT_PARTITIONS", "32"));
+        int initialLookbackDays = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_INITIAL_LOOKBACK_DAYS", "3"));
+        String bootstrapStrategy = System.getenv().getOrDefault("BUS_STOP_LAST_PASS_BOOTSTRAP_MODE", "full-history");
+        int maxFilesPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN", "512"));
 
         Files.createDirectories(outputRoot);
         Files.createDirectories(sparkLocalDir);
@@ -65,22 +74,43 @@ public class BusStopLastPassAggregationJob {
         }
 
         AggregationState state = loadState(stateFile);
-        Instant modifiedSince = state.lastProcessedModifiedAt == null
-                ? Instant.EPOCH
-                : IncrementalParquetSupport.parseInstant(state.lastProcessedModifiedAt);
+        Instant modifiedSince;
+        if (state.lastProcessedModifiedAt == null) {
+            modifiedSince = "recent-window".equalsIgnoreCase(bootstrapStrategy)
+                    ? Instant.now().minus(Duration.ofDays(initialLookbackDays))
+                    : Instant.EPOCH;
+        } else {
+            modifiedSince = IncrementalParquetSupport.parseInstant(state.lastProcessedModifiedAt);
+        }
         if (modifiedSince == null) {
-            modifiedSince = Instant.EPOCH;
+            modifiedSince = Instant.now().minus(Duration.ofDays(initialLookbackDays));
         }
 
         List<IncrementalParquetSupport.ParquetFileInfo> candidateFiles =
                 IncrementalParquetSupport.listRecentParquetFiles(parquetDir, modifiedSince);
-        List<IncrementalParquetSupport.ParquetFileInfo> newFiles =
+        List<IncrementalParquetSupport.ParquetFileInfo> selectedNewFiles =
                 IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath);
+        boolean bootstrapMode = state.lastProcessedModifiedAt == null;
+        int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, maxFilesPerRun));
+        List<IncrementalParquetSupport.ParquetFileInfo> newFiles;
+        if (bootstrapMode) {
+            newFiles = new ArrayList<>(selectedNewFiles.subList(0, cappedSize));
+        } else {
+            newFiles = new ArrayList<>(selectedNewFiles.subList(0, cappedSize));
+        }
 
         if (newFiles.isEmpty()) {
             System.out.println("BusStopLastPassAggregationJob: no new parquet files to process");
             return;
         }
+
+        System.out.printf(
+                "BusStopLastPassAggregationJob: processing %d files out of %d available since %s (bootstrapMode=%s)%n",
+                newFiles.size(),
+                selectedNewFiles.size(),
+                modifiedSince,
+                bootstrapMode ? bootstrapStrategy : "incremental"
+        );
 
         Path stopVisitsDir = outputRoot.resolve(STOP_VISITS_DIR);
         Path dailyRouteStopDir = outputRoot.resolve(DAILY_ROUTE_STOP_DIR);
@@ -248,9 +278,15 @@ public class BusStopLastPassAggregationJob {
             overwriteAffectedPartitions(dailyRoute, dailyRouteDir, outputPartitions, "serviceDate");
             overwriteAffectedPartitions(dailyStop, dailyStopDir, outputPartitions, "serviceDate");
 
-            Dataset<Row> fullDailyRouteStop = spark.read().parquet(dailyRouteStopDir.toAbsolutePath().toString());
-            Dataset<Row> fullDailyRoute = spark.read().parquet(dailyRouteDir.toAbsolutePath().toString());
-            Dataset<Row> fullDailyStop = spark.read().parquet(dailyStopDir.toAbsolutePath().toString());
+            Dataset<Row> fullDailyRouteStop = spark.read()
+                    .parquet(dailyRouteStopDir.toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyRoute = spark.read()
+                    .parquet(dailyRouteDir.toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyStop = spark.read()
+                    .parquet(dailyStopDir.toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
 
             Dataset<Row> summaryRouteStopAll = fullDailyRouteStop.groupBy(
                             col("routeNumber"),
