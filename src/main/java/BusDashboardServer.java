@@ -273,11 +273,16 @@ public class BusDashboardServer {
         payload.put("yesterday", null);
         payload.put("weekdays", List.of());
         payload.put("segmentShapes", List.of());
-        payload.put("segments", Map.of(
+        payload.put("routeShapes", List.of());
+        Map<String, Object> emptySection = Map.of(
                 "previousDay", List.of(),
                 "allDays", List.of(),
                 "weekday", Map.of()
-        ));
+        );
+        payload.put("segmentData", emptySection);
+        payload.put("segmentRouteData", emptySection);
+        payload.put("segmentVehicleData", emptySection);
+        payload.put("vehicleData", emptySection);
         return payload;
     }
 
@@ -291,14 +296,16 @@ public class BusDashboardServer {
         payload.put("weekdays", List.of());
         payload.put("routeShapes", List.of());
         payload.put("stops", List.of());
+        payload.put("terminalPolicies", List.of());
         Map<String, Object> emptySection = Map.of(
                 "previousDay", List.of(),
                 "allDays", List.of(),
                 "weekday", Map.of()
         );
-        payload.put("stopsData", emptySection);
-        payload.put("routesData", emptySection);
-        payload.put("vehiclesData", emptySection);
+        payload.put("stopData", emptySection);
+        payload.put("stopRouteData", emptySection);
+        payload.put("routeData", emptySection);
+        payload.put("vehicleData", emptySection);
         return payload;
     }
 

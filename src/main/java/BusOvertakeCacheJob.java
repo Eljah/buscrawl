@@ -34,10 +34,8 @@ public class BusOvertakeCacheJob {
 
         Files.createDirectories(cacheFile.getParent());
 
-        Path dailyDir = dataRoot.resolve("daily-overtake-segment");
-        Path summaryAllDir = dataRoot.resolve("summary-overtake-all-days");
-        Path summaryWeekdayDir = dataRoot.resolve("summary-overtake-by-weekday");
-        if (!Files.exists(dailyDir)) {
+        Path dailySegmentDir = dataRoot.resolve("daily-overtake-segment");
+        if (!Files.exists(dailySegmentDir)) {
             writeJsonAtomic(cacheFile, emptyPayload("Overtake parquet datasets not found under " + dataRoot));
             return;
         }
@@ -54,92 +52,98 @@ public class BusOvertakeCacheJob {
             payload.put("yesterday", yesterday.toString());
             payload.put("weekdays", buildWeekdays());
             payload.put("segmentShapes", topology.buildSegmentShapes());
+            payload.put("routeShapes", topology.buildRouteShapes());
 
-            Map<String, Object> segments = new LinkedHashMap<>();
-            segments.put("previousDay", loadPreviousDay(connection, parquetGlob(dailyDir), yesterday));
-            segments.put("allDays", loadSummary(connection, parquetGlob(summaryAllDir), null));
-            segments.put("weekday", loadSummaryByWeekday(connection, parquetGlob(summaryWeekdayDir)));
-            payload.put("segments", segments);
+            payload.put("segmentData", buildSection(
+                    connection,
+                    dataRoot.resolve("daily-overtake-segment"),
+                    dataRoot.resolve("summary-overtake-all-days"),
+                    dataRoot.resolve("summary-overtake-by-weekday"),
+                    yesterday,
+                    OvertakeMode.SEGMENT
+            ));
+            payload.put("segmentRouteData", buildSection(
+                    connection,
+                    dataRoot.resolve("daily-overtake-segment-route"),
+                    dataRoot.resolve("summary-overtake-segment-route-all-days"),
+                    dataRoot.resolve("summary-overtake-segment-route-by-weekday"),
+                    yesterday,
+                    OvertakeMode.SEGMENT_ROUTE
+            ));
+            payload.put("segmentVehicleData", buildSection(
+                    connection,
+                    dataRoot.resolve("daily-overtake-segment-vehicle"),
+                    dataRoot.resolve("summary-overtake-segment-vehicle-all-days"),
+                    dataRoot.resolve("summary-overtake-segment-vehicle-by-weekday"),
+                    yesterday,
+                    OvertakeMode.SEGMENT_VEHICLE
+            ));
+            payload.put("vehicleData", buildSection(
+                    connection,
+                    dataRoot.resolve("daily-overtake-vehicle"),
+                    dataRoot.resolve("summary-overtake-vehicle-all-days"),
+                    dataRoot.resolve("summary-overtake-vehicle-by-weekday"),
+                    yesterday,
+                    OvertakeMode.VEHICLE
+            ));
 
             writeJsonAtomic(cacheFile, payload);
         }
     }
 
-    private static List<Map<String, Object>> loadPreviousDay(Connection connection, String parquetGlob, LocalDate serviceDate) throws Exception {
-        String sql = "SELECT segmentId, routeNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, " +
-                "endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, overtakeCount, latestOvertakeAt, " +
-                "averageOvertakerDurationSeconds, averageOvertakenDurationSeconds " +
-                "FROM read_parquet(?) WHERE CAST(serviceDate AS VARCHAR) = ? " +
-                "ORDER BY overtakeCount DESC, latestOvertakeAt DESC, routeNumber ASC";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, parquetGlob);
-            statement.setString(2, serviceDate.toString());
-            try (ResultSet rs = statement.executeQuery()) {
-                List<Map<String, Object>> rows = new ArrayList<>();
-                while (rs.next()) {
-                    rows.add(readOvertakeRow(rs, false));
-                }
-                return rows;
-            }
+    private static Map<String, Object> buildSection(
+            Connection connection,
+            Path dailyDir,
+            Path summaryAllDir,
+            Path summaryWeekdayDir,
+            LocalDate yesterday,
+            OvertakeMode mode
+    ) throws Exception {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("previousDay", loadRows(connection, parquetGlob(dailyDir), mode, yesterday, null));
+        section.put("allDays", loadRows(connection, parquetGlob(summaryAllDir), mode, null, null));
+        Map<String, List<Map<String, Object>>> weekday = new LinkedHashMap<>();
+        for (int weekdayIso = 1; weekdayIso <= 7; weekdayIso++) {
+            weekday.put(String.valueOf(weekdayIso), loadRows(connection, parquetGlob(summaryWeekdayDir), mode, null, weekdayIso));
         }
+        section.put("weekday", weekday);
+        return section;
     }
 
-    private static List<Map<String, Object>> loadSummary(Connection connection, String parquetGlob, Integer weekdayIso) throws Exception {
-        String sql = "SELECT segmentId, routeNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, " +
-                "endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, totalOvertakes, sampleDays, " +
-                "averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt " +
-                "FROM read_parquet(?) " +
-                (weekdayIso == null ? "" : "WHERE weekdayIso = ? ") +
-                "ORDER BY totalOvertakes DESC, averageDailyOvertakes DESC, routeNumber ASC";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+    private static List<Map<String, Object>> loadRows(
+            Connection connection,
+            String parquetGlob,
+            OvertakeMode mode,
+            LocalDate serviceDate,
+            Integer weekdayIso
+    ) throws Exception {
+        boolean summary = serviceDate == null;
+        StringBuilder sql = new StringBuilder("SELECT ");
+        sql.append(mode.selectColumns(summary));
+        sql.append(" FROM read_parquet(?) ");
+        if (serviceDate != null) {
+            sql.append("WHERE CAST(serviceDate AS VARCHAR) = ? ");
+        } else if (weekdayIso != null) {
+            sql.append("WHERE weekdayIso = ? ");
+        }
+        sql.append("ORDER BY ");
+        sql.append(summary ? "totalOvertakes DESC, averageDailyOvertakes DESC" : "overtakeCount DESC, latestOvertakeAt DESC");
+
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
             statement.setString(1, parquetGlob);
-            if (weekdayIso != null) {
+            if (serviceDate != null) {
+                statement.setString(2, serviceDate.toString());
+            } else if (weekdayIso != null) {
                 statement.setInt(2, weekdayIso);
             }
             try (ResultSet rs = statement.executeQuery()) {
                 List<Map<String, Object>> rows = new ArrayList<>();
                 while (rs.next()) {
-                    rows.add(readOvertakeRow(rs, true));
+                    rows.add(mode.readRow(rs, summary));
                 }
                 return rows;
             }
         }
-    }
-
-    private static Map<String, List<Map<String, Object>>> loadSummaryByWeekday(Connection connection, String parquetGlob) throws Exception {
-        Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
-        for (int weekday = 1; weekday <= 7; weekday++) {
-            result.put(String.valueOf(weekday), loadSummary(connection, parquetGlob, weekday));
-        }
-        return result;
-    }
-
-    private static Map<String, Object> readOvertakeRow(ResultSet rs, boolean summary) throws Exception {
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("segmentId", rs.getString(1));
-        row.put("routeNumber", rs.getString(2));
-        row.put("startStopId", rs.getString(3));
-        row.put("startStopName", rs.getString(4));
-        row.put("startStopLatitude", rs.getDouble(5));
-        row.put("startStopLongitude", rs.getDouble(6));
-        row.put("endStopId", rs.getString(7));
-        row.put("endStopName", rs.getString(8));
-        row.put("endStopLatitude", rs.getDouble(9));
-        row.put("endStopLongitude", rs.getDouble(10));
-        row.put("distanceMeters", rs.getDouble(11));
-        if (summary) {
-            row.put("totalOvertakes", rs.getLong(12));
-            row.put("sampleDays", rs.getLong(13));
-            row.put("averageDailyOvertakes", rs.getDouble(14));
-            row.put("maxDailyOvertakes", rs.getLong(15));
-            row.put("latestOvertakeAt", toIsoString(rs.getObject(16)));
-        } else {
-            row.put("overtakeCount", rs.getLong(12));
-            row.put("latestOvertakeAt", toIsoString(rs.getObject(13)));
-            row.put("averageOvertakerDurationSeconds", rs.getInt(14));
-            row.put("averageOvertakenDurationSeconds", rs.getInt(15));
-        }
-        return row;
     }
 
     private static List<Map<String, Object>> buildWeekdays() {
@@ -176,11 +180,16 @@ public class BusOvertakeCacheJob {
         payload.put("yesterday", LocalDate.now(CITY_ZONE).minusDays(1).toString());
         payload.put("weekdays", buildWeekdays());
         payload.put("segmentShapes", List.of());
-        payload.put("segments", Map.of(
+        payload.put("routeShapes", List.of());
+        Map<String, Object> emptySection = Map.of(
                 "previousDay", List.of(),
                 "allDays", List.of(),
                 "weekday", Map.of()
-        ));
+        );
+        payload.put("segmentData", emptySection);
+        payload.put("segmentRouteData", emptySection);
+        payload.put("segmentVehicleData", emptySection);
+        payload.put("vehicleData", emptySection);
         return payload;
     }
 
@@ -188,5 +197,165 @@ public class BusOvertakeCacheJob {
         Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
         MAPPER.writeValue(tempFile.toFile(), payload);
         Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private enum OvertakeMode {
+        SEGMENT(
+                "segmentId, routeNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, overtakeCount, latestOvertakeAt, latestOvertakerPlate, latestOvertakerRouteNumber, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds",
+                "segmentId, routeNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt"
+        ),
+        SEGMENT_ROUTE(
+                "segmentId, routeNumber, overtakerRouteNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, overtakeCount, latestOvertakeAt, latestOvertakerPlate, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds",
+                "segmentId, routeNumber, overtakerRouteNumber, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt, latestOvertakerPlate"
+        ),
+        SEGMENT_VEHICLE(
+                "segmentId, routeNumber, overtakerRouteNumber, overtakerPlate, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, overtakeCount, latestOvertakeAt, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds",
+                "segmentId, routeNumber, overtakerRouteNumber, overtakerPlate, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt"
+        ),
+        VEHICLE(
+                "overtakerRouteNumber, overtakerPlate, overtakeCount, latestOvertakeAt, latestStartStopName, latestEndStopName, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds",
+                "overtakerRouteNumber, overtakerPlate, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt, latestStartStopName, latestEndStopName"
+        );
+
+        private final String dailySelectColumns;
+        private final String summarySelectColumns;
+
+        OvertakeMode(String dailySelectColumns, String summarySelectColumns) {
+            this.dailySelectColumns = dailySelectColumns;
+            this.summarySelectColumns = summarySelectColumns;
+        }
+
+        String selectColumns(boolean summary) {
+            return summary ? summarySelectColumns : dailySelectColumns;
+        }
+
+        Map<String, Object> readRow(ResultSet rs, boolean summary) throws Exception {
+            switch (this) {
+                case SEGMENT:
+                    return readSegmentRow(rs, summary);
+                case SEGMENT_ROUTE:
+                    return readSegmentRouteRow(rs, summary);
+                case SEGMENT_VEHICLE:
+                    return readSegmentVehicleRow(rs, summary);
+                case VEHICLE:
+                    return readVehicleRow(rs, summary);
+                default:
+                    throw new IllegalStateException("Unexpected value: " + this);
+            }
+        }
+
+        private static Map<String, Object> readSegmentRow(ResultSet rs, boolean summary) throws Exception {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("segmentId", rs.getString(1));
+            row.put("routeNumber", rs.getString(2));
+            row.put("startStopId", rs.getString(3));
+            row.put("startStopName", rs.getString(4));
+            row.put("startStopLatitude", rs.getDouble(5));
+            row.put("startStopLongitude", rs.getDouble(6));
+            row.put("endStopId", rs.getString(7));
+            row.put("endStopName", rs.getString(8));
+            row.put("endStopLatitude", rs.getDouble(9));
+            row.put("endStopLongitude", rs.getDouble(10));
+            row.put("distanceMeters", rs.getDouble(11));
+            if (summary) {
+                row.put("totalOvertakes", rs.getLong(12));
+                row.put("sampleDays", rs.getLong(13));
+                row.put("averageDailyOvertakes", rs.getDouble(14));
+                row.put("maxDailyOvertakes", rs.getLong(15));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(16)));
+            } else {
+                row.put("overtakeCount", rs.getLong(12));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(13)));
+                row.put("latestOvertakerPlate", rs.getString(14));
+                row.put("latestOvertakerRouteNumber", rs.getString(15));
+                row.put("averageOvertakerDurationSeconds", rs.getInt(16));
+                row.put("averageOvertakenDurationSeconds", rs.getInt(17));
+            }
+            return row;
+        }
+
+        private static Map<String, Object> readSegmentRouteRow(ResultSet rs, boolean summary) throws Exception {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("segmentId", rs.getString(1));
+            row.put("routeNumber", rs.getString(2));
+            row.put("overtakerRouteNumber", rs.getString(3));
+            row.put("startStopId", rs.getString(4));
+            row.put("startStopName", rs.getString(5));
+            row.put("startStopLatitude", rs.getDouble(6));
+            row.put("startStopLongitude", rs.getDouble(7));
+            row.put("endStopId", rs.getString(8));
+            row.put("endStopName", rs.getString(9));
+            row.put("endStopLatitude", rs.getDouble(10));
+            row.put("endStopLongitude", rs.getDouble(11));
+            row.put("distanceMeters", rs.getDouble(12));
+            if (summary) {
+                row.put("totalOvertakes", rs.getLong(13));
+                row.put("sampleDays", rs.getLong(14));
+                row.put("averageDailyOvertakes", rs.getDouble(15));
+                row.put("maxDailyOvertakes", rs.getLong(16));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(17)));
+                row.put("latestOvertakerPlate", rs.getString(18));
+            } else {
+                row.put("overtakeCount", rs.getLong(13));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(14)));
+                row.put("latestOvertakerPlate", rs.getString(15));
+                row.put("averageOvertakerDurationSeconds", rs.getInt(16));
+                row.put("averageOvertakenDurationSeconds", rs.getInt(17));
+            }
+            return row;
+        }
+
+        private static Map<String, Object> readSegmentVehicleRow(ResultSet rs, boolean summary) throws Exception {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("segmentId", rs.getString(1));
+            row.put("routeNumber", rs.getString(2));
+            row.put("overtakerRouteNumber", rs.getString(3));
+            row.put("overtakerPlate", rs.getString(4));
+            row.put("startStopId", rs.getString(5));
+            row.put("startStopName", rs.getString(6));
+            row.put("startStopLatitude", rs.getDouble(7));
+            row.put("startStopLongitude", rs.getDouble(8));
+            row.put("endStopId", rs.getString(9));
+            row.put("endStopName", rs.getString(10));
+            row.put("endStopLatitude", rs.getDouble(11));
+            row.put("endStopLongitude", rs.getDouble(12));
+            row.put("distanceMeters", rs.getDouble(13));
+            if (summary) {
+                row.put("totalOvertakes", rs.getLong(14));
+                row.put("sampleDays", rs.getLong(15));
+                row.put("averageDailyOvertakes", rs.getDouble(16));
+                row.put("maxDailyOvertakes", rs.getLong(17));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(18)));
+            } else {
+                row.put("overtakeCount", rs.getLong(14));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(15)));
+                row.put("averageOvertakerDurationSeconds", rs.getInt(16));
+                row.put("averageOvertakenDurationSeconds", rs.getInt(17));
+            }
+            return row;
+        }
+
+        private static Map<String, Object> readVehicleRow(ResultSet rs, boolean summary) throws Exception {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("overtakerRouteNumber", rs.getString(1));
+            row.put("overtakerPlate", rs.getString(2));
+            if (summary) {
+                row.put("totalOvertakes", rs.getLong(3));
+                row.put("sampleDays", rs.getLong(4));
+                row.put("averageDailyOvertakes", rs.getDouble(5));
+                row.put("maxDailyOvertakes", rs.getLong(6));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(7)));
+                row.put("latestStartStopName", rs.getString(8));
+                row.put("latestEndStopName", rs.getString(9));
+            } else {
+                row.put("overtakeCount", rs.getLong(3));
+                row.put("latestOvertakeAt", toIsoString(rs.getObject(4)));
+                row.put("latestStartStopName", rs.getString(5));
+                row.put("latestEndStopName", rs.getString(6));
+                row.put("averageOvertakerDurationSeconds", rs.getInt(7));
+                row.put("averageOvertakenDurationSeconds", rs.getInt(8));
+            }
+            return row;
+        }
     }
 }

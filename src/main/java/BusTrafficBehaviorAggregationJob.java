@@ -22,8 +22,10 @@ import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.count;
 import static org.apache.spark.sql.functions.countDistinct;
 import static org.apache.spark.sql.functions.expr;
+import static org.apache.spark.sql.functions.lit;
 import static org.apache.spark.sql.functions.max;
-import static org.apache.spark.sql.functions.min;
+import static org.apache.spark.sql.functions.max_by;
+import static org.apache.spark.sql.functions.not;
 import static org.apache.spark.sql.functions.round;
 import static org.apache.spark.sql.functions.row_number;
 import static org.apache.spark.sql.functions.sha2;
@@ -36,13 +38,25 @@ public class BusTrafficBehaviorAggregationJob {
     private static final String SEGMENT_TRIPS_DIR = "segment-trips";
     private static final String OVERTAKE_EVENTS_DIR = "overtake-events";
     private static final String DAILY_OVERTAKE_SEGMENT_DIR = "daily-overtake-segment";
+    private static final String DAILY_OVERTAKE_SEGMENT_ROUTE_DIR = "daily-overtake-segment-route";
+    private static final String DAILY_OVERTAKE_SEGMENT_VEHICLE_DIR = "daily-overtake-segment-vehicle";
+    private static final String DAILY_OVERTAKE_VEHICLE_DIR = "daily-overtake-vehicle";
     private static final String SUMMARY_OVERTAKE_ALL_DIR = "summary-overtake-all-days";
     private static final String SUMMARY_OVERTAKE_WEEKDAY_DIR = "summary-overtake-by-weekday";
+    private static final String SUMMARY_OVERTAKE_SEGMENT_ROUTE_ALL_DIR = "summary-overtake-segment-route-all-days";
+    private static final String SUMMARY_OVERTAKE_SEGMENT_ROUTE_WEEKDAY_DIR = "summary-overtake-segment-route-by-weekday";
+    private static final String SUMMARY_OVERTAKE_SEGMENT_VEHICLE_ALL_DIR = "summary-overtake-segment-vehicle-all-days";
+    private static final String SUMMARY_OVERTAKE_SEGMENT_VEHICLE_WEEKDAY_DIR = "summary-overtake-segment-vehicle-by-weekday";
+    private static final String SUMMARY_OVERTAKE_VEHICLE_ALL_DIR = "summary-overtake-vehicle-all-days";
+    private static final String SUMMARY_OVERTAKE_VEHICLE_WEEKDAY_DIR = "summary-overtake-vehicle-by-weekday";
     private static final String DAILY_RUBBER_STOP_DIR = "daily-rubber-stop";
+    private static final String DAILY_RUBBER_STOP_ROUTE_DIR = "daily-rubber-stop-route";
     private static final String DAILY_RUBBER_ROUTE_DIR = "daily-rubber-route";
     private static final String DAILY_RUBBER_VEHICLE_DIR = "daily-rubber-vehicle";
     private static final String SUMMARY_RUBBER_STOP_ALL_DIR = "summary-rubber-stop-all-days";
     private static final String SUMMARY_RUBBER_STOP_WEEKDAY_DIR = "summary-rubber-stop-by-weekday";
+    private static final String SUMMARY_RUBBER_STOP_ROUTE_ALL_DIR = "summary-rubber-stop-route-all-days";
+    private static final String SUMMARY_RUBBER_STOP_ROUTE_WEEKDAY_DIR = "summary-rubber-stop-route-by-weekday";
     private static final String SUMMARY_RUBBER_ROUTE_ALL_DIR = "summary-rubber-route-all-days";
     private static final String SUMMARY_RUBBER_ROUTE_WEEKDAY_DIR = "summary-rubber-route-by-weekday";
     private static final String SUMMARY_RUBBER_VEHICLE_ALL_DIR = "summary-rubber-vehicle-all-days";
@@ -127,6 +141,12 @@ public class BusTrafficBehaviorAggregationJob {
 
         try {
             Dataset<Row> routeStops = topology.createRouteStopPointsDataFrame(spark);
+            Dataset<Row> routeTerminalBounds = routeStops.groupBy("internalRouteId", "routeNumber", "direction")
+                    .agg(max("stopOrder").alias("maxStopOrder"));
+            Dataset<Row> routeStopContext = routeStops.join(
+                    routeTerminalBounds,
+                    new String[]{"internalRouteId", "routeNumber", "direction"}
+            );
             Dataset<Row> segments = topology.createAdjacentSegmentsDataFrame(spark).alias("segments");
 
             Dataset<Row> changedVisits = spark.read()
@@ -148,12 +168,13 @@ public class BusTrafficBehaviorAggregationJob {
                     .withColumn("serviceDate", to_date(col("enteredStopLocalTime")))
                     .filter(col("serviceDate").isin(affectedDates.toArray()))
                     .join(
-                            routeStops.select(
+                            routeStopContext.select(
                                     "internalRouteId",
                                     "routeNumber",
                                     "stopId",
                                     "direction",
-                                    "stopOrder"
+                                    "stopOrder",
+                                    "maxStopOrder"
                             ),
                             new String[]{"internalRouteId", "routeNumber", "stopId", "direction"}
                     );
@@ -171,6 +192,7 @@ public class BusTrafficBehaviorAggregationJob {
                             "stopLatitude",
                             "stopLongitude",
                             "stopOrder",
+                            "maxStopOrder",
                             "enteredStopAt",
                             "exitedStopAt",
                             "dwellTimeSeconds",
@@ -178,6 +200,7 @@ public class BusTrafficBehaviorAggregationJob {
                             "minDistanceMeters",
                             "maxDistanceMeters"
                     )
+                    .withColumn("isTerminalStop", col("stopOrder").equalTo(lit(1)).or(col("stopOrder").equalTo(col("maxStopOrder"))))
                     .dropDuplicates("visitId");
 
             Path dwellEventsDir = outputRoot.resolve(DWELL_EVENTS_DIR);
@@ -294,6 +317,7 @@ public class BusTrafficBehaviorAggregationJob {
                             col("earlier.avgSegmentSpeedKmh").alias("overtakenAvgSegmentSpeedKmh")
                     )
                     .withColumn("overtakeAt", col("overtakerEndEnteredStopAt"))
+                    .withColumn("overtakerRouteNumber", col("routeNumber"))
                     .withColumn(
                             "overtakeEventId",
                             sha2(
@@ -324,14 +348,90 @@ public class BusTrafficBehaviorAggregationJob {
                     .agg(
                             count("*").alias("overtakeCount"),
                             max("overtakeAt").alias("latestOvertakeAt"),
+                            max_by(col("overtakerPlate"), col("overtakeAt")).alias("latestOvertakerPlate"),
+                            max_by(col("overtakerRouteNumber"), col("overtakeAt")).alias("latestOvertakerRouteNumber"),
                             round(avg("overtakerTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakerDurationSeconds"),
                             round(avg("overtakenTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakenDurationSeconds")
                     );
             overwriteAffectedPartitions(dailyOvertakeSegment, outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_DIR), outputPartitions, "serviceDate");
 
-            Dataset<Row> dailyRubberStop = dwellEvents.groupBy(
+            Dataset<Row> dailyOvertakeSegmentRoute = overtakeEvents.groupBy(
                             "serviceDate",
                             "weekdayIso",
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            count("*").alias("overtakeCount"),
+                            max("overtakeAt").alias("latestOvertakeAt"),
+                            max_by(col("overtakerPlate"), col("overtakeAt")).alias("latestOvertakerPlate"),
+                            round(avg("overtakerTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakerDurationSeconds"),
+                            round(avg("overtakenTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakenDurationSeconds")
+                    );
+            overwriteAffectedPartitions(dailyOvertakeSegmentRoute, outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_ROUTE_DIR), outputPartitions, "serviceDate");
+
+            Dataset<Row> dailyOvertakeSegmentVehicle = overtakeEvents.groupBy(
+                            "serviceDate",
+                            "weekdayIso",
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "overtakerPlate",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            count("*").alias("overtakeCount"),
+                            max("overtakeAt").alias("latestOvertakeAt"),
+                            round(avg("overtakerTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakerDurationSeconds"),
+                            round(avg("overtakenTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakenDurationSeconds")
+                    );
+            overwriteAffectedPartitions(dailyOvertakeSegmentVehicle, outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_VEHICLE_DIR), outputPartitions, "serviceDate");
+
+            Dataset<Row> dailyOvertakeVehicle = overtakeEvents.groupBy(
+                            "serviceDate",
+                            "weekdayIso",
+                            "overtakerRouteNumber",
+                            "overtakerPlate"
+                    )
+                    .agg(
+                            count("*").alias("overtakeCount"),
+                            max("overtakeAt").alias("latestOvertakeAt"),
+                            max_by(col("startStopName"), col("overtakeAt")).alias("latestStartStopName"),
+                            max_by(col("endStopName"), col("overtakeAt")).alias("latestEndStopName"),
+                            round(avg("overtakerTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakerDurationSeconds"),
+                            round(avg("overtakenTravelDurationSeconds"), 0).cast(DataTypes.IntegerType).alias("averageOvertakenDurationSeconds")
+                    );
+            overwriteAffectedPartitions(dailyOvertakeVehicle, outputRoot.resolve(DAILY_OVERTAKE_VEHICLE_DIR), outputPartitions, "serviceDate");
+
+            Dataset<Row> dwellEventsByPolicy = dwellEvents
+                    .withColumn("terminalPolicy", lit("with-terminals"))
+                    .unionByName(
+                            dwellEvents.filter(not(col("isTerminalStop")))
+                                    .withColumn("terminalPolicy", lit("without-terminals"))
+                    );
+
+            Dataset<Row> dailyRubberStop = dwellEventsByPolicy.groupBy(
+                            "serviceDate",
+                            "weekdayIso",
+                            "terminalPolicy",
                             "stopId",
                             "stopName",
                             "stopLatitude",
@@ -343,9 +443,14 @@ public class BusTrafficBehaviorAggregationJob {
                             round(avg("dwellTimeSeconds"), 0).cast(DataTypes.IntegerType).alias("averageDwellSeconds"),
                             count("*").alias("visitCount")
                     );
-            Dataset<Row> dailyRubberRoute = dwellEvents.groupBy(
+            Dataset<Row> dailyRubberStopRoute = dwellEventsByPolicy.groupBy(
                             "serviceDate",
                             "weekdayIso",
+                            "terminalPolicy",
+                            "stopId",
+                            "stopName",
+                            "stopLatitude",
+                            "stopLongitude",
                             "routeNumber"
                     )
                     .agg(
@@ -354,9 +459,22 @@ public class BusTrafficBehaviorAggregationJob {
                             round(avg("dwellTimeSeconds"), 0).cast(DataTypes.IntegerType).alias("averageDwellSeconds"),
                             count("*").alias("visitCount")
                     );
-            Dataset<Row> dailyRubberVehicle = dwellEvents.groupBy(
+            Dataset<Row> dailyRubberRoute = dwellEventsByPolicy.groupBy(
                             "serviceDate",
                             "weekdayIso",
+                            "terminalPolicy",
+                            "routeNumber"
+                    )
+                    .agg(
+                            sum("dwellTimeSeconds").alias("totalDwellSeconds"),
+                            max("dwellTimeSeconds").alias("maxDwellSeconds"),
+                            round(avg("dwellTimeSeconds"), 0).cast(DataTypes.IntegerType).alias("averageDwellSeconds"),
+                            count("*").alias("visitCount")
+                    );
+            Dataset<Row> dailyRubberVehicle = dwellEventsByPolicy.groupBy(
+                            "serviceDate",
+                            "weekdayIso",
+                            "terminalPolicy",
                             "plate",
                             "routeNumber"
                     )
@@ -367,14 +485,27 @@ public class BusTrafficBehaviorAggregationJob {
                             count("*").alias("visitCount")
                     );
             overwriteAffectedPartitions(dailyRubberStop, outputRoot.resolve(DAILY_RUBBER_STOP_DIR), outputPartitions, "serviceDate");
+            overwriteAffectedPartitions(dailyRubberStopRoute, outputRoot.resolve(DAILY_RUBBER_STOP_ROUTE_DIR), outputPartitions, "serviceDate");
             overwriteAffectedPartitions(dailyRubberRoute, outputRoot.resolve(DAILY_RUBBER_ROUTE_DIR), outputPartitions, "serviceDate");
             overwriteAffectedPartitions(dailyRubberVehicle, outputRoot.resolve(DAILY_RUBBER_VEHICLE_DIR), outputPartitions, "serviceDate");
 
             Dataset<Row> fullDailyOvertakes = spark.read()
                     .parquet(outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_DIR).toAbsolutePath().toString())
                     .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyOvertakesSegmentRoute = spark.read()
+                    .parquet(outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_ROUTE_DIR).toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyOvertakesSegmentVehicle = spark.read()
+                    .parquet(outputRoot.resolve(DAILY_OVERTAKE_SEGMENT_VEHICLE_DIR).toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyOvertakesVehicle = spark.read()
+                    .parquet(outputRoot.resolve(DAILY_OVERTAKE_VEHICLE_DIR).toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
             Dataset<Row> fullDailyRubberStop = spark.read()
                     .parquet(outputRoot.resolve(DAILY_RUBBER_STOP_DIR).toAbsolutePath().toString())
+                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+            Dataset<Row> fullDailyRubberStopRoute = spark.read()
+                    .parquet(outputRoot.resolve(DAILY_RUBBER_STOP_ROUTE_DIR).toAbsolutePath().toString())
                     .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
             Dataset<Row> fullDailyRubberRoute = spark.read()
                     .parquet(outputRoot.resolve(DAILY_RUBBER_ROUTE_DIR).toAbsolutePath().toString())
@@ -424,36 +555,169 @@ public class BusTrafficBehaviorAggregationJob {
                             max("overtakeCount").alias("maxDailyOvertakes"),
                             max("latestOvertakeAt").alias("latestOvertakeAt")
                     );
+            Dataset<Row> summaryOvertakeSegmentRouteAll = fullDailyOvertakesSegmentRoute.groupBy(
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt"),
+                            max_by(col("latestOvertakerPlate"), col("latestOvertakeAt")).alias("latestOvertakerPlate")
+                    );
+            Dataset<Row> summaryOvertakeSegmentRouteWeekday = fullDailyOvertakesSegmentRoute.groupBy(
+                            "weekdayIso",
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt"),
+                            max_by(col("latestOvertakerPlate"), col("latestOvertakeAt")).alias("latestOvertakerPlate")
+                    );
+            Dataset<Row> summaryOvertakeSegmentVehicleAll = fullDailyOvertakesSegmentVehicle.groupBy(
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "overtakerPlate",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt")
+                    );
+            Dataset<Row> summaryOvertakeSegmentVehicleWeekday = fullDailyOvertakesSegmentVehicle.groupBy(
+                            "weekdayIso",
+                            "segmentId",
+                            "routeNumber",
+                            "overtakerRouteNumber",
+                            "overtakerPlate",
+                            "startStopId",
+                            "startStopName",
+                            "startStopLatitude",
+                            "startStopLongitude",
+                            "endStopId",
+                            "endStopName",
+                            "endStopLatitude",
+                            "endStopLongitude",
+                            "distanceMeters"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt")
+                    );
+            Dataset<Row> summaryOvertakeVehicleAll = fullDailyOvertakesVehicle.groupBy(
+                            "overtakerRouteNumber",
+                            "overtakerPlate"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt"),
+                            max_by(col("latestStartStopName"), col("latestOvertakeAt")).alias("latestStartStopName"),
+                            max_by(col("latestEndStopName"), col("latestOvertakeAt")).alias("latestEndStopName")
+                    );
+            Dataset<Row> summaryOvertakeVehicleWeekday = fullDailyOvertakesVehicle.groupBy(
+                            "weekdayIso",
+                            "overtakerRouteNumber",
+                            "overtakerPlate"
+                    )
+                    .agg(
+                            sum("overtakeCount").alias("totalOvertakes"),
+                            count("*").alias("sampleDays"),
+                            round(avg("overtakeCount"), 2).alias("averageDailyOvertakes"),
+                            max("overtakeCount").alias("maxDailyOvertakes"),
+                            max("latestOvertakeAt").alias("latestOvertakeAt"),
+                            max_by(col("latestStartStopName"), col("latestOvertakeAt")).alias("latestStartStopName"),
+                            max_by(col("latestEndStopName"), col("latestOvertakeAt")).alias("latestEndStopName")
+                    );
             writeDataset(summaryOvertakeAll, outputRoot.resolve(SUMMARY_OVERTAKE_ALL_DIR), outputPartitions);
             writeDataset(summaryOvertakeWeekday, outputRoot.resolve(SUMMARY_OVERTAKE_WEEKDAY_DIR), outputPartitions);
+            writeDataset(summaryOvertakeSegmentRouteAll, outputRoot.resolve(SUMMARY_OVERTAKE_SEGMENT_ROUTE_ALL_DIR), outputPartitions);
+            writeDataset(summaryOvertakeSegmentRouteWeekday, outputRoot.resolve(SUMMARY_OVERTAKE_SEGMENT_ROUTE_WEEKDAY_DIR), outputPartitions);
+            writeDataset(summaryOvertakeSegmentVehicleAll, outputRoot.resolve(SUMMARY_OVERTAKE_SEGMENT_VEHICLE_ALL_DIR), outputPartitions);
+            writeDataset(summaryOvertakeSegmentVehicleWeekday, outputRoot.resolve(SUMMARY_OVERTAKE_SEGMENT_VEHICLE_WEEKDAY_DIR), outputPartitions);
+            writeDataset(summaryOvertakeVehicleAll, outputRoot.resolve(SUMMARY_OVERTAKE_VEHICLE_ALL_DIR), outputPartitions);
+            writeDataset(summaryOvertakeVehicleWeekday, outputRoot.resolve(SUMMARY_OVERTAKE_VEHICLE_WEEKDAY_DIR), outputPartitions);
 
             writeDataset(
-                    buildRubberSummary(fullDailyRubberStop, new String[]{"stopId", "stopName", "stopLatitude", "stopLongitude"}),
+                    buildRubberSummary(fullDailyRubberStop, new String[]{"terminalPolicy", "stopId", "stopName", "stopLatitude", "stopLongitude"}),
                     outputRoot.resolve(SUMMARY_RUBBER_STOP_ALL_DIR),
                     outputPartitions
             );
             writeDataset(
-                    buildRubberSummary(fullDailyRubberStop, new String[]{"weekdayIso", "stopId", "stopName", "stopLatitude", "stopLongitude"}),
+                    buildRubberSummary(fullDailyRubberStop, new String[]{"weekdayIso", "terminalPolicy", "stopId", "stopName", "stopLatitude", "stopLongitude"}),
                     outputRoot.resolve(SUMMARY_RUBBER_STOP_WEEKDAY_DIR),
                     outputPartitions
             );
             writeDataset(
-                    buildRubberSummary(fullDailyRubberRoute, new String[]{"routeNumber"}),
+                    buildRubberSummary(fullDailyRubberStopRoute, new String[]{"terminalPolicy", "stopId", "stopName", "stopLatitude", "stopLongitude", "routeNumber"}),
+                    outputRoot.resolve(SUMMARY_RUBBER_STOP_ROUTE_ALL_DIR),
+                    outputPartitions
+            );
+            writeDataset(
+                    buildRubberSummary(fullDailyRubberStopRoute, new String[]{"weekdayIso", "terminalPolicy", "stopId", "stopName", "stopLatitude", "stopLongitude", "routeNumber"}),
+                    outputRoot.resolve(SUMMARY_RUBBER_STOP_ROUTE_WEEKDAY_DIR),
+                    outputPartitions
+            );
+            writeDataset(
+                    buildRubberSummary(fullDailyRubberRoute, new String[]{"terminalPolicy", "routeNumber"}),
                     outputRoot.resolve(SUMMARY_RUBBER_ROUTE_ALL_DIR),
                     outputPartitions
             );
             writeDataset(
-                    buildRubberSummary(fullDailyRubberRoute, new String[]{"weekdayIso", "routeNumber"}),
+                    buildRubberSummary(fullDailyRubberRoute, new String[]{"weekdayIso", "terminalPolicy", "routeNumber"}),
                     outputRoot.resolve(SUMMARY_RUBBER_ROUTE_WEEKDAY_DIR),
                     outputPartitions
             );
             writeDataset(
-                    buildRubberSummary(fullDailyRubberVehicle, new String[]{"plate", "routeNumber"}),
+                    buildRubberSummary(fullDailyRubberVehicle, new String[]{"terminalPolicy", "plate", "routeNumber"}),
                     outputRoot.resolve(SUMMARY_RUBBER_VEHICLE_ALL_DIR),
                     outputPartitions
             );
             writeDataset(
-                    buildRubberSummary(fullDailyRubberVehicle, new String[]{"weekdayIso", "plate", "routeNumber"}),
+                    buildRubberSummary(fullDailyRubberVehicle, new String[]{"weekdayIso", "terminalPolicy", "plate", "routeNumber"}),
                     outputRoot.resolve(SUMMARY_RUBBER_VEHICLE_WEEKDAY_DIR),
                     outputPartitions
             );

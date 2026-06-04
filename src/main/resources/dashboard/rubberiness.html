@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,29 +8,29 @@
     :root { --bg:#f3efe6; --panel:rgba(255,250,242,.95); --ink:#1d2a38; --muted:#5e6b78; --shadow:0 16px 40px rgba(29,42,56,.1); }
     * { box-sizing:border-box; }
     body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:radial-gradient(circle at top left,#f8d7b8 0,transparent 28%), linear-gradient(180deg,#efe7db 0%,var(--bg) 100%); }
-    .wrap { max-width:1460px; margin:0 auto; padding:28px 18px 36px; }
-    .topline, .control-row, .map-meta, .item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+    .wrap { max-width:1480px; margin:0 auto; padding:28px 18px 36px; }
+    .topline,.control-row,.map-meta,.item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
     .hero { display:grid; gap:12px; margin-bottom:18px; }
     h1 { margin:0; font-size:clamp(28px,4.8vw,52px); line-height:.95; letter-spacing:-.03em; }
     .links { display:flex; gap:14px; flex-wrap:wrap; }
     .links a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(29,42,56,.25); font-size:15px; }
-    .subtitle, .sidebar-meta, .item-note, .map-meta, .control-row { color:var(--muted); font-size:14px; line-height:1.45; }
-    .layout { display:grid; grid-template-columns:minmax(0,1fr) 390px; gap:16px; align-items:start; }
+    .subtitle,.sidebar-meta,.item-note,.map-meta,.control-row { color:var(--muted); font-size:14px; line-height:1.45; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:16px; align-items:start; }
     .card { background:var(--panel); border:1px solid rgba(29,42,56,.08); border-radius:22px; box-shadow:var(--shadow); }
-    .map-card, .sidebar { padding:16px; }
+    .map-card,.sidebar { padding:16px; }
     .controls { display:grid; gap:12px; margin-bottom:12px; }
     .radio-group { display:flex; gap:10px; flex-wrap:wrap; }
     .radio-group label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
-    select, input[type="text"] { border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
+    select,input[type="text"] { border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
     .map-shell { position:relative; height:min(78vh,920px); min-height:520px; overflow:hidden; border-radius:18px; background:#6d7277; border:1px solid rgba(29,42,56,.08); cursor:grab; user-select:none; }
     .map-shell.dragging { cursor:grabbing; }
     .map-zoom { position:absolute; right:14px; top:14px; z-index:4; display:grid; gap:8px; }
     .map-zoom button { width:42px; height:42px; border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(29,42,56,.12); }
-    .tile-layer, .overlay-layer { position:absolute; inset:0; }
+    .tile-layer,.overlay-layer { position:absolute; inset:0; }
     .tile-layer img { position:absolute; width:256px; height:256px; }
     .overlay-layer { overflow:visible; }
     .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.22); backdrop-filter:blur(2px); }
-    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 150px); overflow:auto; padding-right:4px; }
+    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 160px); overflow:auto; padding-right:4px; }
     .item { border:1px solid rgba(29,42,56,.08); border-radius:14px; background:rgba(255,255,255,.56); padding:12px 13px; cursor:pointer; }
     .item.active { border-color:rgba(214,113,58,.65); box-shadow:0 0 0 2px rgba(214,113,58,.15); }
     .item-name { font-size:18px; }
@@ -40,563 +40,337 @@
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <section class="hero">
-      <div class="topline">
-        <h1>Rubberiness</h1>
-        <div class="links">
-          <a href="./">Dashboard</a>
-          <a href="./routes-last-movement">Route Last Movement</a>
-          <a href="./bus-traces-map">Bus Traces Map</a>
-          <a href="./stop-last-pass">Stop Last Pass</a>
-          <a href="./overtakes">Overtakes</a>
+<div class="wrap">
+  <section class="hero">
+    <div class="topline">
+      <h1>Rubberiness</h1>
+      <div class="links">
+        <a href="./">Dashboard</a>
+        <a href="./overtakes">Overtakes</a>
+        <a href="./stop-last-pass">Stop Last Pass</a>
+      </div>
+    </div>
+    <div class="subtitle">Dwell-time analytics built from stop visit events. Metrics are available with terminal stops included and excluded, plus a dedicated stop+route slice.</div>
+  </section>
+
+  <section class="layout">
+    <article class="card map-card">
+      <div class="controls">
+        <div class="control-row">
+          <strong>Mode</strong>
+          <div class="radio-group" id="modeGroup">
+            <label><input type="radio" name="mode" value="stop" checked> Stop</label>
+            <label><input type="radio" name="mode" value="stopRoute"> Stop + Route</label>
+            <label><input type="radio" name="mode" value="route"> Route</label>
+            <label><input type="radio" name="mode" value="vehicle"> Vehicle</label>
+          </div>
+        </div>
+        <div class="control-row">
+          <strong>Terminal Policy</strong>
+          <div class="radio-group" id="terminalGroup">
+            <label><input type="radio" name="terminalPolicy" value="with-terminals" checked> With Terminals</label>
+            <label><input type="radio" name="terminalPolicy" value="without-terminals"> Without Terminals</label>
+          </div>
+        </div>
+        <div class="control-row">
+          <strong>Period</strong>
+          <div class="radio-group" id="periodGroup">
+            <label><input type="radio" name="periodMode" value="previous" checked> Previous Day</label>
+            <label><input type="radio" name="periodMode" value="all"> All Days</label>
+            <label><input type="radio" name="periodMode" value="weekday"> Weekday</label>
+          </div>
+          <select id="weekdaySelect"></select>
+        </div>
+        <div class="control-row">
+          <strong>Sort</strong>
+          <select id="sortField">
+            <option value="total">Total Dwell</option>
+            <option value="max">Max Dwell</option>
+            <option value="avg">Average Dwell</option>
+            <option value="visits">Visits</option>
+            <option value="days">Sample Days</option>
+          </select>
+          <select id="sortDir">
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <strong>Filter</strong>
+          <input id="filterInput" type="text" placeholder="Stop, route, plate">
         </div>
       </div>
-      <div class="subtitle">Dwell-time analytics built from explicit stop visit events. The page can show aggregated excessive dwell by stop, route, or vehicle.</div>
-    </section>
 
-    <section class="layout">
-      <article class="card map-card">
-        <div class="controls">
-          <div class="control-row">
-            <strong>Mode</strong>
-            <div class="radio-group" id="modeGroup">
-              <label><input type="radio" name="viewMode" value="stops" checked> Stops</label>
-              <label><input type="radio" name="viewMode" value="routes"> Routes</label>
-              <label><input type="radio" name="viewMode" value="vehicles"> Vehicles</label>
-            </div>
-          </div>
-          <div class="control-row">
-            <strong>Period</strong>
-            <div class="radio-group" id="periodGroup">
-              <label><input type="radio" name="periodMode" value="previous" checked> Previous Day</label>
-              <label><input type="radio" name="periodMode" value="all"> All Days Average</label>
-              <label><input type="radio" name="periodMode" value="weekday"> Weekday Average</label>
-            </div>
-            <select id="weekdaySelect"></select>
-          </div>
-          <div class="control-row">
-            <strong>Filter</strong>
-            <input id="filterInput" type="text" placeholder="Route, stop, plate">
-          </div>
+      <div class="map-meta">
+        <div id="updatedAt">Updated: ...</div>
+        <div id="modeMeta">Mode: ...</div>
+        <div id="countMeta">Items: ...</div>
+      </div>
+
+      <div class="map-shell" id="map">
+        <div class="map-zoom">
+          <button type="button" id="zoomIn">+</button>
+          <button type="button" id="zoomOut">-</button>
         </div>
+        <div class="tile-layer" id="tiles"></div>
+        <svg class="overlay-layer" id="overlay"></svg>
+        <div class="empty" id="emptyState">Loading...</div>
+      </div>
+    </article>
 
-        <div class="map-meta">
-          <div id="updatedAt">Updated: ...</div>
-          <div id="modeMeta">Mode: ...</div>
-          <div id="countMeta">Items: ...</div>
-        </div>
+    <aside class="card sidebar">
+      <h2 id="sidebarTitle">Items</h2>
+      <div class="sidebar-meta" id="sidebarMeta">Click a point, line, or row to focus the current selection.</div>
+      <div class="list" id="list"></div>
+    </aside>
+  </section>
+</div>
 
-        <div class="map-shell" id="map">
-          <div class="map-zoom">
-            <button type="button" id="zoomIn">+</button>
-            <button type="button" id="zoomOut">-</button>
-          </div>
-          <div class="tile-layer" id="baseTiles"></div>
-          <svg class="overlay-layer" id="overlay"></svg>
-          <div class="empty" id="emptyState">Loading...</div>
-        </div>
-      </article>
+<script>
+const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', { timeZone:'Europe/Moscow', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+const mapEl = document.getElementById('map');
+const tilesEl = document.getElementById('tiles');
+const overlayEl = document.getElementById('overlay');
+const emptyEl = document.getElementById('emptyState');
+const listEl = document.getElementById('list');
+const filterInput = document.getElementById('filterInput');
+const weekdaySelect = document.getElementById('weekdaySelect');
+const sortFieldSelect = document.getElementById('sortField');
+const sortDirSelect = document.getElementById('sortDir');
 
-      <aside class="card sidebar">
-        <h2 id="sidebarTitle">Stops</h2>
-        <div class="sidebar-meta" id="sidebarMeta">Click a list row or a map object to filter the current selection.</div>
-        <div class="list" id="list"></div>
-      </aside>
-    </section>
-  </div>
+const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, mode:'stop', terminalPolicy:'with-terminals', periodMode:'previous', weekday:'1', sortField:'total', sortDir:'desc', filterText:'', selectedKey:'', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
-  <script>
-    const tileSize = 256;
-    const baseTilesEl = document.getElementById('baseTiles');
-    const overlayEl = document.getElementById('overlay');
-    const mapEl = document.getElementById('map');
-    const emptyEl = document.getElementById('emptyState');
-    const listEl = document.getElementById('list');
-    const filterInput = document.getElementById('filterInput');
-    const weekdaySelect = document.getElementById('weekdaySelect');
+function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} MSK` : 'no data'; }
+function formatSeconds(totalSeconds){ const seconds=Number(totalSeconds||0); const h=Math.floor(seconds/3600); const m=Math.floor((seconds%3600)/60); const s=seconds%60; return h>0 ? `${h}h ${m}m ${s}s` : m>0 ? `${m}m ${s}s` : `${s}s`; }
+function lonToWorldX(lon,z){ return ((lon + 180) / 360) * 256 * Math.pow(2, z); }
+function latToWorldY(lat,z){ const sin = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, z); }
+function worldToLon(x,z){ return x / (256 * Math.pow(2, z)) * 360 - 180; }
+function worldToLat(y,z){ const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
+function project(lat,lon,z){ return {x:lonToWorldX(lon,z), y:latToWorldY(lat,z)}; }
+function tileUrl(z,x,y){ return state.config.tileUrlTemplate.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y)); }
+function getViewportOrigin(){ const c=project(state.centerLat,state.centerLon,state.zoom); return { left:c.x-mapEl.clientWidth/2, top:c.y-mapEl.clientHeight/2 }; }
+function normalize(v){ return String(v || '').trim().toLowerCase(); }
+function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
+function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
+function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
+function isStopMode(){ return state.mode === 'stop' || state.mode === 'stopRoute'; }
 
-    const state = {
-      config: null,
-      payload: null,
-      centerLat: 55.79,
-      centerLon: 49.12,
-      zoom: 12,
-      viewMode: 'stops',
-      periodMode: 'previous',
-      weekday: '1',
-      filterText: '',
-      selectedKey: '',
-      dragging: false,
-      dragMoved: false,
-      dragStartX: 0,
-      dragStartY: 0,
-      dragStartCenterX: 0,
-      dragStartCenterY: 0
-    };
+function currentSection(){
+  if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'stop') return state.payload.stopData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'stopRoute') return state.payload.stopRouteData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'route') return state.payload.routeData || { previousDay:[], allDays:[], weekday:{} };
+  return state.payload.vehicleData || { previousDay:[], allDays:[], weekday:{} };
+}
 
-    const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
-      timeZone: 'Europe/Moscow',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
+function currentDataset(){
+  const section = currentSection();
+  const base = state.periodMode === 'previous' ? (section.previousDay || []) : state.periodMode === 'all' ? (section.allDays || []) : ((section.weekday || {})[state.weekday] || []);
+  return base.filter(item => (item.terminalPolicy || 'with-terminals') === state.terminalPolicy);
+}
+
+function itemKey(item){
+  if (state.mode === 'stop') return item.stopId;
+  if (state.mode === 'stopRoute') return `${item.stopId}|${item.routeNumber}`;
+  if (state.mode === 'route') return item.routeNumber;
+  return item.plate;
+}
+
+function itemFilterValue(item){
+  return normalize([item.stopName, item.stopId, item.routeNumber, item.plate].join(' '));
+}
+
+function sortValue(item){
+  switch (state.sortField) {
+    case 'max': return Number(item.maxDwellSeconds || 0);
+    case 'avg': return Number(item.averageDwellSeconds || 0);
+    case 'visits': return Number(item.visitCount || 0);
+    case 'days': return Number(item.sampleDays || 0);
+    case 'total':
+    default: return Number(item.totalDwellSeconds || 0);
+  }
+}
+
+function filteredItems(){
+  const sign = state.sortDir === 'asc' ? 1 : -1;
+  return currentDataset()
+    .filter(item => !state.filterText || itemFilterValue(item).includes(normalize(state.filterText)))
+    .slice()
+    .sort((a,b) => {
+      const diff = sortValue(a) - sortValue(b);
+      if (diff !== 0) return diff * sign;
+      return String(itemKey(a)).localeCompare(String(itemKey(b))) * sign;
     });
+}
 
-    function normalize(value) {
-      return String(value || '').trim().toLowerCase();
+function findRouteShape(routeNumber){ return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber); }
+function findStop(stopId){ return (state.payload.stops || []).find(item => item.stopId === stopId); }
+
+function renderTiles(){
+  if(!state.config) return;
+  const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin();
+  let html='';
+  const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  for(let x=minTileX;x<=maxTileX;x++){
+    for(let y=minTileY;y<=maxTileY;y++){
+      if(y<0||y>maxTile) continue;
+      const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top;
+      html += `<img src="${tileUrl(z,wrappedX,y)}" style="left:${left}px;top:${top}px" alt="">`;
     }
+  }
+  tilesEl.innerHTML=html;
+}
 
-    function formatDate(value) {
-      return value ? `${dateTimeFormatter.format(new Date(value))} MSK` : 'no data';
+function renderOverlay(){
+  overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+  overlayEl.setAttribute('width', mapEl.clientWidth);
+  overlayEl.setAttribute('height', mapEl.clientHeight);
+  const items = filteredItems();
+  if (!items.length) {
+    overlayEl.innerHTML = '';
+    emptyEl.style.display = 'grid';
+    emptyEl.textContent = state.payload && state.payload.status === 'empty' ? (state.payload.message || 'No data.') : 'No items for the selected mode and filter.';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  const origin = getViewportOrigin();
+  const parts = [];
+  if (isStopMode()) {
+    for (const item of items) {
+      const point = project(item.latitude, item.longitude, state.zoom);
+      const radius = Math.max(4, Math.min(12, 4 + Math.log10(Math.max(1, Number(item.totalDwellSeconds || 0))) * 2));
+      parts.push(`<circle data-key="${escapeAttr(item.stopId)}" cx="${(point.x-origin.left).toFixed(2)}" cy="${(point.y-origin.top).toFixed(2)}" r="${radius.toFixed(2)}" fill="rgba(13,107,102,0.88)" stroke="rgba(255,255,255,0.94)" stroke-width="1.5" style="pointer-events:auto; cursor:pointer"></circle>`);
     }
-
-    function formatSeconds(totalSeconds) {
-      const seconds = Number(totalSeconds || 0);
-      const hours = Math.floor(seconds / 3600);
-      const minutes = Math.floor((seconds % 3600) / 60);
-      const remain = seconds % 60;
-      if (hours > 0) {
-        return `${hours}h ${minutes}m ${remain}s`;
+  } else {
+    const visibleRoutes = new Set(items.map(item => item.routeNumber).filter(Boolean));
+    for (const route of state.payload.routeShapes || []) {
+      if (!visibleRoutes.has(route.routeNumber)) continue;
+      const active = items.some(item => itemKey(item) === state.selectedKey && item.routeNumber === route.routeNumber);
+      for (const path of route.paths || []) {
+        const pts = path.map(point => {
+          const pr = project(point.latitude, point.longitude, state.zoom);
+          return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
+        }).join(' ');
+        parts.push(`<polyline data-key="${escapeAttr(route.routeNumber)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
       }
-      if (minutes > 0) {
-        return `${minutes}m ${remain}s`;
-      }
-      return `${remain}s`;
     }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;');
-    }
-
-    function escapeAttr(value) {
-      return escapeHtml(value).replaceAll("'", '&#39;');
-    }
-
-    function lonToWorldX(lon, zoom) {
-      return ((lon + 180) / 360) * tileSize * Math.pow(2, zoom);
-    }
-
-    function latToWorldY(lat, zoom) {
-      const sin = Math.sin(lat * Math.PI / 180);
-      const value = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
-      return value * tileSize * Math.pow(2, zoom);
-    }
-
-    function worldToLon(x, zoom) {
-      return x / (tileSize * Math.pow(2, zoom)) * 360 - 180;
-    }
-
-    function worldToLat(y, zoom) {
-      const value = Math.PI - 2 * Math.PI * y / (tileSize * Math.pow(2, zoom));
-      return 180 / Math.PI * Math.atan(0.5 * (Math.exp(value) - Math.exp(-value)));
-    }
-
-    function project(lat, lon, zoom) {
-      return { x: lonToWorldX(lon, zoom), y: latToWorldY(lat, zoom) };
-    }
-
-    function getViewportOrigin() {
-      const center = project(state.centerLat, state.centerLon, state.zoom);
-      return {
-        left: center.x - mapEl.clientWidth / 2,
-        top: center.y - mapEl.clientHeight / 2
-      };
-    }
-
-    function renderTiles() {
-      if (!state.config) return;
-      const origin = getViewportOrigin();
-      const minX = Math.floor(origin.left / tileSize);
-      const minY = Math.floor(origin.top / tileSize);
-      const maxX = Math.floor((origin.left + mapEl.clientWidth) / tileSize);
-      const maxY = Math.floor((origin.top + mapEl.clientHeight) / tileSize);
-      const maxIndex = Math.pow(2, state.zoom);
-      const parts = [];
-
-      for (let tileX = minX; tileX <= maxX; tileX++) {
-        for (let tileY = minY; tileY <= maxY; tileY++) {
-          if (tileY < 0 || tileY >= maxIndex) continue;
-          const wrappedX = ((tileX % maxIndex) + maxIndex) % maxIndex;
-          const left = tileX * tileSize - origin.left;
-          const top = tileY * tileSize - origin.top;
-          parts.push(`<img src="./tiles/base/${state.zoom}/${wrappedX}/${tileY}.png" style="left:${left}px;top:${top}px" alt="">`);
-        }
-      }
-      baseTilesEl.innerHTML = parts.join('');
-    }
-
-    function findRouteShape(routeNumber) {
-      return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber);
-    }
-
-    function findStop(stopId) {
-      return (state.payload.stops || []).find(item => item.stopId === stopId);
-    }
-
-    function currentSection() {
-      if (state.viewMode === 'stops') return state.payload.stopsData || { previousDay: [], allDays: [], weekday: {} };
-      if (state.viewMode === 'routes') return state.payload.routesData || { previousDay: [], allDays: [], weekday: {} };
-      return state.payload.vehiclesData || { previousDay: [], allDays: [], weekday: {} };
-    }
-
-    function currentDataset() {
-      const section = currentSection();
-      if (state.periodMode === 'previous') return section.previousDay || [];
-      if (state.periodMode === 'all') return section.allDays || [];
-      return (section.weekday || {})[state.weekday] || [];
-    }
-
-    function itemKey(item) {
-      if (state.viewMode === 'stops') return item.stopId;
-      if (state.viewMode === 'routes') return item.routeNumber;
-      return item.plate;
-    }
-
-    function itemFilterValue(item) {
-      if (state.viewMode === 'stops') {
-        return `${normalize(item.stopName)} ${normalize(item.stopId)}`;
-      }
-      if (state.viewMode === 'routes') {
-        return `${normalize(item.routeNumber)}`;
-      }
-      return `${normalize(item.plate)} ${normalize(item.routeNumber)}`;
-    }
-
-    function filteredItems() {
-      const items = currentDataset();
-      const query = normalize(state.filterText);
-      if (!query) return items;
-      return items.filter(item => itemFilterValue(item).includes(query));
-    }
-
-    function formatMetrics(item) {
-      const avg = formatSeconds(item.averageDwellSeconds);
-      const max = formatSeconds(item.maxDwellSeconds);
-      const total = formatSeconds(item.totalDwellSeconds);
-      const days = item.sampleDays ? `, days ${item.sampleDays}` : '';
-      return `avg ${avg}, max ${max}, total ${total}, visits ${item.visitCount}${days}`;
-    }
-
-    function renderList() {
-      const items = filteredItems();
-      if (!items.length) {
-        listEl.innerHTML = '<div class="item-note">No items for the selected mode and filter.</div>';
-        return;
-      }
-
-      listEl.innerHTML = items.map(item => {
-        const key = itemKey(item);
-        const active = state.selectedKey === key ? ' active' : '';
-        const title = state.viewMode === 'stops'
-          ? escapeHtml(item.stopName)
-          : state.viewMode === 'routes'
-            ? escapeHtml(item.routeNumber)
-            : `${escapeHtml(item.plate)} · ${escapeHtml(item.routeNumber)}`;
-        const time = state.periodMode === 'previous'
-          ? `Total ${escapeHtml(formatSeconds(item.totalDwellSeconds))}`
-          : `Avg ${escapeHtml(formatSeconds(item.averageDwellSeconds))}`;
-        return `
-          <div class="item${active}" data-key="${escapeAttr(key)}">
-            <div class="item-title">
-              <div class="item-name">${title}</div>
-              <div class="item-time">${time}</div>
-            </div>
-            <div class="item-note">${escapeHtml(formatMetrics(item))}</div>
-          </div>
-        `;
-      }).join('');
-
-      listEl.querySelectorAll('.item').forEach(element => {
-        element.addEventListener('click', () => {
-          state.selectedKey = element.dataset.key;
-          centerOnSelection();
-          renderAll();
-        });
-      });
-    }
-
-    function renderMeta() {
-      const items = filteredItems();
-      document.getElementById('updatedAt').textContent = `Updated: ${formatDate(state.payload.updatedAt)}`;
-      document.getElementById('modeMeta').textContent =
-        `Mode: ${state.viewMode}, ` +
-        `${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days average' : `weekday average (${selectedWeekdayLabel()})`}`;
-      document.getElementById('countMeta').textContent = `Items: ${items.length}`;
-      document.getElementById('sidebarTitle').textContent =
-        state.viewMode === 'stops' ? 'Stops' : state.viewMode === 'routes' ? 'Routes' : 'Vehicles';
-      document.getElementById('sidebarMeta').textContent =
-        state.viewMode === 'stops'
-          ? 'Click a stop on the map or in the list to filter dwell statistics.'
-          : state.viewMode === 'routes'
-            ? 'Click a route line on the map or in the list to filter dwell statistics.'
-            : 'Click a vehicle in the list to filter by plate; the map shows its route line.';
-    }
-
-    function selectedWeekdayLabel() {
-      const option = weekdaySelect.options[weekdaySelect.selectedIndex];
-      return option ? option.textContent : 'weekday';
-    }
-
-    function renderOverlay() {
-      overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
-      overlayEl.setAttribute('width', mapEl.clientWidth);
-      overlayEl.setAttribute('height', mapEl.clientHeight);
-
-      const items = filteredItems();
-      if (!items.length) {
-        overlayEl.innerHTML = '';
-        emptyEl.style.display = 'grid';
-        emptyEl.textContent = state.payload.status === 'empty'
-          ? (state.payload.message || 'No data.')
-          : 'No items for the selected mode and filter.';
-        return;
-      }
-
-      emptyEl.style.display = 'none';
-      const origin = getViewportOrigin();
-      const parts = [];
-
-      if (state.viewMode === 'stops') {
-        for (const item of items) {
-          const point = project(item.latitude, item.longitude, state.zoom);
-          const radius = Math.max(4, Math.min(12, 4 + Math.log10(Math.max(1, Number(item.totalDwellSeconds || 0))) * 2));
-          parts.push(
-            `<circle data-key="${escapeAttr(item.stopId)}" cx="${(point.x - origin.left).toFixed(2)}" cy="${(point.y - origin.top).toFixed(2)}" r="${radius.toFixed(2)}" fill="rgba(13,107,102,0.88)" stroke="rgba(255,255,255,0.94)" stroke-width="1.5" style="pointer-events:auto; cursor:pointer"></circle>`
-          );
-        }
+  }
+  overlayEl.innerHTML = parts.join('');
+  overlayEl.querySelectorAll('circle,polyline').forEach(element => {
+    element.addEventListener('click', () => {
+      if (isStopMode()) {
+        state.selectedKey = element.dataset.key;
       } else {
-        const routeNumbers = new Set(items.map(item => item.routeNumber).filter(Boolean));
-        for (const routeNumber of routeNumbers) {
-          const route = findRouteShape(routeNumber);
-          if (!route) continue;
-          for (const path of route.paths || []) {
-            const polyline = path.map(point => {
-              const projected = project(point.latitude, point.longitude, state.zoom);
-              return `${(projected.x - origin.left).toFixed(2)},${(projected.y - origin.top).toFixed(2)}`;
-            }).join(' ');
-            parts.push(
-              `<polyline data-key="${escapeAttr(routeNumber)}" points="${polyline}" fill="none" stroke="rgba(204,98,52,0.92)" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`
-            );
-          }
-        }
+        state.selectedKey = filteredItems().find(item => item.routeNumber === element.dataset.key)?.plate || element.dataset.key;
       }
-
-      overlayEl.innerHTML = parts.join('');
-      overlayEl.querySelectorAll('circle,polyline').forEach(element => {
-        element.addEventListener('click', event => {
-          event.stopPropagation();
-          applyMapSelection(element.dataset.key);
-        });
-      });
-    }
-
-    function centerOnSelection() {
-      if (!state.selectedKey) return;
-      if (state.viewMode === 'stops') {
-        const stop = findStop(state.selectedKey);
-        if (!stop) return;
-        state.centerLat = stop.latitude;
-        state.centerLon = stop.longitude;
-        return;
-      }
-      const routeNumber = state.viewMode === 'routes'
-        ? state.selectedKey
-        : (filteredItems().find(item => item.plate === state.selectedKey) || {}).routeNumber;
-      const route = findRouteShape(routeNumber);
-      if (!route || !route.paths || !route.paths.length || !route.paths[0].length) return;
-      const firstPoint = route.paths[0][0];
-      state.centerLat = firstPoint.latitude;
-      state.centerLon = firstPoint.longitude;
-    }
-
-    function applyMapSelection(key) {
-      state.selectedKey = key || '';
-      if (state.viewMode === 'stops') {
-        const stop = findStop(key);
-        state.filterText = stop ? stop.stopName : '';
-      } else {
-        state.filterText = key || '';
-      }
-      filterInput.value = state.filterText;
-      centerOnSelection();
-      renderAll();
-    }
-
-    function adjustZoom(delta) {
-      if (!state.config) return;
-      const next = Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom + delta));
-      if (next === state.zoom) return;
-      state.zoom = next;
-      renderTiles();
-      renderOverlay();
-    }
-
-    function onPointerDown(event) {
-      state.dragging = true;
-      state.dragMoved = false;
-      mapEl.classList.add('dragging');
-      state.dragStartX = event.clientX;
-      state.dragStartY = event.clientY;
-      const center = project(state.centerLat, state.centerLon, state.zoom);
-      state.dragStartCenterX = center.x;
-      state.dragStartCenterY = center.y;
-    }
-
-    function onPointerMove(event) {
-      if (!state.dragging) return;
-      if (Math.abs(event.clientX - state.dragStartX) > 3 || Math.abs(event.clientY - state.dragStartY) > 3) {
-        state.dragMoved = true;
-      }
-      const dx = event.clientX - state.dragStartX;
-      const dy = event.clientY - state.dragStartY;
-      const centerX = state.dragStartCenterX - dx;
-      const centerY = state.dragStartCenterY - dy;
-      state.centerLon = worldToLon(centerX, state.zoom);
-      state.centerLat = worldToLat(centerY, state.zoom);
-      renderTiles();
-      renderOverlay();
-    }
-
-    function onPointerUp() {
-      state.dragging = false;
-      mapEl.classList.remove('dragging');
-    }
-
-    function pointToSegmentDistance(px, py, ax, ay, bx, by) {
-      const dx = bx - ax;
-      const dy = by - ay;
-      if (dx === 0 && dy === 0) return Math.hypot(px - ax, py - ay);
-      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
-      const cx = ax + t * dx;
-      const cy = ay + t * dy;
-      return Math.hypot(px - cx, py - cy);
-    }
-
-    function hitTestRoute(screenX, screenY) {
-      const routeNumbers = new Set(filteredItems().map(item => item.routeNumber).filter(Boolean));
-      const origin = getViewportOrigin();
-      let best = null;
-      let bestDistance = 10;
-      for (const route of state.payload.routeShapes || []) {
-        if (!routeNumbers.has(route.routeNumber)) continue;
-        for (const path of route.paths || []) {
-          for (let i = 1; i < path.length; i++) {
-            const a = project(path[i - 1].latitude, path[i - 1].longitude, state.zoom);
-            const b = project(path[i].latitude, path[i].longitude, state.zoom);
-            const distance = pointToSegmentDistance(
-              screenX,
-              screenY,
-              a.x - origin.left,
-              a.y - origin.top,
-              b.x - origin.left,
-              b.y - origin.top
-            );
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              best = route.routeNumber;
-            }
-          }
-        }
-      }
-      return best;
-    }
-
-    function hitTestStop(screenX, screenY) {
-      const stopIds = new Set(filteredItems().map(item => item.stopId));
-      const origin = getViewportOrigin();
-      let best = null;
-      let bestDistance = 10;
-      for (const stop of state.payload.stops || []) {
-        if (!stopIds.has(stop.stopId)) continue;
-        const point = project(stop.latitude, stop.longitude, state.zoom);
-        const distance = Math.hypot(screenX - (point.x - origin.left), screenY - (point.y - origin.top));
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = stop.stopId;
-        }
-      }
-      return best;
-    }
-
-    function onMapClick(event) {
-      if (!state.payload || state.payload.status !== 'ok' || state.dragMoved) return;
-      const rect = mapEl.getBoundingClientRect();
-      const screenX = event.clientX - rect.left;
-      const screenY = event.clientY - rect.top;
-      const key = state.viewMode === 'stops'
-        ? hitTestStop(screenX, screenY)
-        : hitTestRoute(screenX, screenY);
-      if (key) applyMapSelection(key);
-    }
-
-    function populateWeekdays() {
-      weekdaySelect.innerHTML = (state.payload.weekdays || []).map(item =>
-        `<option value="${item.id}">${escapeHtml(item.label)}</option>`
-      ).join('');
-      weekdaySelect.value = state.weekday;
-    }
-
-    function renderAll() {
-      renderMeta();
-      renderTiles();
-      renderList();
-      renderOverlay();
-    }
-
-    async function load() {
-      const [mapResponse, rubberResponse] = await Promise.all([
-        fetch('./api/map-config', { cache: 'no-store' }),
-        fetch('./api/rubberiness', { cache: 'no-store' })
-      ]);
-      state.config = await mapResponse.json();
-      state.payload = await rubberResponse.json();
-
-      if (state.config.center) {
-        state.centerLat = state.config.center.latitude;
-        state.centerLon = state.config.center.longitude;
-      }
-      state.zoom = state.config.initialZoom || state.zoom;
-      populateWeekdays();
-      renderAll();
-    }
-
-    document.getElementById('zoomIn').addEventListener('click', () => adjustZoom(1));
-    document.getElementById('zoomOut').addEventListener('click', () => adjustZoom(-1));
-    document.getElementById('modeGroup').addEventListener('change', event => {
-      state.viewMode = event.target.value;
-      state.selectedKey = '';
       renderAll();
     });
-    document.getElementById('periodGroup').addEventListener('change', event => {
-      state.periodMode = event.target.value;
-      state.selectedKey = '';
-      renderAll();
-    });
-    weekdaySelect.addEventListener('change', () => {
-      state.weekday = weekdaySelect.value;
-      if (state.periodMode === 'weekday') renderAll();
-    });
-    filterInput.addEventListener('input', () => {
-      state.filterText = filterInput.value;
-      renderAll();
-    });
-    mapEl.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
-    mapEl.addEventListener('click', onMapClick);
-    window.addEventListener('resize', renderAll);
+  });
+}
 
-    load().catch(error => {
-      emptyEl.style.display = 'grid';
-      emptyEl.textContent = `Failed to load rubberiness cache: ${error}`;
-    });
-  </script>
+function listTitle(item){
+  if (state.mode === 'stop') return item.stopName;
+  if (state.mode === 'stopRoute') return `${item.stopName} · ${item.routeNumber}`;
+  if (state.mode === 'route') return item.routeNumber;
+  return `${item.plate} · ${item.routeNumber}`;
+}
+
+function listMetric(item){
+  return `total ${formatSeconds(item.totalDwellSeconds)}`;
+}
+
+function listNote(item){
+  const days = item.sampleDays ? `, days ${item.sampleDays}` : '';
+  return `avg ${formatSeconds(item.averageDwellSeconds)}, max ${formatSeconds(item.maxDwellSeconds)}, visits ${item.visitCount}${days}`;
+}
+
+function renderList(){
+  const items = filteredItems();
+  if (!items.length) {
+    listEl.innerHTML = '<div class="item-note">No items for the selected mode.</div>';
+    return;
+  }
+  listEl.innerHTML = items.map(item => {
+    const key = itemKey(item);
+    const active = state.selectedKey === key ? ' active' : '';
+    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div></div>`;
+  }).join('');
+  listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
+    state.selectedKey = element.dataset.key;
+    renderAll();
+  }));
+}
+
+function renderMeta(){
+  const items = filteredItems();
+  document.getElementById('updatedAt').textContent = `Updated: ${formatDate(state.payload.updatedAt)}`;
+  document.getElementById('modeMeta').textContent =
+    `${state.mode}, ${state.terminalPolicy}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
+  document.getElementById('countMeta').textContent = `Items: ${items.length}`;
+  document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Vehicles' : state.mode === 'route' ? 'Routes' : 'Stops';
+  document.getElementById('sidebarMeta').textContent = 'Sort works on all displayed numeric metrics. Use terminal policy to compare endpoint-inflated dwell against internal stops only.';
+}
+
+function adjustZoom(delta){
+  if(!state.config) return;
+  const nz=Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom+delta));
+  if(nz===state.zoom) return;
+  state.zoom=nz;
+  renderTiles();
+  renderOverlay();
+}
+
+function onPointerDown(e){ state.dragging=true; state.dragMoved=false; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
+function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
+function onPointerUp(){ state.dragging=false; mapEl.classList.remove('dragging'); }
+
+function populateWeekdays(){
+  weekdaySelect.innerHTML=(state.payload.weekdays||[]).map(i=>`<option value="${i.id}">${escapeHtml(i.label)}</option>`).join('');
+  weekdaySelect.value=state.weekday;
+}
+
+function renderAll(){
+  renderMeta();
+  renderTiles();
+  renderList();
+  renderOverlay();
+}
+
+async function loadAll(){
+  const [configResponse,payloadResponse] = await Promise.all([
+    fetch('./api/map-config',{cache:'no-store'}),
+    fetch('./api/rubberiness',{cache:'no-store'})
+  ]);
+  state.config = await configResponse.json();
+  state.payload = await payloadResponse.json();
+  if (state.config.center) {
+    state.centerLon = state.config.center.longitude;
+    state.centerLat = state.config.center.latitude;
+  }
+  state.zoom = state.config.initialZoom || state.zoom;
+  populateWeekdays();
+  renderAll();
+}
+
+document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; state.selectedKey=''; renderAll(); });
+document.getElementById('terminalGroup').addEventListener('change', event => { state.terminalPolicy = event.target.value; state.selectedKey=''; renderAll(); });
+document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; state.selectedKey=''; renderAll(); });
+weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; renderAll(); });
+sortFieldSelect.addEventListener('change', () => { state.sortField = sortFieldSelect.value; renderAll(); });
+sortDirSelect.addEventListener('change', () => { state.sortDir = sortDirSelect.value; renderAll(); });
+filterInput.addEventListener('input', () => { state.filterText = filterInput.value; renderAll(); });
+document.getElementById('zoomIn').addEventListener('click', ()=>adjustZoom(1));
+document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1));
+mapEl.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderOverlay(); });
+
+loadAll().catch(error => {
+  emptyEl.style.display='grid';
+  emptyEl.textContent=`Failed to load rubberiness cache: ${error}`;
+});
+</script>
 </body>
 </html>

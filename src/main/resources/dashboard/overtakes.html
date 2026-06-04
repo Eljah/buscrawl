@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,33 +8,34 @@
     :root { --bg:#f3efe6; --panel:rgba(255,250,242,.95); --ink:#1d2a38; --muted:#5e6b78; --shadow:0 16px 40px rgba(29,42,56,.1); }
     * { box-sizing:border-box; }
     body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:radial-gradient(circle at top left,#f8d7b8 0,transparent 28%), linear-gradient(180deg,#efe7db 0%,var(--bg) 100%); }
-    .wrap { max-width:1460px; margin:0 auto; padding:28px 18px 36px; }
-    .topline, .control-row, .map-meta, .item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+    .wrap { max-width:1480px; margin:0 auto; padding:28px 18px 36px; }
+    .topline,.control-row,.map-meta,.item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
     .hero { display:grid; gap:12px; margin-bottom:18px; }
     h1 { margin:0; font-size:clamp(28px,4.8vw,52px); line-height:.95; letter-spacing:-.03em; }
     .links { display:flex; gap:14px; flex-wrap:wrap; }
     .links a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(29,42,56,.25); font-size:15px; }
-    .subtitle, .sidebar-meta, .item-note, .map-meta, .control-row { color:var(--muted); font-size:14px; line-height:1.45; }
-    .layout { display:grid; grid-template-columns:minmax(0,1fr) 390px; gap:16px; align-items:start; }
+    .subtitle,.sidebar-meta,.item-note,.map-meta,.control-row { color:var(--muted); font-size:14px; line-height:1.45; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:16px; align-items:start; }
     .card { background:var(--panel); border:1px solid rgba(29,42,56,.08); border-radius:22px; box-shadow:var(--shadow); }
-    .map-card, .sidebar { padding:16px; }
+    .map-card,.sidebar { padding:16px; }
     .controls { display:grid; gap:12px; margin-bottom:12px; }
     .radio-group { display:flex; gap:10px; flex-wrap:wrap; }
     .radio-group label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
-    select, input[type="text"] { border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
+    select,input[type="text"] { border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
     .map-shell { position:relative; height:min(78vh,920px); min-height:520px; overflow:hidden; border-radius:18px; background:#6d7277; border:1px solid rgba(29,42,56,.08); cursor:grab; user-select:none; }
     .map-shell.dragging { cursor:grabbing; }
     .map-zoom { position:absolute; right:14px; top:14px; z-index:4; display:grid; gap:8px; }
     .map-zoom button { width:42px; height:42px; border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(29,42,56,.12); }
-    .tile-layer, .overlay-layer { position:absolute; inset:0; }
+    .tile-layer,.overlay-layer { position:absolute; inset:0; }
     .tile-layer img { position:absolute; width:256px; height:256px; }
     .overlay-layer { overflow:visible; }
     .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.22); backdrop-filter:blur(2px); }
-    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 150px); overflow:auto; padding-right:4px; }
+    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 160px); overflow:auto; padding-right:4px; }
     .item { border:1px solid rgba(29,42,56,.08); border-radius:14px; background:rgba(255,255,255,.56); padding:12px 13px; cursor:pointer; }
     .item.active { border-color:rgba(214,113,58,.65); box-shadow:0 0 0 2px rgba(214,113,58,.15); }
     .item-name { font-size:18px; }
     .item-time { color:var(--muted); font-size:14px; white-space:nowrap; }
+    .item-note { margin-top:6px; font-size:13px; }
     @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
   </style>
 </head>
@@ -42,53 +43,72 @@
 <div class="wrap">
   <section class="hero">
     <div class="topline">
-      <h1>Нарушение очередности</h1>
+      <h1>Overtakes</h1>
       <div class="links">
-        <a href="./">К основному дашборду</a>
-        <a href="./stop-last-pass">Последние проезды через остановки</a>
-        <a href="./rubberiness">Резина</a>
+        <a href="./">Dashboard</a>
+        <a href="./stop-last-pass">Stop Last Pass</a>
+        <a href="./rubberiness">Rubberiness</a>
       </div>
     </div>
-    <p class="subtitle">На карте показаны adjacent segments между остановками. В списке справа отображаются участки, где фиксировались события обгона.</p>
+    <div class="subtitle">Events are built from stop-to-stop trips. You can review overtakes by segment, by segment plus overtaking route, by segment plus overtaking vehicle, or by overtaking vehicle overall.</div>
   </section>
 
   <section class="layout">
     <article class="card map-card">
       <div class="controls">
         <div class="control-row">
-          <strong>Период</strong>
-          <div class="radio-group">
-            <label><input type="radio" name="periodMode" value="previous" checked> Прошедшие сутки</label>
-            <label><input type="radio" name="periodMode" value="all"> Все дни</label>
-            <label><input type="radio" name="periodMode" value="weekday"> День недели</label>
+          <strong>Mode</strong>
+          <div class="radio-group" id="modeGroup">
+            <label><input type="radio" name="mode" value="segment" checked> Segment</label>
+            <label><input type="radio" name="mode" value="segmentRoute"> Segment + Route</label>
+            <label><input type="radio" name="mode" value="segmentVehicle"> Segment + Vehicle</label>
+            <label><input type="radio" name="mode" value="vehicle"> Vehicle</label>
           </div>
-          <select id="weekdaySelect" style="display:none"></select>
         </div>
         <div class="control-row">
-          <strong>Фильтр</strong>
-          <input type="text" id="filterInput" placeholder="Маршрут или название остановки">
+          <strong>Period</strong>
+          <div class="radio-group" id="periodGroup">
+            <label><input type="radio" name="periodMode" value="previous" checked> Previous Day</label>
+            <label><input type="radio" name="periodMode" value="all"> All Days</label>
+            <label><input type="radio" name="periodMode" value="weekday"> Weekday</label>
+          </div>
+          <select id="weekdaySelect"></select>
+        </div>
+        <div class="control-row">
+          <strong>Sort</strong>
+          <select id="sortField"></select>
+          <select id="sortDir">
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <strong>Filter</strong>
+          <input id="filterInput" type="text" placeholder="Segment, route, stop, plate">
         </div>
       </div>
+
       <div class="map-meta">
-        <div id="updatedAt">Обновление: ...</div>
-        <div id="modeMeta">Режим: ...</div>
-        <div id="countMeta">Сегментов: ...</div>
+        <div id="updatedAt">Updated: ...</div>
+        <div id="modeMeta">Mode: ...</div>
+        <div id="countMeta">Items: ...</div>
       </div>
+
       <div class="map-shell" id="map">
         <div class="map-zoom">
-          <button type="button" id="zoomIn" aria-label="Приблизить">+</button>
-          <button type="button" id="zoomOut" aria-label="Отдалить">-</button>
+          <button type="button" id="zoomIn">+</button>
+          <button type="button" id="zoomOut">-</button>
         </div>
         <div class="tile-layer" id="tiles"></div>
         <svg class="overlay-layer" id="overlay"></svg>
-        <div class="empty" id="emptyState">Загрузка карты и агрегатов...</div>
+        <div class="empty" id="emptyState">Loading...</div>
       </div>
     </article>
 
     <aside class="card sidebar">
-      <h2>Сегменты</h2>
-      <div class="sidebar-meta" id="sidebarMeta">Загрузка...</div>
-      <div class="list" id="list"><div class="item-note">Загрузка...</div></div>
+      <h2 id="sidebarTitle">Items</h2>
+      <div class="sidebar-meta" id="sidebarMeta">Click a line or a row to focus the current selection.</div>
+      <div class="list" id="list"></div>
     </aside>
   </section>
 </div>
@@ -102,36 +122,289 @@ const emptyEl = document.getElementById('emptyState');
 const listEl = document.getElementById('list');
 const filterInput = document.getElementById('filterInput');
 const weekdaySelect = document.getElementById('weekdaySelect');
-const state = { config:null, payload:null, centerLon:null, centerLat:null, zoom:null, periodMode:'previous', weekday:'1', filterText:'', selectedKey:null, dragging:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const sortFieldSelect = document.getElementById('sortField');
+const sortDirSelect = document.getElementById('sortDir');
 
-function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} МСК` : 'нет данных'; }
+const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+
+const sortOptions = {
+  previous: [
+    { value:'count', label:'Overtake Count' },
+    { value:'time', label:'Latest Time' },
+    { value:'overtakerDuration', label:'Overtaker Duration' },
+    { value:'overtakenDuration', label:'Overtaken Duration' },
+    { value:'distance', label:'Distance' }
+  ],
+  summary: [
+    { value:'total', label:'Total Overtakes' },
+    { value:'avg', label:'Average Daily Overtakes' },
+    { value:'max', label:'Max Daily Overtakes' },
+    { value:'days', label:'Sample Days' },
+    { value:'time', label:'Latest Time' },
+    { value:'distance', label:'Distance' }
+  ]
+};
+
+function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} MSK` : 'no data'; }
 function lonToWorldX(lon,z){ return ((lon + 180) / 360) * 256 * Math.pow(2, z); }
 function latToWorldY(lat,z){ const sin = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, z); }
 function worldToLon(x,z){ return x / (256 * Math.pow(2, z)) * 360 - 180; }
 function worldToLat(y,z){ const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
 function project(lat,lon,z){ return {x:lonToWorldX(lon,z), y:latToWorldY(lat,z)}; }
 function tileUrl(z,x,y){ return state.config.tileUrlTemplate.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y)); }
-function fitBounds(){ const b=state.config.bounds; const w=mapEl.clientWidth||900; const h=mapEl.clientHeight||600; let chosen=state.config.initialZoom; for(let z=state.config.maxZoom; z>=state.config.minZoom; z--){ const west=project(b.south,b.west,z).x, east=project(b.south,b.east,z).x, north=project(b.north,b.west,z).y, south=project(b.south,b.west,z).y; if((east-west)<=w*.88 && (south-north)<=h*.88){ chosen=z; break; } } state.zoom=chosen; state.centerLon=state.config.center.longitude; state.centerLat=state.config.center.latitude; }
 function getViewportOrigin(){ const c=project(state.centerLat,state.centerLon,state.zoom); return { left:c.x-mapEl.clientWidth/2, top:c.y-mapEl.clientHeight/2 }; }
-function renderTiles(){ const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin(); let html=''; const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256), minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256); for(let x=minTileX;x<=maxTileX;x++){ for(let y=minTileY;y<=maxTileY;y++){ if(y<0||y>maxTile) continue; const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top; html += `<img src="${tileUrl(z,wrappedX,y)}" style="left:${left}px; top:${top}px" alt="">`; } } tilesEl.innerHTML=html; }
-function currentDataset(){ if(!state.payload) return []; if(state.periodMode==='previous') return state.payload.segments.previousDay||[]; if(state.periodMode==='all') return state.payload.segments.allDays||[]; return (state.payload.segments.weekday && state.payload.segments.weekday[state.weekday]) || []; }
-function filteredItems(){ const q=String(state.filterText||'').toLowerCase().trim(); const items=currentDataset(); if(!q) return items; return items.filter(i => `${i.routeNumber} ${i.startStopName} ${i.endStopName}`.toLowerCase().includes(q)); }
-function renderOverlay(){ overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`); overlayEl.setAttribute('width', mapEl.clientWidth); overlayEl.setAttribute('height', mapEl.clientHeight); const items=filteredItems(); if(!items.length){ overlayEl.innerHTML=''; emptyEl.style.display='grid'; emptyEl.textContent = state.payload && state.payload.status === 'empty' ? (state.payload.message || 'Нет данных.') : 'Нет сегментов для выбранного режима.'; return; } emptyEl.style.display='none'; const origin=getViewportOrigin(); const visible=new Set(items.map(i=>i.segmentId)); const parts=[]; for(const seg of state.payload.segmentShapes||[]){ if(!visible.has(seg.segmentId)) continue; const active=state.selectedKey===seg.segmentId; const pts=(seg.path||[]).map(p=>{ const pr=project(p.latitude,p.longitude,state.zoom); return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`; }).join(' '); parts.push(`<polyline data-key="${escapeAttr(seg.segmentId)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.34)'}" stroke-width="${active ? '5' : '3'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`); } overlayEl.innerHTML=parts.join(''); overlayEl.querySelectorAll('polyline').forEach(el => el.addEventListener('click', () => { state.selectedKey=el.dataset.key; renderAll(); })); }
-function renderList(){ const items=filteredItems(); if(!items.length){ listEl.innerHTML='<div class="item-note">Нет сегментов для отображения.</div>'; return; } listEl.innerHTML=items.map(item => { const active = state.selectedKey===item.segmentId ? ' active' : ''; const main = state.periodMode==='previous' ? `${item.overtakeCount} обгонов` : `${item.totalOvertakes} обгонов`; const note = state.periodMode==='previous' ? `Последний: ${formatDate(item.latestOvertakeAt)}` : `Дней: ${item.sampleDays}, avg/day: ${item.averageDailyOvertakes}`; return `<div class="item${active}" data-key="${escapeAttr(item.segmentId)}"><div class="item-title"><div class="item-name">${escapeHtml(item.routeNumber)} · ${escapeHtml(item.startStopName)} → ${escapeHtml(item.endStopName)}</div><div class="item-time">${main}</div></div><div class="item-note">${note}</div></div>`; }).join(''); listEl.querySelectorAll('.item').forEach(el => el.addEventListener('click', ()=>{ state.selectedKey=el.dataset.key; renderAll(); })); }
-function renderMeta(){ const items=filteredItems(); document.getElementById('updatedAt').textContent=`Обновление: ${formatDate(state.payload.updatedAt)}`; document.getElementById('modeMeta').textContent = state.periodMode==='previous' ? `Прошедшие сутки (${state.payload.yesterday})` : state.periodMode==='all' ? 'Все дни' : `День недели: ${selectedWeekdayLabel()}`; document.getElementById('countMeta').textContent=`Сегментов: ${items.length}`; document.getElementById('sidebarMeta').textContent='Клик по линии на карте или строке списка выделяет сегмент.'; }
-function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'день недели'; }
-function renderAll(){ renderMeta(); renderTiles(); renderList(); renderOverlay(); }
-function populateWeekdays(){ weekdaySelect.innerHTML=(state.payload.weekdays||[]).map(i=>`<option value="${i.id}">${escapeHtml(i.label)}</option>`).join(''); weekdaySelect.value=state.weekday; }
+function normalize(v){ return String(v || '').trim().toLowerCase(); }
 function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
-function adjustZoom(delta){ if(!state.config) return; const nz=Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom+delta)); if(nz===state.zoom) return; state.zoom=nz; renderTiles(); renderOverlay(); }
-function onPointerDown(e){ state.dragging=true; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
-function onPointerMove(e){ if(!state.dragging) return; const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
+function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
+function isSegmentMode(){ return state.mode !== 'vehicle'; }
+
+function currentSection(){
+  if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'segment') return state.payload.segmentData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'segmentRoute') return state.payload.segmentRouteData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'segmentVehicle') return state.payload.segmentVehicleData || { previousDay:[], allDays:[], weekday:{} };
+  return state.payload.vehicleData || { previousDay:[], allDays:[], weekday:{} };
+}
+
+function currentDataset(){
+  const section = currentSection();
+  if (state.periodMode === 'previous') return section.previousDay || [];
+  if (state.periodMode === 'all') return section.allDays || [];
+  return (section.weekday || {})[state.weekday] || [];
+}
+
+function itemKey(item){
+  if (state.mode === 'segment') return item.segmentId;
+  if (state.mode === 'segmentRoute') return `${item.segmentId}|${item.overtakerRouteNumber}`;
+  if (state.mode === 'segmentVehicle') return `${item.segmentId}|${item.overtakerPlate}`;
+  return item.overtakerPlate;
+}
+
+function itemFilterValue(item){
+  return normalize([
+    item.segmentId, item.routeNumber, item.overtakerRouteNumber, item.overtakerPlate,
+    item.startStopName, item.endStopName, item.latestStartStopName, item.latestEndStopName
+  ].join(' '));
+}
+
+function sortableValue(item){
+  switch (state.sortField) {
+    case 'count': return Number(item.overtakeCount || 0);
+    case 'total': return Number(item.totalOvertakes || 0);
+    case 'avg': return Number(item.averageDailyOvertakes || 0);
+    case 'max': return Number(item.maxDailyOvertakes || 0);
+    case 'days': return Number(item.sampleDays || 0);
+    case 'distance': return Number(item.distanceMeters || 0);
+    case 'overtakerDuration': return Number(item.averageOvertakerDurationSeconds || 0);
+    case 'overtakenDuration': return Number(item.averageOvertakenDurationSeconds || 0);
+    case 'time': return item.latestOvertakeAt ? Date.parse(item.latestOvertakeAt) : 0;
+    default: return Number(item.overtakeCount || item.totalOvertakes || 0);
+  }
+}
+
+function filteredItems(){
+  const items = currentDataset().filter(item => !state.filterText || itemFilterValue(item).includes(normalize(state.filterText)));
+  const sign = state.sortDir === 'asc' ? 1 : -1;
+  return items.slice().sort((a,b) => {
+    const diff = sortableValue(a) - sortableValue(b);
+    if (diff !== 0) return diff * sign;
+    return String(itemKey(a)).localeCompare(String(itemKey(b))) * sign;
+  });
+}
+
+function renderSortOptions(){
+  const options = state.periodMode === 'previous' ? sortOptions.previous : sortOptions.summary;
+  sortFieldSelect.innerHTML = options.map(option => `<option value="${option.value}">${escapeHtml(option.label)}</option>`).join('');
+  if (!options.some(option => option.value === state.sortField)) {
+    state.sortField = options[0].value;
+  }
+  sortFieldSelect.value = state.sortField;
+}
+
+function findSegmentShape(segmentId){ return (state.payload.segmentShapes || []).find(item => item.segmentId === segmentId); }
+function findRouteShape(routeNumber){ return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber); }
+
+function renderTiles(){
+  if (!state.config) return;
+  const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin();
+  let html='';
+  const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  for(let x=minTileX;x<=maxTileX;x++){
+    for(let y=minTileY;y<=maxTileY;y++){
+      if(y<0||y>maxTile) continue;
+      const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top;
+      html += `<img src="${tileUrl(z,wrappedX,y)}" style="left:${left}px;top:${top}px" alt="">`;
+    }
+  }
+  tilesEl.innerHTML=html;
+}
+
+function renderOverlay(){
+  overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+  overlayEl.setAttribute('width', mapEl.clientWidth);
+  overlayEl.setAttribute('height', mapEl.clientHeight);
+  const items = filteredItems();
+  if (!items.length) {
+    overlayEl.innerHTML = '';
+    emptyEl.style.display = 'grid';
+    emptyEl.textContent = state.payload && state.payload.status === 'empty' ? (state.payload.message || 'No data.') : 'No items for the selected mode and filter.';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  const origin = getViewportOrigin();
+  const parts = [];
+  if (isSegmentMode()) {
+    const visible = new Set(items.map(item => item.segmentId));
+    for (const shape of state.payload.segmentShapes || []) {
+      if (!visible.has(shape.segmentId)) continue;
+      const active = items.some(item => itemKey(item) === state.selectedKey && item.segmentId === shape.segmentId);
+      const pts = (shape.path || []).map(point => {
+        const pr = project(point.latitude, point.longitude, state.zoom);
+        return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
+      }).join(' ');
+      parts.push(`<polyline data-key="${escapeAttr(shape.segmentId)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+    }
+  } else {
+    const routes = new Set(items.map(item => item.overtakerRouteNumber).filter(Boolean));
+    for (const route of state.payload.routeShapes || []) {
+      if (!routes.has(route.routeNumber)) continue;
+      const active = items.some(item => itemKey(item) === state.selectedKey && item.overtakerRouteNumber === route.routeNumber);
+      for (const path of route.paths || []) {
+        const pts = path.map(point => {
+          const pr = project(point.latitude, point.longitude, state.zoom);
+          return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
+        }).join(' ');
+        parts.push(`<polyline data-key="${escapeAttr(route.routeNumber)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+      }
+    }
+  }
+  overlayEl.innerHTML = parts.join('');
+  overlayEl.querySelectorAll('polyline').forEach(element => {
+    element.addEventListener('click', () => {
+      if (isSegmentMode()) {
+        state.selectedKey = element.dataset.key;
+      } else {
+        state.selectedKey = filteredItems().find(item => item.overtakerRouteNumber === element.dataset.key)?.overtakerPlate || element.dataset.key;
+      }
+      renderAll();
+    });
+  });
+}
+
+function listTitle(item){
+  if (state.mode === 'segment') return `${item.routeNumber} · ${item.startStopName} -> ${item.endStopName}`;
+  if (state.mode === 'segmentRoute') return `${item.overtakerRouteNumber} · ${item.startStopName} -> ${item.endStopName}`;
+  if (state.mode === 'segmentVehicle') return `${item.overtakerPlate} · ${item.startStopName} -> ${item.endStopName}`;
+  return `${item.overtakerPlate} · ${item.overtakerRouteNumber || 'route ?'}`;
+}
+
+function listMetric(item){
+  if (state.periodMode === 'previous') return `${item.overtakeCount} overtakes`;
+  return `${item.totalOvertakes} overtakes`;
+}
+
+function listNote(item){
+  if (state.periodMode === 'previous') {
+    const base = `time ${formatDate(item.latestOvertakeAt)}`;
+    if (state.mode === 'vehicle') {
+      return `${base}; latest segment ${item.latestStartStopName || '?'} -> ${item.latestEndStopName || '?'}`;
+    }
+    return `${base}; overtaker ${item.overtakerRouteNumber || item.latestOvertakerRouteNumber || item.routeNumber || '?'} / ${item.overtakerPlate || item.latestOvertakerPlate || '?'}`;
+  }
+  return `days ${item.sampleDays}, avg/day ${item.averageDailyOvertakes}, max/day ${item.maxDailyOvertakes}`;
+}
+
+function renderList(){
+  const items = filteredItems();
+  if (!items.length) {
+    listEl.innerHTML = '<div class="item-note">No items for the selected mode.</div>';
+    return;
+  }
+  listEl.innerHTML = items.map(item => {
+    const key = itemKey(item);
+    const active = state.selectedKey === key ? ' active' : '';
+    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div></div>`;
+  }).join('');
+  listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
+    state.selectedKey = element.dataset.key;
+    renderAll();
+  }));
+}
+
+function renderMeta(){
+  const items = filteredItems();
+  document.getElementById('updatedAt').textContent = `Updated: ${formatDate(state.payload.updatedAt)}`;
+  document.getElementById('modeMeta').textContent =
+    `${state.mode}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
+  document.getElementById('countMeta').textContent = `Items: ${items.length}`;
+  document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
+  document.getElementById('sidebarMeta').textContent =
+    state.periodMode === 'previous'
+      ? 'Rows show concrete latest overtake time and overtaker identity.'
+      : 'Rows show aggregated overtakes across finished days.';
+}
+
+function adjustZoom(delta){
+  if(!state.config) return;
+  const nz=Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom+delta));
+  if(nz===state.zoom) return;
+  state.zoom=nz;
+  renderTiles();
+  renderOverlay();
+}
+
+function onPointerDown(e){ state.dragging=true; state.dragMoved=false; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
+function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
 function onPointerUp(){ state.dragging=false; mapEl.classList.remove('dragging'); }
-function bindControls(){ document.querySelectorAll('input[name="periodMode"]').forEach(input => input.addEventListener('change', ()=>{ state.periodMode=input.value; weekdaySelect.style.display=state.periodMode==='weekday' ? 'inline-block' : 'none'; state.selectedKey=null; renderAll(); })); weekdaySelect.addEventListener('change', ()=>{ state.weekday=weekdaySelect.value; state.selectedKey=null; renderAll(); }); filterInput.addEventListener('input', ()=>{ state.filterText=filterInput.value; state.selectedKey=null; renderAll(); }); document.getElementById('zoomIn').addEventListener('click', ()=>adjustZoom(1)); document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1)); }
-async function loadAll(){ const [configResponse,payloadResponse] = await Promise.all([fetch('./api/map-config',{cache:'no-store'}), fetch('./api/overtakes',{cache:'no-store'})]); state.config=await configResponse.json(); state.payload=await payloadResponse.json(); if(state.config.status!=='ok'){ emptyEl.style.display='grid'; emptyEl.textContent=state.config.message || 'Конфигурация карты недоступна.'; return; } if(state.centerLon==null||state.centerLat==null||state.zoom==null){ fitBounds(); } populateWeekdays(); renderAll(); }
-bindControls(); mapEl.addEventListener('pointerdown', onPointerDown); window.addEventListener('pointermove', onPointerMove); window.addEventListener('pointerup', onPointerUp); window.addEventListener('resize', ()=>{ if(!state.config) return; renderTiles(); renderOverlay(); });
-loadAll().catch(error => { emptyEl.style.display='grid'; emptyEl.textContent=`Не удалось загрузить карту: ${error}`; });
+
+function populateWeekdays(){
+  weekdaySelect.innerHTML=(state.payload.weekdays||[]).map(i=>`<option value="${i.id}">${escapeHtml(i.label)}</option>`).join('');
+  weekdaySelect.value=state.weekday;
+}
+
+function renderAll(){
+  renderSortOptions();
+  renderMeta();
+  renderTiles();
+  renderList();
+  renderOverlay();
+}
+
+async function loadAll(){
+  const [configResponse,payloadResponse] = await Promise.all([
+    fetch('./api/map-config',{cache:'no-store'}),
+    fetch('./api/overtakes',{cache:'no-store'})
+  ]);
+  state.config = await configResponse.json();
+  state.payload = await payloadResponse.json();
+  if (state.config.center) {
+    state.centerLon = state.config.center.longitude;
+    state.centerLat = state.config.center.latitude;
+  }
+  state.zoom = state.config.initialZoom || state.zoom;
+  populateWeekdays();
+  renderAll();
+}
+
+document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; state.selectedKey=''; renderAll(); });
+document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; state.selectedKey=''; renderAll(); });
+weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; renderAll(); });
+sortFieldSelect.addEventListener('change', () => { state.sortField = sortFieldSelect.value; renderAll(); });
+sortDirSelect.addEventListener('change', () => { state.sortDir = sortDirSelect.value; renderAll(); });
+filterInput.addEventListener('input', () => { state.filterText = filterInput.value; renderAll(); });
+document.getElementById('zoomIn').addEventListener('click', ()=>adjustZoom(1));
+document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1));
+mapEl.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderOverlay(); });
+
+loadAll().catch(error => {
+  emptyEl.style.display='grid';
+  emptyEl.textContent=`Failed to load overtake cache: ${error}`;
+});
 </script>
 </body>
 </html>
