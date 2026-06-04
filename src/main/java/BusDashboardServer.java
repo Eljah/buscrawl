@@ -26,15 +26,21 @@ public class BusDashboardServer {
     private final AtomicReference<byte[]> cachedRouteMovementJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedTraceJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedStopLastPassJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedOvertakeJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedRubberinessJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedMapConfigJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedIndexHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedTraceMapHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedStopLastPassHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedOvertakeHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedRubberinessHtml = new AtomicReference<>();
     private final Path statsCacheFile;
     private final Path routeMovementCacheFile;
     private final Path traceCacheFile;
     private final Path stopLastPassCacheFile;
+    private final Path overtakeCacheFile;
+    private final Path rubberinessCacheFile;
     private final Path mapConfigFile;
     private final Path tileRoot;
     private final int port;
@@ -44,6 +50,8 @@ public class BusDashboardServer {
             Path routeMovementCacheFile,
             Path traceCacheFile,
             Path stopLastPassCacheFile,
+            Path overtakeCacheFile,
+            Path rubberinessCacheFile,
             Path mapConfigFile,
             Path tileRoot,
             int port
@@ -52,6 +60,8 @@ public class BusDashboardServer {
         this.routeMovementCacheFile = routeMovementCacheFile;
         this.traceCacheFile = traceCacheFile;
         this.stopLastPassCacheFile = stopLastPassCacheFile;
+        this.overtakeCacheFile = overtakeCacheFile;
+        this.rubberinessCacheFile = rubberinessCacheFile;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
         this.port = port;
@@ -74,6 +84,14 @@ public class BusDashboardServer {
                 "BUS_DASHBOARD_STOP_LAST_PASS_CACHE_FILE",
                 statsCacheFile.resolveSibling("stop-last-pass.json").toString()
         ));
+        Path overtakeCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_OVERTAKE_CACHE_FILE",
+                statsCacheFile.resolveSibling("overtake.json").toString()
+        ));
+        Path rubberinessCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_RUBBERINESS_CACHE_FILE",
+                statsCacheFile.resolveSibling("rubberiness.json").toString()
+        ));
         Path mapConfigFile = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_MAP_CONFIG_FILE",
                 statsCacheFile.resolveSibling("map-config.json").toString()
@@ -89,6 +107,8 @@ public class BusDashboardServer {
                 routeMovementCacheFile,
                 traceCacheFile,
                 stopLastPassCacheFile,
+                overtakeCacheFile,
+                rubberinessCacheFile,
                 mapConfigFile,
                 tileRoot,
                 port
@@ -101,6 +121,8 @@ public class BusDashboardServer {
         cachedRouteMovementHtml.set(loadResourceBytes("dashboard/routes-last-movement.html"));
         cachedTraceMapHtml.set(loadResourceBytes("dashboard/bus-traces-map.html"));
         cachedStopLastPassHtml.set(loadResourceBytes("dashboard/stop-last-pass.html"));
+        cachedOvertakeHtml.set(loadResourceBytes("dashboard/overtakes.html"));
+        cachedRubberinessHtml.set(loadResourceBytes("dashboard/rubberiness.html"));
         refreshCache();
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -112,10 +134,14 @@ public class BusDashboardServer {
         server.createContext("/api/route-last-movement", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRouteMovementJson.get()));
         server.createContext("/api/bus-traces", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedTraceJson.get()));
         server.createContext("/api/stop-last-pass", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedStopLastPassJson.get()));
+        server.createContext("/api/overtakes", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedOvertakeJson.get()));
+        server.createContext("/api/rubberiness", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRubberinessJson.get()));
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
         server.createContext("/stop-last-pass", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedStopLastPassHtml.get()));
+        server.createContext("/overtakes", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedOvertakeHtml.get()));
+        server.createContext("/rubberiness", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRubberinessHtml.get()));
         server.createContext("/tiles", this::handleTileRequest);
         server.createContext("/", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedIndexHtml.get()));
         server.setExecutor(Executors.newCachedThreadPool());
@@ -144,6 +170,12 @@ public class BusDashboardServer {
         )));
         cachedStopLastPassJson.set(loadJsonCache(stopLastPassCacheFile, emptyStopLastPassPayload(
                 "Stop last-pass cache file not found: " + stopLastPassCacheFile
+        )));
+        cachedOvertakeJson.set(loadJsonCache(overtakeCacheFile, emptyOvertakePayload(
+                "Overtake cache file not found: " + overtakeCacheFile
+        )));
+        cachedRubberinessJson.set(loadJsonCache(rubberinessCacheFile, emptyRubberinessPayload(
+                "Rubberiness cache file not found: " + rubberinessCacheFile
         )));
         cachedMapConfigJson.set(loadJsonCache(mapConfigFile, emptyMapConfigPayload(
                 "Map config file not found: " + mapConfigFile
@@ -229,6 +261,44 @@ public class BusDashboardServer {
                 "allDaysAverage", List.of(),
                 "weekdayAverage", Map.of()
         ));
+        return payload;
+    }
+
+    private static Map<String, Object> emptyOvertakePayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("timezone", "Europe/Moscow");
+        payload.put("yesterday", null);
+        payload.put("weekdays", List.of());
+        payload.put("segmentShapes", List.of());
+        payload.put("segments", Map.of(
+                "previousDay", List.of(),
+                "allDays", List.of(),
+                "weekday", Map.of()
+        ));
+        return payload;
+    }
+
+    private static Map<String, Object> emptyRubberinessPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("timezone", "Europe/Moscow");
+        payload.put("yesterday", null);
+        payload.put("weekdays", List.of());
+        payload.put("routeShapes", List.of());
+        payload.put("stops", List.of());
+        Map<String, Object> emptySection = Map.of(
+                "previousDay", List.of(),
+                "allDays", List.of(),
+                "weekday", Map.of()
+        );
+        payload.put("stopsData", emptySection);
+        payload.put("routesData", emptySection);
+        payload.put("vehiclesData", emptySection);
         return payload;
     }
 

@@ -32,15 +32,18 @@ public class RouteTopology {
     private final Map<String, StopInfo> stopsById;
     private final Map<String, RouteInfo> routesById;
     private final List<RouteStopInfo> routeStops;
+    private final List<SegmentInfo> adjacentSegments;
 
     private RouteTopology(
             Map<String, StopInfo> stopsById,
             Map<String, RouteInfo> routesById,
-            List<RouteStopInfo> routeStops
+            List<RouteStopInfo> routeStops,
+            List<SegmentInfo> adjacentSegments
     ) {
         this.stopsById = stopsById;
         this.routesById = routesById;
         this.routeStops = routeStops;
+        this.adjacentSegments = adjacentSegments;
     }
 
     public static RouteTopology load(String filePath) {
@@ -116,7 +119,46 @@ public class RouteTopology {
                     .thenComparingInt(info -> info.direction)
                     .thenComparingInt(info -> info.stopOrder));
 
-            return new RouteTopology(stopsById, routesById, routeStops);
+            List<SegmentInfo> adjacentSegments = new ArrayList<>();
+            Map<String, List<RouteStopInfo>> stopsByRouteDirection = routeStops.stream()
+                    .collect(Collectors.groupingBy(
+                            routeStop -> routeStop.internalRouteId + "|" + routeStop.direction,
+                            LinkedHashMap::new,
+                            Collectors.toList()
+                    ));
+            for (List<RouteStopInfo> routeDirectionStops : stopsByRouteDirection.values()) {
+                routeDirectionStops.sort(Comparator.comparingInt(RouteStopInfo::getStopOrder));
+                for (int i = 1; i < routeDirectionStops.size(); i++) {
+                    RouteStopInfo start = routeDirectionStops.get(i - 1);
+                    RouteStopInfo end = routeDirectionStops.get(i);
+                    if (end.stopOrder != start.stopOrder + 1) {
+                        continue;
+                    }
+                    adjacentSegments.add(new SegmentInfo(
+                            start.internalRouteId,
+                            start.routeNumber,
+                            start.direction,
+                            start.stopOrder,
+                            end.stopOrder,
+                            start.stopId,
+                            start.stopName,
+                            start.stopLatitude,
+                            start.stopLongitude,
+                            end.stopId,
+                            end.stopName,
+                            end.stopLatitude,
+                            end.stopLongitude,
+                            haversineMeters(
+                                    start.stopLatitude,
+                                    start.stopLongitude,
+                                    end.stopLatitude,
+                                    end.stopLongitude
+                            )
+                    ));
+                }
+            }
+
+            return new RouteTopology(stopsById, routesById, routeStops, adjacentSegments);
         } catch (Exception e) {
             throw new RuntimeException("Failed to load route topology", e);
         }
@@ -165,6 +207,48 @@ public class RouteTopology {
                 new StructField("stopLongitude", DataTypes.DoubleType, false, Metadata.empty()),
                 new StructField("direction", DataTypes.IntegerType, false, Metadata.empty()),
                 new StructField("stopOrder", DataTypes.IntegerType, false, Metadata.empty())
+        });
+
+        return spark.createDataFrame(rows, schema);
+    }
+
+    public Dataset<Row> createAdjacentSegmentsDataFrame(SparkSession spark) {
+        List<Row> rows = adjacentSegments.stream()
+                .map(segment -> RowFactory.create(
+                        segment.segmentId,
+                        segment.internalRouteId,
+                        segment.routeNumber,
+                        segment.direction,
+                        segment.startStopOrder,
+                        segment.endStopOrder,
+                        segment.startStopId,
+                        segment.startStopName,
+                        segment.startStopLatitude,
+                        segment.startStopLongitude,
+                        segment.endStopId,
+                        segment.endStopName,
+                        segment.endStopLatitude,
+                        segment.endStopLongitude,
+                        segment.distanceMeters
+                ))
+                .collect(Collectors.toList());
+
+        StructType schema = new StructType(new StructField[]{
+                new StructField("segmentId", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("internalRouteId", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("routeNumber", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("direction", DataTypes.IntegerType, false, Metadata.empty()),
+                new StructField("startStopOrder", DataTypes.IntegerType, false, Metadata.empty()),
+                new StructField("endStopOrder", DataTypes.IntegerType, false, Metadata.empty()),
+                new StructField("startStopId", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("startStopName", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("startStopLatitude", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("startStopLongitude", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("endStopId", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("endStopName", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("endStopLatitude", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("endStopLongitude", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("distanceMeters", DataTypes.DoubleType, false, Metadata.empty())
         });
 
         return spark.createDataFrame(rows, schema);
@@ -220,8 +304,51 @@ public class RouteTopology {
                 .collect(Collectors.toList());
     }
 
+    public List<Map<String, Object>> buildSegmentShapes() {
+        return adjacentSegments.stream()
+                .map(segment -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("segmentId", segment.segmentId);
+                    item.put("routeNumber", segment.routeNumber);
+                    item.put("direction", segment.direction);
+                    item.put("startStopId", segment.startStopId);
+                    item.put("startStopName", segment.startStopName);
+                    item.put("endStopId", segment.endStopId);
+                    item.put("endStopName", segment.endStopName);
+                    item.put("distanceMeters", segment.distanceMeters);
+                    List<Map<String, Object>> path = new ArrayList<>();
+                    Map<String, Object> start = new LinkedHashMap<>();
+                    start.put("latitude", segment.startStopLatitude);
+                    start.put("longitude", segment.startStopLongitude);
+                    path.add(start);
+                    Map<String, Object> end = new LinkedHashMap<>();
+                    end.put("latitude", segment.endStopLatitude);
+                    end.put("longitude", segment.endStopLongitude);
+                    path.add(end);
+                    item.put("path", path);
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
     public Collection<RouteInfo> getRoutes() {
         return routesById.values();
+    }
+
+    public Collection<SegmentInfo> getAdjacentSegments() {
+        return adjacentSegments;
+    }
+
+    private static double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+        double earthRadiusMeters = 6_371_000;
+        double phi1 = Math.toRadians(lat1);
+        double phi2 = Math.toRadians(lat2);
+        double dPhi = Math.toRadians(lat2 - lat1);
+        double dLambda = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dPhi / 2) * Math.sin(dPhi / 2)
+                + Math.cos(phi1) * Math.cos(phi2)
+                * Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
+        return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
     private static String routeSortKey(String routeNumber) {
@@ -294,6 +421,57 @@ public class RouteTopology {
 
         public int getStopOrder() {
             return stopOrder;
+        }
+    }
+
+    public static final class SegmentInfo {
+        private final String segmentId;
+        private final String internalRouteId;
+        private final String routeNumber;
+        private final int direction;
+        private final int startStopOrder;
+        private final int endStopOrder;
+        private final String startStopId;
+        private final String startStopName;
+        private final double startStopLatitude;
+        private final double startStopLongitude;
+        private final String endStopId;
+        private final String endStopName;
+        private final double endStopLatitude;
+        private final double endStopLongitude;
+        private final double distanceMeters;
+
+        private SegmentInfo(
+                String internalRouteId,
+                String routeNumber,
+                int direction,
+                int startStopOrder,
+                int endStopOrder,
+                String startStopId,
+                String startStopName,
+                double startStopLatitude,
+                double startStopLongitude,
+                String endStopId,
+                String endStopName,
+                double endStopLatitude,
+                double endStopLongitude,
+                double distanceMeters
+        ) {
+            this.segmentId = internalRouteId + "|" + direction + "|" + startStopId + "|" + endStopId;
+            this.internalRouteId = internalRouteId;
+            this.routeNumber = routeNumber;
+            this.direction = direction;
+            this.startStopOrder = startStopOrder;
+            this.endStopOrder = endStopOrder;
+            this.startStopId = startStopId;
+            this.startStopName = startStopName;
+            this.startStopLatitude = startStopLatitude;
+            this.startStopLongitude = startStopLongitude;
+            this.endStopId = endStopId;
+            this.endStopName = endStopName;
+            this.endStopLatitude = endStopLatitude;
+            this.endStopLongitude = endStopLongitude;
+            this.distanceMeters = distanceMeters;
         }
     }
 }

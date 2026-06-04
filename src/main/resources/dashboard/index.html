@@ -148,24 +148,27 @@
       <div class="topline">
         <h1>Buscrawl Monitor</h1>
         <div class="nav">
-          <a class="nav-link" href="./routes-last-movement">Последнее движение по маршрутам</a>
-          <a class="nav-link" href="./bus-traces-map">Активные автобусы на карте</a>
+          <a class="nav-link" href="./routes-last-movement">Route Last Movement</a>
+          <a class="nav-link" href="./bus-traces-map">Bus Traces Map</a>
+          <a class="nav-link" href="./stop-last-pass">Stop Last Pass</a>
+          <a class="nav-link" href="./overtakes">Overtakes</a>
+          <a class="nav-link" href="./rubberiness">Rubberiness</a>
         </div>
       </div>
-      <p class="subtitle">Кэшированные метрики по собранным точкам и график плотности потока из parquet-хранилища.</p>
+      <p class="subtitle">Cached metrics built from collected points, parquet analytics, and dashboard sidecar jobs.</p>
     </section>
 
     <section class="stats">
       <article class="card">
-        <p class="label">Всего точек</p>
+        <p class="label">Total Points</p>
         <p class="value" id="totalPoints">...</p>
       </article>
       <article class="card">
-        <p class="label">Интервал агрегации</p>
+        <p class="label">Aggregation Bucket</p>
         <p class="value" id="bucket">...</p>
       </article>
       <article class="card">
-        <p class="label">Последнее обновление</p>
+        <p class="label">Last Update</p>
         <p class="value" id="updatedAt" style="font-size:22px">...</p>
       </article>
     </section>
@@ -173,15 +176,15 @@
     <section class="card chart-card">
       <div class="chart-head">
         <div>
-          <h2 class="chart-title">Плотность собранных точек</h2>
+          <h2 class="chart-title">Collected Point Density</h2>
           <p class="chart-meta" id="rangeMeta">...</p>
         </div>
         <div class="chart-meta" id="cacheMeta"></div>
       </div>
       <div class="chart-box" id="chartBox">
-        <div class="empty">Загрузка данных...</div>
+        <div class="empty">Loading data...</div>
       </div>
-      <div class="footer">График строится из кэша, который обновляется отдельной Java sidecar-задачей.</div>
+      <div class="footer">The chart is rendered from a cached JSON snapshot refreshed by a separate Java sidecar job.</div>
     </section>
   </div>
 
@@ -202,14 +205,14 @@
     }
 
     function formatDate(value) {
-      if (!value) return 'нет данных';
-      return `${dateTimeFormatter.format(new Date(value))} МСК`;
+      if (!value) return 'no data';
+      return `${dateTimeFormatter.format(new Date(value))} MSK`;
     }
 
     function renderChart(series) {
       const box = document.getElementById('chartBox');
       if (!series.length) {
-        box.innerHTML = '<div class="empty">Данных пока недостаточно для построения графика.</div>';
+        box.innerHTML = '<div class="empty">Not enough data to render the chart yet.</div>';
         return;
       }
 
@@ -259,12 +262,12 @@
 
       const dots = points.map(point => `
         <circle cx="${point.x}" cy="${point.y}" r="2.5" fill="var(--line)">
-          <title>${point.label}: ${fmtNumber.format(point.points)} точек</title>
+          <title>${point.label}: ${fmtNumber.format(point.points)} points</title>
         </circle>
       `).join('');
 
       box.innerHTML = `
-        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="График плотности точек">
+        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Collected point density chart">
           ${grid.join('')}
           <path d="${areaPath}" fill="rgba(214, 113, 58, 0.18)"></path>
           <path d="${linePath}" fill="none" stroke="var(--line)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -279,25 +282,25 @@
       const data = await response.json();
 
       setText('updatedAt', formatDate(data.updatedAt));
-      setText('bucket', data.bucket || 'нет данных');
+      setText('bucket', data.bucket || 'no data');
       setText('totalPoints', fmtNumber.format(data.totalPoints || 0));
 
       if (data.status === 'empty') {
-        setText('rangeMeta', data.message || 'Кэш пока пуст.');
+        setText('rangeMeta', data.message || 'Cache is empty.');
         setText('cacheMeta', '');
         document.getElementById('chartBox').innerHTML =
-          `<div class="empty">${data.message || 'Кэш статистики пока недоступен.'}</div>`;
+          `<div class="empty">${data.message || 'Stats cache is not available yet.'}</div>`;
         return;
       }
 
-      setText('rangeMeta', `Окно данных: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}`);
-      setText('cacheMeta', `Обновлено: ${formatDate(data.updatedAt)}`);
+      setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}`);
+      setText('cacheMeta', `Updated: ${formatDate(data.updatedAt)}`);
       renderChart(data.series || []);
     }
 
     load().catch(error => {
       document.getElementById('chartBox').innerHTML =
-        `<div class="empty">Не удалось загрузить кэш: ${error}</div>`;
+        `<div class="empty">Failed to load cache: ${error}</div>`;
     });
   </script>
 </body>

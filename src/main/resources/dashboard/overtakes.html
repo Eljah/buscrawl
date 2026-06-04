@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Overtakes</title>
+  <style>
+    :root { --bg:#f3efe6; --panel:rgba(255,250,242,.95); --ink:#1d2a38; --muted:#5e6b78; --shadow:0 16px 40px rgba(29,42,56,.1); }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:radial-gradient(circle at top left,#f8d7b8 0,transparent 28%), linear-gradient(180deg,#efe7db 0%,var(--bg) 100%); }
+    .wrap { max-width:1460px; margin:0 auto; padding:28px 18px 36px; }
+    .topline, .control-row, .map-meta, .item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+    .hero { display:grid; gap:12px; margin-bottom:18px; }
+    h1 { margin:0; font-size:clamp(28px,4.8vw,52px); line-height:.95; letter-spacing:-.03em; }
+    .links { display:flex; gap:14px; flex-wrap:wrap; }
+    .links a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(29,42,56,.25); font-size:15px; }
+    .subtitle, .sidebar-meta, .item-note, .map-meta, .control-row { color:var(--muted); font-size:14px; line-height:1.45; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 390px; gap:16px; align-items:start; }
+    .card { background:var(--panel); border:1px solid rgba(29,42,56,.08); border-radius:22px; box-shadow:var(--shadow); }
+    .map-card, .sidebar { padding:16px; }
+    .controls { display:grid; gap:12px; margin-bottom:12px; }
+    .radio-group { display:flex; gap:10px; flex-wrap:wrap; }
+    .radio-group label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
+    select, input[type="text"] { border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
+    .map-shell { position:relative; height:min(78vh,920px); min-height:520px; overflow:hidden; border-radius:18px; background:#6d7277; border:1px solid rgba(29,42,56,.08); cursor:grab; user-select:none; }
+    .map-shell.dragging { cursor:grabbing; }
+    .map-zoom { position:absolute; right:14px; top:14px; z-index:4; display:grid; gap:8px; }
+    .map-zoom button { width:42px; height:42px; border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(29,42,56,.12); }
+    .tile-layer, .overlay-layer { position:absolute; inset:0; }
+    .tile-layer img { position:absolute; width:256px; height:256px; }
+    .overlay-layer { overflow:visible; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.22); backdrop-filter:blur(2px); }
+    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 150px); overflow:auto; padding-right:4px; }
+    .item { border:1px solid rgba(29,42,56,.08); border-radius:14px; background:rgba(255,255,255,.56); padding:12px 13px; cursor:pointer; }
+    .item.active { border-color:rgba(214,113,58,.65); box-shadow:0 0 0 2px rgba(214,113,58,.15); }
+    .item-name { font-size:18px; }
+    .item-time { color:var(--muted); font-size:14px; white-space:nowrap; }
+    @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <div class="topline">
+      <h1>Нарушение очередности</h1>
+      <div class="links">
+        <a href="./">К основному дашборду</a>
+        <a href="./stop-last-pass">Последние проезды через остановки</a>
+        <a href="./rubberiness">Резина</a>
+      </div>
+    </div>
+    <p class="subtitle">На карте показаны adjacent segments между остановками. В списке справа отображаются участки, где фиксировались события обгона.</p>
+  </section>
+
+  <section class="layout">
+    <article class="card map-card">
+      <div class="controls">
+        <div class="control-row">
+          <strong>Период</strong>
+          <div class="radio-group">
+            <label><input type="radio" name="periodMode" value="previous" checked> Прошедшие сутки</label>
+            <label><input type="radio" name="periodMode" value="all"> Все дни</label>
+            <label><input type="radio" name="periodMode" value="weekday"> День недели</label>
+          </div>
+          <select id="weekdaySelect" style="display:none"></select>
+        </div>
+        <div class="control-row">
+          <strong>Фильтр</strong>
+          <input type="text" id="filterInput" placeholder="Маршрут или название остановки">
+        </div>
+      </div>
+      <div class="map-meta">
+        <div id="updatedAt">Обновление: ...</div>
+        <div id="modeMeta">Режим: ...</div>
+        <div id="countMeta">Сегментов: ...</div>
+      </div>
+      <div class="map-shell" id="map">
+        <div class="map-zoom">
+          <button type="button" id="zoomIn" aria-label="Приблизить">+</button>
+          <button type="button" id="zoomOut" aria-label="Отдалить">-</button>
+        </div>
+        <div class="tile-layer" id="tiles"></div>
+        <svg class="overlay-layer" id="overlay"></svg>
+        <div class="empty" id="emptyState">Загрузка карты и агрегатов...</div>
+      </div>
+    </article>
+
+    <aside class="card sidebar">
+      <h2>Сегменты</h2>
+      <div class="sidebar-meta" id="sidebarMeta">Загрузка...</div>
+      <div class="list" id="list"><div class="item-note">Загрузка...</div></div>
+    </aside>
+  </section>
+</div>
+
+<script>
+const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', { timeZone:'Europe/Moscow', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+const mapEl = document.getElementById('map');
+const tilesEl = document.getElementById('tiles');
+const overlayEl = document.getElementById('overlay');
+const emptyEl = document.getElementById('emptyState');
+const listEl = document.getElementById('list');
+const filterInput = document.getElementById('filterInput');
+const weekdaySelect = document.getElementById('weekdaySelect');
+const state = { config:null, payload:null, centerLon:null, centerLat:null, zoom:null, periodMode:'previous', weekday:'1', filterText:'', selectedKey:null, dragging:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+
+function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} МСК` : 'нет данных'; }
+function lonToWorldX(lon,z){ return ((lon + 180) / 360) * 256 * Math.pow(2, z); }
+function latToWorldY(lat,z){ const sin = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, z); }
+function worldToLon(x,z){ return x / (256 * Math.pow(2, z)) * 360 - 180; }
+function worldToLat(y,z){ const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
+function project(lat,lon,z){ return {x:lonToWorldX(lon,z), y:latToWorldY(lat,z)}; }
+function tileUrl(z,x,y){ return state.config.tileUrlTemplate.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y)); }
+function fitBounds(){ const b=state.config.bounds; const w=mapEl.clientWidth||900; const h=mapEl.clientHeight||600; let chosen=state.config.initialZoom; for(let z=state.config.maxZoom; z>=state.config.minZoom; z--){ const west=project(b.south,b.west,z).x, east=project(b.south,b.east,z).x, north=project(b.north,b.west,z).y, south=project(b.south,b.west,z).y; if((east-west)<=w*.88 && (south-north)<=h*.88){ chosen=z; break; } } state.zoom=chosen; state.centerLon=state.config.center.longitude; state.centerLat=state.config.center.latitude; }
+function getViewportOrigin(){ const c=project(state.centerLat,state.centerLon,state.zoom); return { left:c.x-mapEl.clientWidth/2, top:c.y-mapEl.clientHeight/2 }; }
+function renderTiles(){ const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin(); let html=''; const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256), minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256); for(let x=minTileX;x<=maxTileX;x++){ for(let y=minTileY;y<=maxTileY;y++){ if(y<0||y>maxTile) continue; const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top; html += `<img src="${tileUrl(z,wrappedX,y)}" style="left:${left}px; top:${top}px" alt="">`; } } tilesEl.innerHTML=html; }
+function currentDataset(){ if(!state.payload) return []; if(state.periodMode==='previous') return state.payload.segments.previousDay||[]; if(state.periodMode==='all') return state.payload.segments.allDays||[]; return (state.payload.segments.weekday && state.payload.segments.weekday[state.weekday]) || []; }
+function filteredItems(){ const q=String(state.filterText||'').toLowerCase().trim(); const items=currentDataset(); if(!q) return items; return items.filter(i => `${i.routeNumber} ${i.startStopName} ${i.endStopName}`.toLowerCase().includes(q)); }
+function renderOverlay(){ overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`); overlayEl.setAttribute('width', mapEl.clientWidth); overlayEl.setAttribute('height', mapEl.clientHeight); const items=filteredItems(); if(!items.length){ overlayEl.innerHTML=''; emptyEl.style.display='grid'; emptyEl.textContent = state.payload && state.payload.status === 'empty' ? (state.payload.message || 'Нет данных.') : 'Нет сегментов для выбранного режима.'; return; } emptyEl.style.display='none'; const origin=getViewportOrigin(); const visible=new Set(items.map(i=>i.segmentId)); const parts=[]; for(const seg of state.payload.segmentShapes||[]){ if(!visible.has(seg.segmentId)) continue; const active=state.selectedKey===seg.segmentId; const pts=(seg.path||[]).map(p=>{ const pr=project(p.latitude,p.longitude,state.zoom); return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`; }).join(' '); parts.push(`<polyline data-key="${escapeAttr(seg.segmentId)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.34)'}" stroke-width="${active ? '5' : '3'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`); } overlayEl.innerHTML=parts.join(''); overlayEl.querySelectorAll('polyline').forEach(el => el.addEventListener('click', () => { state.selectedKey=el.dataset.key; renderAll(); })); }
+function renderList(){ const items=filteredItems(); if(!items.length){ listEl.innerHTML='<div class="item-note">Нет сегментов для отображения.</div>'; return; } listEl.innerHTML=items.map(item => { const active = state.selectedKey===item.segmentId ? ' active' : ''; const main = state.periodMode==='previous' ? `${item.overtakeCount} обгонов` : `${item.totalOvertakes} обгонов`; const note = state.periodMode==='previous' ? `Последний: ${formatDate(item.latestOvertakeAt)}` : `Дней: ${item.sampleDays}, avg/day: ${item.averageDailyOvertakes}`; return `<div class="item${active}" data-key="${escapeAttr(item.segmentId)}"><div class="item-title"><div class="item-name">${escapeHtml(item.routeNumber)} · ${escapeHtml(item.startStopName)} → ${escapeHtml(item.endStopName)}</div><div class="item-time">${main}</div></div><div class="item-note">${note}</div></div>`; }).join(''); listEl.querySelectorAll('.item').forEach(el => el.addEventListener('click', ()=>{ state.selectedKey=el.dataset.key; renderAll(); })); }
+function renderMeta(){ const items=filteredItems(); document.getElementById('updatedAt').textContent=`Обновление: ${formatDate(state.payload.updatedAt)}`; document.getElementById('modeMeta').textContent = state.periodMode==='previous' ? `Прошедшие сутки (${state.payload.yesterday})` : state.periodMode==='all' ? 'Все дни' : `День недели: ${selectedWeekdayLabel()}`; document.getElementById('countMeta').textContent=`Сегментов: ${items.length}`; document.getElementById('sidebarMeta').textContent='Клик по линии на карте или строке списка выделяет сегмент.'; }
+function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'день недели'; }
+function renderAll(){ renderMeta(); renderTiles(); renderList(); renderOverlay(); }
+function populateWeekdays(){ weekdaySelect.innerHTML=(state.payload.weekdays||[]).map(i=>`<option value="${i.id}">${escapeHtml(i.label)}</option>`).join(''); weekdaySelect.value=state.weekday; }
+function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
+function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
+function adjustZoom(delta){ if(!state.config) return; const nz=Math.max(state.config.minZoom, Math.min(state.config.maxZoom, state.zoom+delta)); if(nz===state.zoom) return; state.zoom=nz; renderTiles(); renderOverlay(); }
+function onPointerDown(e){ state.dragging=true; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
+function onPointerMove(e){ if(!state.dragging) return; const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
+function onPointerUp(){ state.dragging=false; mapEl.classList.remove('dragging'); }
+function bindControls(){ document.querySelectorAll('input[name="periodMode"]').forEach(input => input.addEventListener('change', ()=>{ state.periodMode=input.value; weekdaySelect.style.display=state.periodMode==='weekday' ? 'inline-block' : 'none'; state.selectedKey=null; renderAll(); })); weekdaySelect.addEventListener('change', ()=>{ state.weekday=weekdaySelect.value; state.selectedKey=null; renderAll(); }); filterInput.addEventListener('input', ()=>{ state.filterText=filterInput.value; state.selectedKey=null; renderAll(); }); document.getElementById('zoomIn').addEventListener('click', ()=>adjustZoom(1)); document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1)); }
+async function loadAll(){ const [configResponse,payloadResponse] = await Promise.all([fetch('./api/map-config',{cache:'no-store'}), fetch('./api/overtakes',{cache:'no-store'})]); state.config=await configResponse.json(); state.payload=await payloadResponse.json(); if(state.config.status!=='ok'){ emptyEl.style.display='grid'; emptyEl.textContent=state.config.message || 'Конфигурация карты недоступна.'; return; } if(state.centerLon==null||state.centerLat==null||state.zoom==null){ fitBounds(); } populateWeekdays(); renderAll(); }
+bindControls(); mapEl.addEventListener('pointerdown', onPointerDown); window.addEventListener('pointermove', onPointerMove); window.addEventListener('pointerup', onPointerUp); window.addEventListener('resize', ()=>{ if(!state.config) return; renderTiles(); renderOverlay(); });
+loadAll().catch(error => { emptyEl.style.display='grid'; emptyEl.textContent=`Не удалось загрузить карту: ${error}`; });
+</script>
+</body>
+</html>
