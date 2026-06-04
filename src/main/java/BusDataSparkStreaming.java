@@ -5,7 +5,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.streaming.StreamingQueryException;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.storage.StorageLevel;
+import org.apache.spark.sql.streaming.Trigger;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,8 +13,8 @@ import java.nio.file.Paths;
 import java.util.concurrent.TimeoutException;
 
 import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.expr;
 import static org.apache.spark.sql.functions.from_json;
-import static org.apache.spark.sql.functions.to_timestamp;
 
 public class BusDataSparkStreaming {
     public static void main(String[] args) throws StreamingQueryException {
@@ -53,7 +53,9 @@ public class BusDataSparkStreaming {
                 .add("speed", DataTypes.IntegerType)
                 .add("plate", DataTypes.StringType)
                 .add("timestamp", DataTypes.LongType)
-                .add("readableTime", DataTypes.StringType);
+                .add("readableTime", DataTypes.StringType)
+                .add("sourceTimestamp", DataTypes.LongType)
+                .add("sourceReadableTime", DataTypes.StringType);
 
         Dataset<String> lines = spark.readStream()
                 .format("socket")
@@ -63,21 +65,19 @@ public class BusDataSparkStreaming {
                 .as(Encoders.STRING());
 
         Dataset<Row> busData = lines.select(from_json(col("value"), schema).alias("data"))
+                .filter(col("data").isNotNull())
                 .select("data.*")
-                .withColumn("eventTime", to_timestamp(col("readableTime"), "yyyy-MM-dd HH:mm:ss")
-                        .cast(DataTypes.TimestampType));
+                .withColumn("eventTime", expr("timestamp_seconds(timestamp)"));
 
         try {
             busData.writeStream()
                     .foreachBatch((dataset, batchId) -> {
-                        Dataset<Row> persisted = dataset.persist(StorageLevel.MEMORY_AND_DISK());
-                        long rows = persisted.count();
-                        System.out.printf("Batch #%d received. Rows: %d%n", batchId, rows);
-                        persisted.write()
+                        System.out.printf("Batch #%d received%n", batchId);
+                        dataset.write()
                                 .mode("append")
                                 .parquet(outputDir.toAbsolutePath().toString());
-                        persisted.unpersist();
                     })
+                    .trigger(Trigger.ProcessingTime("5 seconds"))
                     .option("checkpointLocation", checkpointDir.toAbsolutePath().toString())
                     .start()
                     .awaitTermination();

@@ -1,0 +1,18 @@
+[Unit]
+Description=Buscrawl Java dashboard
+After=network-online.target buscrawl-stream.service
+Wants=network-online.target buscrawl-stream.service
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-dashboard.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/dashboard.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

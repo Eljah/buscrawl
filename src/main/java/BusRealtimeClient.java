@@ -6,17 +6,31 @@ import okhttp3.logging.HttpLoggingInterceptor;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class BusRealtimeClient {
-    private static final SimpleDateFormat DATE_FORMAT =
-            new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+    private static final ZoneId CITY_ZONE = ZoneId.of(
+            System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow")
+    );
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern(
+            "yyyy-MM-dd HH:mm:ss",
+            Locale.getDefault()
+    );
     private static final boolean VERBOSE_BUS_LOG =
             Boolean.parseBoolean(System.getenv().getOrDefault("BUS_VERBOSE_LOG", "false"));
+    private static final boolean ROUTE_UPDATE_LOG =
+            Boolean.parseBoolean(System.getenv().getOrDefault("BUS_ROUTE_UPDATE_LOG", "false"));
+    private static final boolean TIMESTAMP_DEBUG_LOG =
+            Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TIMESTAMP_DEBUG_LOG", "false"));
+    private static final boolean MODE10_DEBUG_LOG =
+            Boolean.parseBoolean(System.getenv().getOrDefault("BUS_MODE10_DEBUG_LOG", "false"));
+    private static final boolean MODE11_DEBUG_LOG =
+            Boolean.parseBoolean(System.getenv().getOrDefault("BUS_MODE11_DEBUG_LOG", "false"));
     private static final Set<String> SUBSCRIBED_ROUTE_IDS = ConcurrentHashMap.newKeySet();
 
     public static void main(String[] args) throws Exception {
@@ -83,6 +97,18 @@ public class BusRealtimeClient {
                     .put("mode", 11)
                     .put("mobile", 0);
             emit(socket, "rpc_bdata", rpcMode11);
+
+            if (MODE11_DEBUG_LOG) {
+                socket.on("ru.bustime.bus_mode11__960", mode11Args -> {
+                    if (mode11Args.length == 0 || !(mode11Args[0] instanceof JSONObject)) {
+                        System.out.println("Mode11 debug: unexpected payload");
+                        return;
+                    }
+                    JSONObject payload = (JSONObject) mode11Args[0];
+                    System.out.println("Mode11 debug payload keys: " + payload.keySet());
+                    System.out.println("Mode11 debug payload: " + payload);
+                });
+            }
         });
 
         socket.on("ru.bustime.bus_amounts__10", args1 -> {
@@ -109,6 +135,10 @@ public class BusRealtimeClient {
 
         socket.on(eventName, args -> {
             JSONObject data = (JSONObject) args[0];
+            if (MODE10_DEBUG_LOG) {
+                System.out.println("Mode10 debug payload keys: " + data.keySet());
+                System.out.println("Mode10 debug payload: " + data);
+            }
             if (data.has("bdata_mode10")) {
                 handleBusData(routeMapper, tcpServer, internalRouteId, data.getJSONObject("bdata_mode10"));
             }
@@ -121,7 +151,11 @@ public class BusRealtimeClient {
                                       String internalRouteId, JSONObject busData) {
         JSONArray buses = busData.getJSONArray("l");
         String realRouteNumber = routeMapper.getRealRouteNumber(internalRouteId);
-        System.out.printf("Route update: %s (ID: %s), buses: %d%n", realRouteNumber, internalRouteId, buses.length());
+        long minTimestampSec = Long.MAX_VALUE;
+        long maxTimestampSec = Long.MIN_VALUE;
+        if (ROUTE_UPDATE_LOG) {
+            System.out.printf("Route update: %s (ID: %s), buses: %d%n", realRouteNumber, internalRouteId, buses.length());
+        }
 
         for (int i = 0; i < buses.length(); i++) {
             JSONObject bus = buses.getJSONObject(i);
@@ -129,8 +163,14 @@ public class BusRealtimeClient {
             double longitude = bus.getDouble("x");
             int speed = bus.getInt("s");
             String plate = bus.getString("g");
-            long timestampSec = bus.getLong("ts");
-            String readableTime = DATE_FORMAT.format(new Date(timestampSec * 1000));
+            long sourceTimestampSec = bus.getLong("ts");
+            minTimestampSec = Math.min(minTimestampSec, sourceTimestampSec);
+            maxTimestampSec = Math.max(maxTimestampSec, sourceTimestampSec);
+
+            Instant observedAt = Instant.now();
+            long timestampSec = observedAt.getEpochSecond();
+            String readableTime = DATE_FORMAT.format(observedAt.atZone(CITY_ZONE));
+            String sourceReadableTime = DATE_FORMAT.format(Instant.ofEpochSecond(sourceTimestampSec).atZone(CITY_ZONE));
 
             JSONObject jsonBusData = new JSONObject()
                     .put("internalRouteId", internalRouteId)
@@ -140,7 +180,9 @@ public class BusRealtimeClient {
                     .put("speed", speed)
                     .put("plate", plate)
                     .put("timestamp", timestampSec)
-                    .put("readableTime", readableTime);
+                    .put("readableTime", readableTime)
+                    .put("sourceTimestamp", sourceTimestampSec)
+                    .put("sourceReadableTime", sourceReadableTime);
 
             tcpServer.sendData(jsonBusData.toString());
 
@@ -154,6 +196,19 @@ public class BusRealtimeClient {
                         latitude, longitude, readableTime, speed
                 );
             }
+        }
+
+        if (TIMESTAMP_DEBUG_LOG && maxTimestampSec > 0L) {
+            long nowSec = Instant.now().getEpochSecond();
+            System.out.printf(
+                    "Timestamp debug: route=%s id=%s buses=%d minTs=%d maxTs=%d maxLagSec=%d%n",
+                    realRouteNumber,
+                    internalRouteId,
+                    buses.length(),
+                    minTimestampSec,
+                    maxTimestampSec,
+                    nowSec - maxTimestampSec
+            );
         }
     }
 

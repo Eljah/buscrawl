@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.io.RandomAccessFile;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.sql.Timestamp;
@@ -413,7 +414,7 @@ public class BusDashboardCacheJob {
     private static ParquetFileInfo toParquetFileInfo(Path path, FileTime modifiedSinceTime) {
         try {
             FileTime modifiedAt = Files.getLastModifiedTime(path);
-            if (Files.size(path) <= 4 || modifiedAt.compareTo(modifiedSinceTime) < 0) {
+            if (!isReadableParquetFile(path) || modifiedAt.compareTo(modifiedSinceTime) < 0) {
                 return null;
             }
             ParquetFileInfo file = new ParquetFileInfo();
@@ -424,6 +425,35 @@ public class BusDashboardCacheJob {
             System.err.println("Skipping parquet file " + path + ": " + e.getMessage());
             return null;
         }
+    }
+
+    private static boolean isReadableParquetFile(Path path) {
+        try {
+            long size = Files.size(path);
+            if (size < 8L) {
+                return false;
+            }
+
+            byte[] header = new byte[4];
+            byte[] footer = new byte[4];
+            try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "r")) {
+                file.readFully(header);
+                file.seek(size - 4L);
+                file.readFully(footer);
+            }
+
+            return isParquetMagic(header) && isParquetMagic(footer);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static boolean isParquetMagic(byte[] bytes) {
+        return bytes.length == 4
+                && bytes[0] == 'P'
+                && bytes[1] == 'A'
+                && bytes[2] == 'R'
+                && bytes[3] == '1';
     }
 
     private static List<String> loadRouteNumbers() throws IOException {

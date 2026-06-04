@@ -1,51 +1,36 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardWatchEventKinds;
-import java.nio.file.WatchEvent;
-import java.nio.file.WatchKey;
-import java.nio.file.WatchService;
-import java.nio.file.attribute.FileTime;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public class BusActiveTraceCacheJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Duration TRACE_WINDOW = Duration.ofMinutes(
             Long.parseLong(System.getenv().getOrDefault("BUS_TRACE_WINDOW_MINUTES", "10"))
     );
-    private static final Duration BOOTSTRAP_LOOKBACK = Duration.ofMinutes(
-            Long.parseLong(System.getenv().getOrDefault("BUS_TRACE_BOOTSTRAP_LOOKBACK_MINUTES", "30"))
-    );
     private static final Duration WRITE_INTERVAL = Duration.ofSeconds(
             Long.parseLong(System.getenv().getOrDefault("BUS_TRACE_WRITE_INTERVAL_SECONDS", "5"))
-    );
-    private static final Duration FILE_SETTLE_DELAY = Duration.ofSeconds(
-            Long.parseLong(System.getenv().getOrDefault("BUS_TRACE_FILE_SETTLE_SECONDS", "3"))
     );
     private static final int MAX_POINTS_PER_BUS = Integer.parseInt(
             System.getenv().getOrDefault("BUS_TRACE_POINTS_LIMIT", "100")
@@ -67,156 +52,56 @@ public class BusActiveTraceCacheJob {
 
         Class.forName("org.duckdb.DuckDBDriver");
 
-        TraceStore traceStore = new TraceStore(MAX_POINTS_PER_BUS, TRACE_WINDOW);
-        Map<Path, Long> processedFiles = new LinkedHashMap<>();
-        Set<Path> pendingFiles = new LinkedHashSet<>();
-
-        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
-             WatchService watchService = FileSystems.getDefault().newWatchService()) {
-            parquetDir.register(
-                    watchService,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_MODIFY
-            );
-
-            bootstrapRecentFiles(connection, parquetDir, traceStore, processedFiles);
-            traceStore.prune(Instant.now());
-            writeTracePayload(traceCacheFile, traceStore, Instant.now());
-
-            Instant lastWrite = Instant.now();
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
             while (true) {
-                WatchKey watchKey = watchService.poll(2, TimeUnit.SECONDS);
-                if (watchKey != null) {
-                    for (WatchEvent<?> event : watchKey.pollEvents()) {
-                        if (!(event.context() instanceof Path)) {
-                            continue;
-                        }
-                        Path relative = (Path) event.context();
-                        if (!relative.getFileName().toString().endsWith(".parquet")) {
-                            continue;
-                        }
-                        pendingFiles.add(parquetDir.resolve(relative));
-                    }
-                    watchKey.reset();
-                }
-
-                boolean changed = processPendingFiles(connection, traceStore, processedFiles, pendingFiles);
                 Instant now = Instant.now();
-                changed = traceStore.prune(now) || changed;
-                if (changed || Duration.between(lastWrite, now).compareTo(WRITE_INTERVAL) >= 0) {
-                    writeTracePayload(traceCacheFile, traceStore, now);
-                    lastWrite = now;
-                }
+                TraceStore traceStore = new TraceStore(MAX_POINTS_PER_BUS, TRACE_WINDOW);
+                rebuildRecentTraceStore(connection, parquetDir, traceStore, now);
+                writeTracePayload(traceCacheFile, traceStore, now);
+                TimeUnit.MILLISECONDS.sleep(WRITE_INTERVAL.toMillis());
             }
         }
     }
 
-    private static void bootstrapRecentFiles(
+    private static void rebuildRecentTraceStore(
             Connection connection,
             Path parquetDir,
             TraceStore traceStore,
-            Map<Path, Long> processedFiles
+            Instant now
     ) throws Exception {
-        Instant cutoff = Instant.now().minus(BOOTSTRAP_LOOKBACK);
-        List<Path> files;
-        try (Stream<Path> stream = Files.list(parquetDir)) {
-            files = stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.getFileName().toString().endsWith(".parquet"))
-                    .filter(path -> isUsefulParquet(path, cutoff))
-                    .sorted(Comparator.comparing(BusActiveTraceCacheJob::safeFileTime))
-                    .collect(Collectors.toList());
-        }
-
-        for (Path file : files) {
-            processSingleFile(connection, traceStore, processedFiles, file);
-        }
-    }
-
-    private static boolean processPendingFiles(
-            Connection connection,
-            TraceStore traceStore,
-            Map<Path, Long> processedFiles,
-            Set<Path> pendingFiles
-    ) throws Exception {
-        if (pendingFiles.isEmpty()) {
-            return false;
-        }
-
-        boolean changed = false;
-        List<Path> readyFiles = new ArrayList<>();
-        Instant settledBefore = Instant.now().minus(FILE_SETTLE_DELAY);
-        for (Path file : new ArrayList<>(pendingFiles)) {
-            if (!Files.exists(file) || !Files.isRegularFile(file)) {
-                pendingFiles.remove(file);
-                continue;
-            }
-
-            FileTime modifiedAt = safeFileTime(file);
-            if (modifiedAt.toInstant().isAfter(settledBefore)) {
-                continue;
-            }
-
-            pendingFiles.remove(file);
-            readyFiles.add(file);
-        }
-
-        readyFiles.sort(Comparator.comparing(BusActiveTraceCacheJob::safeFileTime));
-        for (Path file : readyFiles) {
-            changed = processSingleFile(connection, traceStore, processedFiles, file) || changed;
-        }
-        return changed;
-    }
-
-    private static boolean processSingleFile(
-            Connection connection,
-            TraceStore traceStore,
-            Map<Path, Long> processedFiles,
-            Path file
-    ) throws Exception {
-        if (!Files.exists(file) || Files.size(file) <= 4L || !file.getFileName().toString().endsWith(".parquet")) {
-            return false;
-        }
-
-        long modifiedAt = safeFileTime(file).toMillis();
-        Long previous = processedFiles.get(file);
-        if (previous != null && previous >= modifiedAt) {
-            return false;
-        }
-
+        String parquetGlob = parquetDir.resolve("*.parquet").toString().replace("'", "''");
+        long cutoffEpochSec = now.minus(TRACE_WINDOW).getEpochSecond();
         String sql = "SELECT plate, realRouteNumber, latitude, longitude, eventTime " +
-                "FROM read_parquet(?) " +
-                "WHERE eventTime IS NOT NULL AND plate IS NOT NULL AND latitude IS NOT NULL AND longitude IS NOT NULL " +
-                "ORDER BY eventTime ASC";
+                "FROM read_parquet('" + parquetGlob + "') " +
+                "WHERE eventTime IS NOT NULL " +
+                "  AND plate IS NOT NULL " +
+                "  AND latitude IS NOT NULL " +
+                "  AND longitude IS NOT NULL " +
+                "  AND epoch(eventTime) >= " + cutoffEpochSec + " " +
+                "ORDER BY plate ASC, eventTime ASC";
 
-        boolean changed = false;
-        Instant observedAt = Instant.ofEpochMilli(modifiedAt);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, file.toAbsolutePath().toString());
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     String plate = trimToNull(resultSet.getString(1));
                     String routeNumber = trimToNull(resultSet.getString(2));
                     double latitude = resultSet.getDouble(3);
                     double longitude = resultSet.getDouble(4);
-                    Timestamp eventTime = resultSet.getTimestamp(5);
+                    LocalDateTime eventTime = resultSet.getObject(5, LocalDateTime.class);
                     if (plate == null || eventTime == null) {
                         continue;
                     }
-                    changed = traceStore.addPoint(
+                    traceStore.addPoint(
                             plate,
                             routeNumber,
                             latitude,
                             longitude,
-                            eventTime.toInstant(),
-                            observedAt
-                    ) || changed;
+                            eventTime.toInstant(ZoneOffset.UTC),
+                            eventTime.toInstant(ZoneOffset.UTC)
+                    );
                 }
             }
         }
-
-        processedFiles.put(file, modifiedAt);
-        return changed;
     }
 
     private static void writeTracePayload(Path traceCacheFile, TraceStore traceStore, Instant now) throws IOException {
@@ -233,22 +118,6 @@ public class BusActiveTraceCacheJob {
         payload.put("maxPointsPerBus", MAX_POINTS_PER_BUS);
         payload.put("buses", List.of());
         return payload;
-    }
-
-    private static boolean isUsefulParquet(Path path, Instant cutoff) {
-        try {
-            return Files.size(path) > 4L && Files.getLastModifiedTime(path).toInstant().compareTo(cutoff) >= 0;
-        } catch (IOException e) {
-            return false;
-        }
-    }
-
-    private static FileTime safeFileTime(Path path) {
-        try {
-            return Files.getLastModifiedTime(path);
-        } catch (IOException e) {
-            return FileTime.fromMillis(0L);
-        }
     }
 
     private static String trimToNull(String value) {
@@ -315,12 +184,12 @@ public class BusActiveTraceCacheJob {
             List<String> emptyPlates = new ArrayList<>();
 
             for (BusTrace trace : buses.values()) {
-                while (!trace.points.isEmpty() && trace.points.peekFirst().observedAt.isBefore(cutoff)) {
+                while (!trace.points.isEmpty() && trace.points.peekFirst().timestamp.isBefore(cutoff)) {
                     trace.points.removeFirst();
                     changed = true;
                 }
 
-                if (trace.points.isEmpty() || trace.lastObservedAt == null || trace.lastObservedAt.isBefore(cutoff)) {
+                if (trace.points.isEmpty() || trace.lastSeen == null || trace.lastSeen.isBefore(cutoff)) {
                     emptyPlates.add(trace.plate);
                     changed = true;
                 } else {
