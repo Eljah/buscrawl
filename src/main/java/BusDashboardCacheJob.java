@@ -33,6 +33,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.expr;
 import static org.apache.spark.sql.functions.max;
 import static org.apache.spark.sql.functions.window;
 
@@ -197,21 +198,40 @@ public class BusDashboardCacheJob {
                 trafficBehaviorDir.resolve("segment-trips"),
                 "endEnteredStopAt",
                 rangeStart,
-                rangeEnd
+                rangeEnd,
+                null
         ));
         series.put("overtakes", collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("overtake-events"),
                 "overtakeAt",
                 rangeStart,
-                rangeEnd
+                rangeEnd,
+                null
+        ));
+        series.put("physicalOvertakes", collectDerivedSeries(
+                spark,
+                trafficBehaviorDir.resolve("physical-overtake-events"),
+                "overtakeAt",
+                rangeStart,
+                rangeEnd,
+                null
         ));
         series.put("dwellEvents", collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("dwell-events"),
                 "enteredStopAt",
                 rangeStart,
-                rangeEnd
+                rangeEnd,
+                null
+        ));
+        series.put("dwellEventsOver60", collectDerivedSeries(
+                spark,
+                trafficBehaviorDir.resolve("dwell-events"),
+                "enteredStopAt",
+                rangeStart,
+                rangeEnd,
+                "dwellTimeSeconds > 60"
         ));
 
         Map<String, Long> totals = new LinkedHashMap<>();
@@ -234,7 +254,8 @@ public class BusDashboardCacheJob {
             Path parquetDir,
             String timestampColumn,
             Instant rangeStart,
-            Instant rangeEnd
+            Instant rangeEnd,
+            String filterExpression
     ) {
         if (!hasReadableParquetFiles(parquetDir)) {
             return List.of();
@@ -242,10 +263,14 @@ public class BusDashboardCacheJob {
 
         Timestamp rangeStartTs = Timestamp.from(rangeStart);
         Timestamp rangeEndTs = Timestamp.from(rangeEnd);
-        List<Row> rows = spark.read()
+        Dataset<Row> filtered = spark.read()
                 .parquet(parquetDir.toAbsolutePath().toString())
                 .filter(col(timestampColumn).isNotNull())
-                .filter(col(timestampColumn).geq(rangeStartTs).and(col(timestampColumn).leq(rangeEndTs)))
+                .filter(col(timestampColumn).geq(rangeStartTs).and(col(timestampColumn).leq(rangeEndTs)));
+        if (filterExpression != null && !filterExpression.isBlank()) {
+            filtered = filtered.filter(expr(filterExpression));
+        }
+        List<Row> rows = filtered
                 .withColumn("bucket_time", window(col(timestampColumn), "5 minutes").getField("start"))
                 .groupBy("bucket_time")
                 .count()

@@ -1,4 +1,5 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -6,11 +7,17 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +50,7 @@ public class BusDashboardServer {
     private final Path rubberinessCacheFile;
     private final Path mapConfigFile;
     private final Path tileRoot;
+    private final Path trafficBehaviorDir;
     private final int port;
 
     public BusDashboardServer(
@@ -54,6 +62,7 @@ public class BusDashboardServer {
             Path rubberinessCacheFile,
             Path mapConfigFile,
             Path tileRoot,
+            Path trafficBehaviorDir,
             int port
     ) {
         this.statsCacheFile = statsCacheFile;
@@ -64,6 +73,7 @@ public class BusDashboardServer {
         this.rubberinessCacheFile = rubberinessCacheFile;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
+        this.trafficBehaviorDir = trafficBehaviorDir;
         this.port = port;
     }
 
@@ -100,6 +110,10 @@ public class BusDashboardServer {
                 "BUS_TILE_ROOT",
                 statsCacheFile.resolveSibling("tiles").toString()
         ));
+        Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
+                "BUS_TRAFFIC_BEHAVIOR_DIR",
+                "./var/bus/traffic-behavior"
+        ));
         int port = Integer.parseInt(System.getenv().getOrDefault("BUS_DASHBOARD_PORT", "8061"));
 
         BusDashboardServer server = new BusDashboardServer(
@@ -111,6 +125,7 @@ public class BusDashboardServer {
                 rubberinessCacheFile,
                 mapConfigFile,
                 tileRoot,
+                trafficBehaviorDir,
                 port
         );
         server.start();
@@ -134,7 +149,8 @@ public class BusDashboardServer {
         server.createContext("/api/route-last-movement", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRouteMovementJson.get()));
         server.createContext("/api/bus-traces", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedTraceJson.get()));
         server.createContext("/api/stop-last-pass", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedStopLastPassJson.get()));
-        server.createContext("/api/overtakes", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedOvertakeJson.get()));
+        server.createContext("/api/overtakes", this::handleOvertakesRequest);
+        server.createContext("/api/overtake-details", this::handleOvertakeDetailsRequest);
         server.createContext("/api/rubberiness", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRubberinessJson.get()));
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
@@ -316,6 +332,245 @@ public class BusDashboardServer {
             }
             return inputStream.readAllBytes();
         }
+    }
+
+    private void handleOvertakesRequest(HttpExchange exchange) throws IOException {
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        if (rawQuery == null || rawQuery.isBlank()) {
+            writeResponse(exchange, 200, "application/json; charset=utf-8", cachedOvertakeJson.get());
+            return;
+        }
+
+        Map<String, String> query = parseQuery(rawQuery);
+        Map<String, Object> source = MAPPER.readValue(cachedOvertakeJson.get(), new TypeReference<>() {
+        });
+        Map<String, Object> payload = new LinkedHashMap<>();
+        copyIfPresent(source, payload, "updatedAt");
+        copyIfPresent(source, payload, "status");
+        copyIfPresent(source, payload, "message");
+        copyIfPresent(source, payload, "timezone");
+        copyIfPresent(source, payload, "yesterday");
+        copyIfPresent(source, payload, "weekdays");
+
+        String scope = query.getOrDefault("scope", "route");
+        String mode = query.getOrDefault("mode", "segment");
+        String period = query.getOrDefault("period", "previous");
+        String weekday = query.getOrDefault("weekday", "1");
+        String sectionKey = overtakeSectionKey(scope, mode);
+        payload.put(sectionKey, compactOvertakeSection(source.get(sectionKey), period, weekday));
+
+        if (("vehicle".equals(mode))) {
+            copyIfPresent(source, payload, "routeShapes");
+        } else if (!"physical".equals(scope)) {
+            copyIfPresent(source, payload, "segmentShapes");
+        }
+        if (!payload.containsKey("segmentShapes")) {
+            payload.put("segmentShapes", List.of());
+        }
+        if (!payload.containsKey("routeShapes")) {
+            payload.put("routeShapes", List.of());
+        }
+
+        writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
+    }
+
+    private static String overtakeSectionKey(String scope, String mode) {
+        if ("physical".equals(scope)) {
+            if ("vehicle".equals(mode)) {
+                return "physicalVehicleData";
+            }
+            if ("segmentVehicle".equals(mode)) {
+                return "physicalSegmentVehicleData";
+            }
+            return "physicalSegmentData";
+        }
+        if ("segmentRoute".equals(mode)) {
+            return "segmentRouteData";
+        }
+        if ("segmentVehicle".equals(mode)) {
+            return "segmentVehicleData";
+        }
+        if ("vehicle".equals(mode)) {
+            return "vehicleData";
+        }
+        return "segmentData";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> compactOvertakeSection(Object sectionObject, String period, String weekday) {
+        Map<String, Object> compact = new LinkedHashMap<>();
+        compact.put("previousDay", List.of());
+        compact.put("allDays", List.of());
+        compact.put("weekday", Map.of());
+        if (!(sectionObject instanceof Map)) {
+            return compact;
+        }
+
+        Map<String, Object> section = (Map<String, Object>) sectionObject;
+        if ("all".equals(period)) {
+            compact.put("allDays", section.getOrDefault("allDays", List.of()));
+        } else if ("weekday".equals(period)) {
+            Object weekdayObject = section.get("weekday");
+            Object rows = List.of();
+            if (weekdayObject instanceof Map) {
+                rows = ((Map<String, Object>) weekdayObject).getOrDefault(weekday, List.of());
+            }
+            compact.put("weekday", Map.of(weekday, rows));
+        } else {
+            compact.put("previousDay", section.getOrDefault("previousDay", List.of()));
+        }
+        return compact;
+    }
+
+    private static void copyIfPresent(Map<String, Object> source, Map<String, Object> target, String key) {
+        if (source.containsKey(key)) {
+            target.put(key, source.get(key));
+        }
+    }
+
+    private void handleOvertakeDetailsRequest(HttpExchange exchange) throws IOException {
+        try {
+            Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
+            String scope = query.getOrDefault("scope", "route");
+            String plate = query.getOrDefault("plate", "").trim();
+            if (plate.isEmpty()) {
+                writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Missing plate parameter"));
+                return;
+            }
+
+            List<Map<String, Object>> details = loadOvertakeDetails(query, scope, plate);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+            payload.put("status", "ok");
+            payload.put("scope", scope);
+            payload.put("plate", plate);
+            payload.put("details", details);
+            writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
+        } catch (Exception e) {
+            writeResponse(exchange, 500, "application/json; charset=utf-8", errorPayload(e.getMessage()));
+        }
+    }
+
+    private List<Map<String, Object>> loadOvertakeDetails(Map<String, String> query, String scope, String plate) throws Exception {
+        boolean physical = "physical".equalsIgnoreCase(scope);
+        Path eventsDir = trafficBehaviorDir.resolve(physical ? "physical-overtake-events" : "overtake-events");
+        if (!Files.exists(eventsDir)) {
+            return List.of();
+        }
+
+        String segmentColumn = physical ? "physicalSegmentId" : "segmentId";
+        String routeColumn = physical ? "overtakenRouteNumber" : "routeNumber";
+        StringBuilder sql = new StringBuilder("SELECT ");
+        sql.append("CAST(serviceDate AS VARCHAR), weekdayIso, overtakerPlate, overtakerRouteNumber, ");
+        sql.append("overtakenPlate, ").append(routeColumn).append(", ").append(segmentColumn).append(", ");
+        sql.append("startStopName, endStopName, startStopLatitude, startStopLongitude, endStopLatitude, endStopLongitude, ");
+        sql.append("distanceMeters, overtakeAt, overtakerTravelDurationSeconds, overtakenTravelDurationSeconds, ");
+        sql.append("overtakerAvgSegmentSpeedKmh, overtakenAvgSegmentSpeedKmh ");
+        sql.append("FROM read_parquet(?) WHERE overtakerPlate = ? ");
+
+        List<Object> parameters = new ArrayList<>();
+        parameters.add(parquetGlob(eventsDir));
+        parameters.add(plate);
+
+        String segment = query.getOrDefault("segment", "").trim();
+        if (!segment.isEmpty()) {
+            sql.append("AND ").append(segmentColumn).append(" = ? ");
+            parameters.add(segment);
+        }
+
+        String period = query.getOrDefault("period", "all");
+        if ("previous".equals(period)) {
+            String serviceDate = query.getOrDefault("serviceDate", "").trim();
+            if (!serviceDate.isEmpty()) {
+                sql.append("AND CAST(serviceDate AS VARCHAR) = ? ");
+                parameters.add(serviceDate);
+            }
+        } else if ("weekday".equals(period)) {
+            String weekday = query.getOrDefault("weekday", "").trim();
+            if (!weekday.isEmpty()) {
+                sql.append("AND weekdayIso = ? ");
+                parameters.add(Integer.parseInt(weekday));
+            }
+        }
+        sql.append("ORDER BY overtakeAt DESC");
+
+        Class.forName("org.duckdb.DuckDBDriver");
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
+             PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            for (int i = 0; i < parameters.size(); i++) {
+                statement.setObject(i + 1, parameters.get(i));
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("serviceDate", rs.getString(1));
+                    row.put("weekdayIso", rs.getInt(2));
+                    row.put("overtakerPlate", rs.getString(3));
+                    row.put("overtakerRouteNumber", rs.getString(4));
+                    row.put("overtakenPlate", rs.getString(5));
+                    row.put("overtakenRouteNumber", rs.getString(6));
+                    row.put("segmentId", rs.getString(7));
+                    if (physical) {
+                        row.put("physicalSegmentId", rs.getString(7));
+                    }
+                    row.put("startStopName", rs.getString(8));
+                    row.put("endStopName", rs.getString(9));
+                    row.put("startStopLatitude", rs.getDouble(10));
+                    row.put("startStopLongitude", rs.getDouble(11));
+                    row.put("endStopLatitude", rs.getDouble(12));
+                    row.put("endStopLongitude", rs.getDouble(13));
+                    row.put("distanceMeters", rs.getDouble(14));
+                    row.put("overtakeAt", toIsoString(rs.getObject(15)));
+                    row.put("overtakerTravelDurationSeconds", rs.getLong(16));
+                    row.put("overtakenTravelDurationSeconds", rs.getLong(17));
+                    row.put("overtakerAvgSegmentSpeedKmh", rs.getDouble(18));
+                    row.put("overtakenAvgSegmentSpeedKmh", rs.getDouble(19));
+                    rows.add(row);
+                }
+                return rows;
+            }
+        }
+    }
+
+    private static Map<String, String> parseQuery(String rawQuery) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return result;
+        }
+        for (String pair : rawQuery.split("&")) {
+            int separator = pair.indexOf('=');
+            String key = separator >= 0 ? pair.substring(0, separator) : pair;
+            String value = separator >= 0 ? pair.substring(separator + 1) : "";
+            result.put(urlDecode(key), urlDecode(value));
+        }
+        return result;
+    }
+
+    private static String urlDecode(String value) {
+        return URLDecoder.decode(value, StandardCharsets.UTF_8);
+    }
+
+    private static byte[] errorPayload(String message) throws IOException {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "error");
+        payload.put("message", message == null ? "Unexpected error" : message);
+        return MAPPER.writeValueAsBytes(payload);
+    }
+
+    private static String parquetGlob(Path dir) {
+        return dir.toAbsolutePath().toString().replace('\\', '/') + "/**/*.parquet";
+    }
+
+    private static String toIsoString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof java.sql.Timestamp) {
+            return ((java.sql.Timestamp) value).toInstant().toString();
+        }
+        return String.valueOf(value);
     }
 
     private void handleTileRequest(HttpExchange exchange) throws IOException {

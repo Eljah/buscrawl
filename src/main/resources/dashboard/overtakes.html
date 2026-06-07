@@ -39,6 +39,8 @@
     .details { margin-top:10px; display:grid; gap:7px; }
     .detail { padding:8px 10px; border-radius:10px; background:rgba(29,42,56,.05); font-size:13px; line-height:1.35; }
     .detail strong { font-weight:700; }
+    .legend { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:13px; color:var(--muted); }
+    .legend-ramp { width:150px; height:10px; border-radius:999px; background:linear-gradient(90deg,#26a269,#f5c542,#c83f31); border:1px solid rgba(29,42,56,.12); }
     @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
   </style>
 </head>
@@ -103,6 +105,7 @@
         <div id="modeMeta">Mode: ...</div>
         <div id="countMeta">Items: ...</div>
       </div>
+      <div class="legend"><span>Heatmap</span><span class="legend-ramp"></span><span>fewer -> more overtakes</span></div>
 
       <div class="map-shell" id="map">
         <div class="map-zoom">
@@ -135,7 +138,7 @@ const weekdaySelect = document.getElementById('weekdaySelect');
 const sortFieldSelect = document.getElementById('sortField');
 const sortDirSelect = document.getElementById('sortDir');
 
-const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, scope:'route', mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, centerLat:55.79, centerLon:49.12, zoom:12, scope:'route', mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
 const sortOptions = {
   previous: [
@@ -173,9 +176,9 @@ function isPhysicalScope(){ return state.scope === 'physical'; }
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
   if (isPhysicalScope()) {
-    return state.mode === 'vehicle'
-      ? (state.payload.physicalVehicleData || { previousDay:[], allDays:[], weekday:{} })
-      : (state.payload.physicalSegmentData || { previousDay:[], allDays:[], weekday:{} });
+    if (state.mode === 'vehicle') return state.payload.physicalVehicleData || { previousDay:[], allDays:[], weekday:{} };
+    if (state.mode === 'segmentVehicle') return state.payload.physicalSegmentVehicleData || { previousDay:[], allDays:[], weekday:{} };
+    return state.payload.physicalSegmentData || { previousDay:[], allDays:[], weekday:{} };
   }
   if (state.mode === 'segment') return state.payload.segmentData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'segmentRoute') return state.payload.segmentRouteData || { previousDay:[], allDays:[], weekday:{} };
@@ -191,6 +194,7 @@ function currentDataset(){
 }
 
 function itemKey(item){
+  if (isPhysicalScope() && state.mode === 'segmentVehicle') return `${item.physicalSegmentId || item.segmentId}|${item.overtakerPlate}`;
   if (isPhysicalScope() && state.mode !== 'vehicle') return item.physicalSegmentId || item.segmentId;
   if (state.mode === 'segment') return item.segmentId;
   if (state.mode === 'segmentRoute') return `${item.segmentId}|${item.overtakerRouteNumber}`;
@@ -242,6 +246,54 @@ function renderSortOptions(){
 
 function findSegmentShape(segmentId){ return (state.payload.segmentShapes || []).find(item => item.segmentId === segmentId); }
 function findRouteShape(routeNumber){ return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber); }
+function metricValue(item){ return Number(item.overtakeCount || item.totalOvertakes || 0); }
+function heatColor(value, maxValue){
+  const ratio = maxValue > 0 ? Math.max(0, Math.min(1, value / maxValue)) : 0;
+  const hue = 122 - ratio * 118;
+  return `hsl(${hue}, 62%, 47%)`;
+}
+function midpoint(detail){
+  const start = project(detail.startStopLatitude || detail.startLatitude || 0, detail.startStopLongitude || detail.startLongitude || 0, state.zoom);
+  const end = project(detail.endStopLatitude || detail.endLatitude || 0, detail.endStopLongitude || detail.endLongitude || 0, state.zoom);
+  return { x:(start.x+end.x)/2, y:(start.y+end.y)/2 };
+}
+
+function detailsCacheKey(item){
+  return [state.scope, state.mode, state.periodMode, state.weekday, state.payload ? state.payload.yesterday : '', itemKey(item)].join('|');
+}
+
+function detailsQuery(item){
+  const params = new URLSearchParams({ scope: state.scope, plate: item.overtakerPlate || '', period: state.periodMode });
+  if (state.mode === 'segmentVehicle') params.set('segment', item.physicalSegmentId || item.segmentId || '');
+  if (state.periodMode === 'previous' && state.payload && state.payload.yesterday) params.set('serviceDate', state.payload.yesterday);
+  if (state.periodMode === 'weekday') params.set('weekday', state.weekday);
+  return params.toString();
+}
+
+async function ensureDetailsLoaded(item){
+  if (!item || (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle')) return;
+  const key = detailsCacheKey(item);
+  if (state.detailsCache[key] || state.detailsLoading[key]) return;
+  state.detailsLoading[key] = true;
+  renderAll();
+  try {
+    const response = await fetch(`./api/overtake-details?${detailsQuery(item)}`, {cache:'no-store'});
+    const payload = await response.json();
+    state.detailsCache[key] = payload.details || [];
+  } catch (error) {
+    state.detailsCache[key] = [{ error: String(error) }];
+  } finally {
+    delete state.detailsLoading[key];
+    renderAll();
+  }
+}
+
+function selectItemByKey(key){
+  state.selectedKey = key;
+  renderAll();
+  const item = filteredItems().find(candidate => itemKey(candidate) === key);
+  ensureDetailsLoaded(item);
+}
 
 function renderTiles(){
   if (!state.config) return;
@@ -273,39 +325,54 @@ function renderOverlay(){
   emptyEl.style.display = 'none';
   const origin = getViewportOrigin();
   const parts = [];
+  const maxMetric = Math.max(...items.map(metricValue), 1);
   if (isSegmentMode()) {
-    const visible = new Set(items.map(item => item.segmentId));
     if (isPhysicalScope()) {
       for (const item of items) {
         const key = itemKey(item);
         const active = key === state.selectedKey;
+        const stroke = heatColor(metricValue(item), maxMetric);
         const start = project(item.startStopLatitude, item.startStopLongitude, state.zoom);
         const end = project(item.endStopLatitude, item.endStopLongitude, state.zoom);
         const pts = `${(start.x-origin.left).toFixed(2)},${(start.y-origin.top).toFixed(2)} ${(end.x-origin.left).toFixed(2)},${(end.y-origin.top).toFixed(2)}`;
-        parts.push(`<polyline data-key="${escapeAttr(key)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+        parts.push(`<polyline data-key="${escapeAttr(key)}" points="${pts}" fill="none" stroke="${active ? 'rgba(25,44,78,0.98)' : stroke}" stroke-width="${active ? '6' : '4'}" stroke-linecap="round" stroke-linejoin="round" opacity="${active ? '1' : '0.76'}" style="pointer-events:auto; cursor:pointer"></polyline>`);
       }
     } else {
-    for (const shape of state.payload.segmentShapes || []) {
-      if (!visible.has(shape.segmentId)) continue;
-      const active = items.some(item => itemKey(item) === state.selectedKey && item.segmentId === shape.segmentId);
-      const pts = (shape.path || []).map(point => {
-        const pr = project(point.latitude, point.longitude, state.zoom);
-        return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
-      }).join(' ');
-      parts.push(`<polyline data-key="${escapeAttr(shape.segmentId)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
-    }
+      for (const item of items) {
+        const shape = findSegmentShape(item.segmentId);
+        if (!shape) continue;
+        const key = itemKey(item);
+        const active = key === state.selectedKey;
+        const stroke = heatColor(metricValue(item), maxMetric);
+        const pts = (shape.path || []).map(point => {
+          const pr = project(point.latitude, point.longitude, state.zoom);
+          return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
+        }).join(' ');
+        parts.push(`<polyline data-key="${escapeAttr(key)}" points="${pts}" fill="none" stroke="${active ? 'rgba(25,44,78,0.98)' : stroke}" stroke-width="${active ? '6' : '4'}" stroke-linecap="round" stroke-linejoin="round" opacity="${active ? '1' : '0.76'}" style="pointer-events:auto; cursor:pointer"></polyline>`);
+      }
     }
   } else {
     const routes = new Set(items.map(item => item.overtakerRouteNumber).filter(Boolean));
     for (const route of state.payload.routeShapes || []) {
       if (!routes.has(route.routeNumber)) continue;
       const active = items.some(item => itemKey(item) === state.selectedKey && item.overtakerRouteNumber === route.routeNumber);
+      const routeMax = Math.max(...items.filter(item => item.overtakerRouteNumber === route.routeNumber).map(metricValue), 1);
+      const stroke = heatColor(routeMax, maxMetric);
       for (const path of route.paths || []) {
         const pts = path.map(point => {
           const pr = project(point.latitude, point.longitude, state.zoom);
           return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
         }).join(' ');
-        parts.push(`<polyline data-key="${escapeAttr(route.routeNumber)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+        parts.push(`<polyline data-key="${escapeAttr(route.routeNumber)}" points="${pts}" fill="none" stroke="${active ? 'rgba(25,44,78,0.98)' : stroke}" stroke-width="${active ? '6' : '4'}" stroke-linecap="round" stroke-linejoin="round" opacity="${active ? '1' : '0.76'}" style="pointer-events:auto; cursor:pointer"></polyline>`);
+      }
+    }
+  }
+  if ((state.mode === 'vehicle' || state.mode === 'segmentVehicle') && state.selectedKey) {
+    const activeItem = items.find(item => itemKey(item) === state.selectedKey);
+    if (activeItem) {
+      for (const detail of detailsForItem(activeItem)) {
+        const p = midpoint(detail);
+        parts.push(`<circle cx="${(p.x-origin.left).toFixed(2)}" cy="${(p.y-origin.top).toFixed(2)}" r="6" fill="#1f78ff" stroke="#fff" stroke-width="2"><title>${escapeAttr(formatDate(detail.overtakeAt))} ${escapeAttr(detail.overtakenPlate || '')}</title></circle>`);
       }
     }
   }
@@ -313,16 +380,16 @@ function renderOverlay(){
   overlayEl.querySelectorAll('polyline').forEach(element => {
     element.addEventListener('click', () => {
       if (isSegmentMode()) {
-        state.selectedKey = element.dataset.key;
+        selectItemByKey(element.dataset.key);
       } else {
-        state.selectedKey = filteredItems().find(item => item.overtakerRouteNumber === element.dataset.key)?.overtakerPlate || element.dataset.key;
+        selectItemByKey(filteredItems().find(item => item.overtakerRouteNumber === element.dataset.key)?.overtakerPlate || element.dataset.key);
       }
-      renderAll();
     });
   });
 }
 
 function listTitle(item){
+  if (isPhysicalScope() && state.mode === 'segmentVehicle') return `${item.overtakerPlate} · ${item.overtakerRouteNumber || 'route ?'} · ${item.startStopName} -> ${item.endStopName}`;
   if (isPhysicalScope() && state.mode !== 'vehicle') return `${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segment') return `${item.routeNumber} · ${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segmentRoute') return `${item.overtakerRouteNumber} · ${item.startStopName} -> ${item.endStopName}`;
@@ -349,18 +416,13 @@ function listNote(item){
   return `days ${item.sampleDays}, avg/day ${item.averageDailyOvertakes}, max/day ${item.maxDailyOvertakes}`;
 }
 
-function detailsForVehicle(item){
-  if (state.mode !== 'vehicle') return [];
-  const detailSource = isPhysicalScope() ? state.payload.physicalVehicleDetails : state.payload.vehicleDetails;
-  const allDetails = ((detailSource || {})[item.overtakerPlate] || []);
-  return allDetails.filter(detail => {
-    if (state.periodMode === 'previous') return detail.serviceDate === state.payload.yesterday;
-    if (state.periodMode === 'weekday') return String(detail.weekdayIso) === String(state.weekday);
-    return true;
-  });
+function detailsForItem(item){
+  if (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle') return [];
+  return state.detailsCache[detailsCacheKey(item)] || [];
 }
 
 function detailLine(detail){
+  if (detail.error) return `<div class="detail">Failed to load details: ${escapeHtml(detail.error)}</div>`;
   const overtakerSpeed = Number(detail.overtakerAvgSegmentSpeedKmh || 0).toFixed(1);
   const overtakenSpeed = Number(detail.overtakenAvgSegmentSpeedKmh || 0).toFixed(1);
   return `<div class="detail"><strong>${escapeHtml(formatDate(detail.overtakeAt))}</strong><br>` +
@@ -369,11 +431,14 @@ function detailLine(detail){
     `segment ${escapeHtml(detail.segmentId || '?')}; distance ${Math.round(Number(detail.distanceMeters || 0))} m; speeds ${overtakerSpeed}/${overtakenSpeed} km/h</div>`;
 }
 
-function renderVehicleDetails(item, active){
-  if (!active || state.mode !== 'vehicle') return '';
-  const details = detailsForVehicle(item);
+function renderItemDetails(item, active){
+  if (!active || (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle')) return '';
+  if (state.detailsLoading[detailsCacheKey(item)]) {
+    return '<div class="details"><div class="detail">Loading detailed overtake facts...</div></div>';
+  }
+  const details = detailsForItem(item);
   if (!details.length) {
-    return '<div class="details"><div class="detail">No detailed overtake facts for this vehicle in the selected period.</div></div>';
+    return '<div class="details"><div class="detail">Click row to load detailed overtake facts for this selection.</div></div>';
   }
   return `<div class="details">${details.map(detailLine).join('')}</div>`;
 }
@@ -387,11 +452,10 @@ function renderList(){
   listEl.innerHTML = items.map(item => {
     const key = itemKey(item);
     const active = state.selectedKey === key ? ' active' : '';
-    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div>${renderVehicleDetails(item, Boolean(active))}</div>`;
+    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div>${renderItemDetails(item, Boolean(active))}</div>`;
   }).join('');
   listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
-    state.selectedKey = element.dataset.key;
-    renderAll();
+    selectItemByKey(element.dataset.key);
   }));
 }
 
@@ -403,8 +467,8 @@ function renderMeta(){
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
   document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
   document.getElementById('sidebarMeta').textContent =
-    state.mode === 'vehicle'
-      ? 'Click a vehicle row to expand exact overtake facts for the selected period.'
+    (state.mode === 'vehicle' || state.mode === 'segmentVehicle')
+      ? 'Click a row to expand exact overtake facts and show event markers for the selected period.'
       : state.periodMode === 'previous'
       ? 'Rows show concrete latest overtake time and overtaker identity.'
       : 'Rows show aggregated overtakes across finished days.';
@@ -429,6 +493,7 @@ function populateWeekdays(){
 }
 
 function renderAll(){
+  if (!state.payload || !state.config) return;
   renderSortOptions();
   renderMeta();
   renderTiles();
@@ -436,26 +501,47 @@ function renderAll(){
   renderOverlay();
 }
 
+function overtakeQuery(){
+  return new URLSearchParams({
+    scope: state.scope,
+    mode: state.mode,
+    period: state.periodMode,
+    weekday: state.weekday
+  }).toString();
+}
+
+async function loadOvertakes(){
+  emptyEl.style.display = 'grid';
+  emptyEl.textContent = 'Loading overtake data...';
+  const response = await fetch(`./api/overtakes?${overtakeQuery()}`, {cache:'no-store'});
+  state.payload = await response.json();
+  populateWeekdays();
+  renderAll();
+}
+
+function reloadOvertakes(){
+  state.selectedKey = '';
+  loadOvertakes().catch(error => {
+    emptyEl.style.display='grid';
+    emptyEl.textContent=`Failed to load overtake cache: ${error}`;
+  });
+}
+
 async function loadAll(){
-  const [configResponse,payloadResponse] = await Promise.all([
-    fetch('./api/map-config',{cache:'no-store'}),
-    fetch('./api/overtakes',{cache:'no-store'})
-  ]);
+  const configResponse = await fetch('./api/map-config',{cache:'no-store'});
   state.config = await configResponse.json();
-  state.payload = await payloadResponse.json();
   if (state.config.center) {
     state.centerLon = state.config.center.longitude;
     state.centerLat = state.config.center.latitude;
   }
   state.zoom = state.config.initialZoom || state.zoom;
-  populateWeekdays();
-  renderAll();
+  await loadOvertakes();
 }
 
-document.getElementById('scopeGroup').addEventListener('change', event => { state.scope = event.target.value; state.selectedKey=''; renderAll(); });
-document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; state.selectedKey=''; renderAll(); });
-document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; state.selectedKey=''; renderAll(); });
-weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; renderAll(); });
+document.getElementById('scopeGroup').addEventListener('change', event => { state.scope = event.target.value; reloadOvertakes(); });
+document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; reloadOvertakes(); });
+document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; reloadOvertakes(); });
+weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; reloadOvertakes(); });
 sortFieldSelect.addEventListener('change', () => { state.sortField = sortFieldSelect.value; renderAll(); });
 sortDirSelect.addEventListener('change', () => { state.sortDir = sortDirSelect.value; renderAll(); });
 filterInput.addEventListener('input', () => { state.filterText = filterInput.value; renderAll(); });

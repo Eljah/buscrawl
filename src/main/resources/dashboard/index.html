@@ -93,7 +93,7 @@
     }
     .chart-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: 1fr;
       gap: 16px;
       margin-top: 18px;
     }
@@ -130,13 +130,13 @@
       overflow: visible;
     }
     .chart-grid svg {
-      height: 240px;
+      height: 360px;
     }
     .chart-grid .chart-box {
-      min-height: 240px;
+      min-height: 360px;
     }
     .chart-grid .empty {
-      min-height: 240px;
+      min-height: 360px;
     }
     .empty {
       display: grid;
@@ -195,8 +195,16 @@
         <p class="value" id="overtakesTotal">...</p>
       </article>
       <article class="card">
+        <p class="label">Physical Overtakes</p>
+        <p class="value" id="physicalOvertakesTotal">...</p>
+      </article>
+      <article class="card">
         <p class="label">Dwell Events</p>
         <p class="value" id="dwellEventsTotal">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Dwell > 1 Min</p>
+        <p class="value" id="dwellEventsOver60Total">...</p>
       </article>
     </section>
 
@@ -229,11 +237,33 @@
       <article class="card chart-card">
         <div class="chart-head">
           <div>
+            <h2 class="chart-title">Physical Overtakes</h2>
+            <p class="chart-meta">Cross-route physical-segment overtake facts</p>
+          </div>
+        </div>
+        <div class="chart-box" id="physicalOvertakesChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
             <h2 class="chart-title">Overtakes</h2>
             <p class="chart-meta">Order violation facts</p>
           </div>
         </div>
         <div class="chart-box" id="overtakesChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Dwell Events > 1 Min</h2>
+            <p class="chart-meta">Stop-zone stays longer than 60 seconds</p>
+          </div>
+        </div>
+        <div class="chart-box" id="dwellEventsOver60Chart">
           <div class="empty">Loading data...</div>
         </div>
       </article>
@@ -350,7 +380,9 @@
       const derivedTotals = data.derivedTotals || {};
       setText('segmentTripsTotal', fmtNumber.format(derivedTotals.segmentTrips || 0));
       setText('overtakesTotal', fmtNumber.format(derivedTotals.overtakes || 0));
+      setText('physicalOvertakesTotal', fmtNumber.format(derivedTotals.physicalOvertakes || 0));
       setText('dwellEventsTotal', fmtNumber.format(derivedTotals.dwellEvents || 0));
+      setText('dwellEventsOver60Total', fmtNumber.format(derivedTotals.dwellEventsOver60 || 0));
 
       if (data.status === 'empty') {
         setText('rangeMeta', data.message || 'Cache is empty.');
@@ -366,7 +398,9 @@
       const derivedSeries = data.derivedSeries || {};
       renderChart('segmentTripsChart', derivedSeries.segmentTrips || [], 'segment trips');
       renderChart('overtakesChart', derivedSeries.overtakes || [], 'overtakes');
+      renderChart('physicalOvertakesChart', derivedSeries.physicalOvertakes || [], 'physical overtakes');
       renderChart('dwellEventsChart', derivedSeries.dwellEvents || [], 'dwell events');
+      renderChart('dwellEventsOver60Chart', derivedSeries.dwellEventsOver60 || [], 'dwell events > 1 min');
     }
 
     load().catch(error => {
