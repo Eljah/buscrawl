@@ -108,6 +108,84 @@ public final class DashboardOverlayTileRenderer {
         }
     }
 
+    public static void renderOvertakePointHeatmapTiles(Path cacheFile, Path mapConfigFile, Path tilesRoot) throws IOException {
+        if (!Files.exists(cacheFile) || !Files.exists(mapConfigFile)) {
+            return;
+        }
+
+        Map<String, Object> payload = MAPPER.readValue(cacheFile.toFile(), MAP_TYPE);
+        MapConfig config = loadMapConfig(mapConfigFile);
+        Path variantRoot = tilesRoot.resolve("overtakes").resolve("point-heatmap");
+        if (!"ok".equals(String.valueOf(payload.get("status")))) {
+            clearDirectory(variantRoot);
+            return;
+        }
+
+        renderPointHeatmapScope(variantRoot.resolve("route"), config, payload.get("pointHeatmapData"));
+        renderPointHeatmapScope(variantRoot.resolve("physical"), config, payload.get("physicalPointHeatmapData"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void renderPointHeatmapScope(Path scopeRoot, MapConfig config, Object sectionObject) throws IOException {
+        if (!(sectionObject instanceof Map<?, ?>)) {
+            clearDirectory(scopeRoot);
+            return;
+        }
+
+        Map<String, Object> section = (Map<String, Object>) sectionObject;
+        Map<String, List<Map<String, Object>>> variants = new LinkedHashMap<>();
+        variants.put("previous", castList(section.get("previousDay")));
+        variants.put("all", castList(section.get("allDays")));
+        variants.putAll(extractWeekdayVariants("weekday", section.get("weekday")));
+
+        for (Map.Entry<String, List<Map<String, Object>>> entry : variants.entrySet()) {
+            Path path = scopeRoot.resolve(entry.getKey());
+            renderPointHeatmapVariant(path, config, entry.getValue());
+        }
+    }
+
+    private static void renderPointHeatmapVariant(Path outputDir, MapConfig config, List<Map<String, Object>> points) throws IOException {
+        Files.createDirectories(outputDir.getParent());
+        Path tempRoot = Files.createTempDirectory(outputDir.getParent(), outputDir.getFileName().toString() + "-tmp-");
+        try {
+            for (int zoom = config.minZoom; zoom <= config.maxZoom; zoom++) {
+                Map<String, BufferedImage> images = new HashMap<>();
+                for (Map<String, Object> point : points) {
+                    Double latitude = doubleValue(point.get("pointLatitude"));
+                    Double longitude = doubleValue(point.get("pointLongitude"));
+                    if (latitude == null || longitude == null) {
+                        continue;
+                    }
+                    int tileX = (int) Math.floor(lonToWorldX(longitude, zoom) / TILE_SIZE);
+                    int tileY = (int) Math.floor(latToWorldY(latitude, zoom) / TILE_SIZE);
+                    String key = tileX + "/" + tileY;
+                    BufferedImage image = images.computeIfAbsent(key, ignored -> new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB));
+                    Graphics2D graphics = image.createGraphics();
+                    try {
+                        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+                        drawOvertakePoint(graphics, zoom, tileX, tileY, point);
+                    } finally {
+                        graphics.dispose();
+                    }
+                }
+
+                for (Map.Entry<String, BufferedImage> entry : images.entrySet()) {
+                    String[] parts = entry.getKey().split("/");
+                    Path xDir = tempRoot.resolve(String.valueOf(zoom)).resolve(parts[0]);
+                    Files.createDirectories(xDir);
+                    ImageIO.write(entry.getValue(), "PNG", xDir.resolve(parts[1] + ".png").toFile());
+                }
+            }
+
+            clearDirectory(outputDir);
+            Files.createDirectories(outputDir.getParent());
+            Files.move(tempRoot, outputDir, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            clearDirectory(tempRoot);
+            throw e;
+        }
+    }
+
     private static void renderVariant(Path outputDir, MapConfig config, TilePainter painter) throws IOException {
         Files.createDirectories(outputDir.getParent());
         Path tempRoot = Files.createTempDirectory(outputDir.getParent(), outputDir.getFileName().toString() + "-tmp-");
@@ -254,6 +332,32 @@ public final class DashboardOverlayTileRenderer {
                     (int) Math.round(radius * 2.0),
                     (int) Math.round(radius * 2.0)
             );
+        }
+    }
+
+    private static void drawOvertakePointHeatmap(TileGraphics tileGraphics, List<Map<String, Object>> points) {
+        Graphics2D graphics = tileGraphics.graphics;
+        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+        for (Map<String, Object> point : points) {
+            drawOvertakePoint(graphics, tileGraphics.zoom, (int) (tileGraphics.tileOriginX / TILE_SIZE), (int) (tileGraphics.tileOriginY / TILE_SIZE), point);
+        }
+    }
+
+    private static void drawOvertakePoint(Graphics2D graphics, int zoom, int tileX, int tileY, Map<String, Object> point) {
+        Double latitude = doubleValue(point.get("pointLatitude"));
+        Double longitude = doubleValue(point.get("pointLongitude"));
+        if (latitude == null || longitude == null) {
+            return;
+        }
+        int count = Math.max(1, requireInt(point.getOrDefault("overtakeCount", 1)));
+        double x = lonToWorldX(longitude, zoom) - tileX * (double) TILE_SIZE;
+        double y = latToWorldY(latitude, zoom) - tileY * (double) TILE_SIZE;
+        int left = (int) Math.round(x - 2.0);
+        int top = (int) Math.round(y - 2.0);
+        int repeats = Math.min(count, 500);
+        for (int i = 0; i < repeats; i++) {
+            graphics.setColor(new Color(206, 44, 36, 12));
+            graphics.fillOval(left, top, 4, 4);
         }
     }
 

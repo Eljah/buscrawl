@@ -39,6 +39,14 @@ public class BusOvertakeCacheJob {
                 "BUS_DASHBOARD_OVERTAKE_CACHE_FILE",
                 "./var/bus/dashboard-cache/overtake.json"
         ));
+        Path mapConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAP_CONFIG_FILE",
+                cacheFile.resolveSibling("map-config.json").toString()
+        ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TILE_ROOT",
+                cacheFile.resolveSibling("tiles").toString()
+        ));
 
         Files.createDirectories(cacheFile.getParent());
 
@@ -136,6 +144,7 @@ public class BusOvertakeCacheJob {
             ));
 
             writeJsonAtomic(cacheFile, payload);
+            DashboardOverlayTileRenderer.renderOvertakePointHeatmapTiles(cacheFile, mapConfigFile, tileRoot);
         }
     }
 

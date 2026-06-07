@@ -26,8 +26,9 @@
     .map-shell.dragging { cursor:grabbing; }
     .map-zoom { position:absolute; right:14px; top:14px; z-index:4; display:grid; gap:8px; }
     .map-zoom button { width:42px; height:42px; border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(29,42,56,.12); }
-    .tile-layer,.overlay-layer { position:absolute; inset:0; }
-    .tile-layer img { position:absolute; width:256px; height:256px; }
+    .tile-layer,.heatmap-tiles,.overlay-layer { position:absolute; inset:0; }
+    .tile-layer img,.heatmap-tiles img { position:absolute; width:256px; height:256px; }
+    .heatmap-tiles { z-index:3; pointer-events:none; }
     .overlay-layer { overflow:visible; }
     .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.22); backdrop-filter:blur(2px); }
     .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 160px); overflow:auto; padding-right:4px; }
@@ -39,6 +40,11 @@
     .details { margin-top:10px; display:grid; gap:7px; }
     .detail { padding:8px 10px; border-radius:10px; background:rgba(29,42,56,.05); font-size:13px; line-height:1.35; }
     .detail strong { font-weight:700; }
+    .timeline { height:88px; margin:12px 0; border-radius:14px; background:rgba(255,255,255,.48); border:1px solid rgba(29,42,56,.08); overflow:hidden; }
+    .timeline svg { display:block; width:100%; height:100%; }
+    .pager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; color:var(--muted); font-size:13px; }
+    .pager button { border:1px solid rgba(29,42,56,.16); border-radius:10px; background:rgba(255,255,255,.88); padding:7px 10px; font:inherit; color:var(--ink); cursor:pointer; }
+    .pager button:disabled { opacity:.45; cursor:default; }
     .legend { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:13px; color:var(--muted); }
     .legend-ramp { width:150px; height:10px; border-radius:999px; background:linear-gradient(90deg,#26a269,#f5c542,#c83f31); border:1px solid rgba(29,42,56,.12); }
     @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
@@ -75,7 +81,8 @@
             <label><input type="radio" name="mode" value="segmentRoute"> Segment + Route</label>
             <label><input type="radio" name="mode" value="segmentVehicle"> Segment + Vehicle</label>
             <label><input type="radio" name="mode" value="vehicle"> Vehicle</label>
-            <label><input type="radio" name="mode" value="pointHeatmap"> Event Point Heatmap</label>
+            <label><input type="radio" name="mode" value="pointHeatmap"> Event Point Clusters</label>
+            <label><input type="radio" name="mode" value="pointTileHeatmap"> Event Point Tile Heatmap</label>
           </div>
         </div>
         <div class="control-row">
@@ -115,6 +122,7 @@
         </div>
         <div class="tile-layer" id="tiles"></div>
         <svg class="overlay-layer" id="overlay"></svg>
+        <div class="heatmap-tiles" id="heatmapTiles"></div>
         <div class="empty" id="emptyState">Loading...</div>
       </div>
     </article>
@@ -122,6 +130,7 @@
     <aside class="card sidebar">
       <h2 id="sidebarTitle">Items</h2>
       <div class="sidebar-meta" id="sidebarMeta">Click a line or a row to focus the current selection.</div>
+      <div class="timeline" id="overviewTimeline"></div>
       <div class="list" id="list"></div>
     </aside>
   </section>
@@ -131,6 +140,7 @@
 const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', { timeZone:'Europe/Moscow', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
 const mapEl = document.getElementById('map');
 const tilesEl = document.getElementById('tiles');
+const heatmapTilesEl = document.getElementById('heatmapTiles');
 const overlayEl = document.getElementById('overlay');
 const emptyEl = document.getElementById('emptyState');
 const listEl = document.getElementById('list');
@@ -138,8 +148,9 @@ const filterInput = document.getElementById('filterInput');
 const weekdaySelect = document.getElementById('weekdaySelect');
 const sortFieldSelect = document.getElementById('sortField');
 const sortDirSelect = document.getElementById('sortDir');
+const overviewTimelineEl = document.getElementById('overviewTimeline');
 
-const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, centerLat:55.79, centerLon:49.12, zoom:12, scope:'route', mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, detailsPage:{}, centerLat:55.79, centerLon:49.12, zoom:12, scope:'route', mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
 const sortOptions = {
   previous: [
@@ -171,13 +182,16 @@ function normalize(v){ return String(v || '').trim().toLowerCase(); }
 function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
 function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
-function isPointHeatmapMode(){ return state.mode === 'pointHeatmap'; }
+function isPointHeatmapMode(){ return state.mode === 'pointHeatmap' || state.mode === 'pointTileHeatmap'; }
+function isPointTileHeatmapMode(){ return state.mode === 'pointTileHeatmap'; }
 function isSegmentMode(){ return state.mode !== 'vehicle' && !isPointHeatmapMode(); }
 function isPhysicalScope(){ return state.scope === 'physical'; }
 
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
-  if (isPointHeatmapMode()) {
+  if (isPointTileHeatmapMode()) {
+    // PNG overlay tiles carry the whole point heatmap in this mode.
+  } else if (isPointHeatmapMode()) {
     return isPhysicalScope()
       ? (state.payload.physicalPointHeatmapData || { previousDay:[], allDays:[], weekday:{} })
       : (state.payload.pointHeatmapData || { previousDay:[], allDays:[], weekday:{} });
@@ -271,8 +285,12 @@ function detailsCacheKey(item){
   return [state.scope, state.mode, state.periodMode, state.weekday, state.payload ? state.payload.yesterday : '', itemKey(item)].join('|');
 }
 
-function detailsQuery(item){
-  const params = new URLSearchParams({ scope: state.scope, plate: item.overtakerPlate || '', period: state.periodMode });
+function detailsPageKey(item, page){
+  return `${detailsCacheKey(item)}|page:${page}`;
+}
+
+function detailsQuery(item, page){
+  const params = new URLSearchParams({ scope: state.scope, plate: item.overtakerPlate || '', period: state.periodMode, page:String(page), pageSize:'50' });
   if (state.mode === 'segmentVehicle') params.set('segment', item.physicalSegmentId || item.segmentId || '');
   if (state.periodMode === 'previous' && state.payload && state.payload.yesterday) params.set('serviceDate', state.payload.yesterday);
   if (state.periodMode === 'weekday') params.set('weekday', state.weekday);
@@ -281,16 +299,18 @@ function detailsQuery(item){
 
 async function ensureDetailsLoaded(item){
   if (!item || (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle')) return;
-  const key = detailsCacheKey(item);
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  const key = detailsPageKey(item, page);
   if (state.detailsCache[key] || state.detailsLoading[key]) return;
   state.detailsLoading[key] = true;
   renderAll();
   try {
-    const response = await fetch(`./api/overtake-details?${detailsQuery(item)}`, {cache:'no-store'});
+    const response = await fetch(`./api/overtake-details?${detailsQuery(item, page)}`, {cache:'no-store'});
     const payload = await response.json();
-    state.detailsCache[key] = payload.details || [];
+    state.detailsCache[key] = payload;
   } catch (error) {
-    state.detailsCache[key] = [{ error: String(error) }];
+    state.detailsCache[key] = { details:[{ error: String(error) }], timeline:[], page, pageSize:50, totalEvents:0, hasMore:false };
   } finally {
     delete state.detailsLoading[key];
     renderAll();
@@ -301,7 +321,37 @@ function selectItemByKey(key){
   state.selectedKey = key;
   renderAll();
   const item = filteredItems().find(candidate => itemKey(candidate) === key);
+  if (item) {
+    const baseKey = detailsCacheKey(item);
+    if (!state.detailsPage[baseKey]) state.detailsPage[baseKey] = 1;
+  }
   ensureDetailsLoaded(item);
+}
+
+function renderTimelineChart(container, rows, emptyText){
+  const data = rows || [];
+  if (!data.length) {
+    container.innerHTML = `<div class="item-note" style="padding:12px">${escapeHtml(emptyText || 'No timeline data.')}</div>`;
+    return;
+  }
+  const width = Math.max(260, container.clientWidth || 360);
+  const height = Math.max(70, container.clientHeight || 88);
+  const padding = { left:8, right:8, top:8, bottom:16 };
+  const maxCount = Math.max(...data.map(row => Number(row.count || 0)), 1);
+  const barWidth = Math.max(1, (width - padding.left - padding.right) / data.length);
+  const bars = data.map((row, index) => {
+    const value = Number(row.count || 0);
+    const barHeight = (height - padding.top - padding.bottom) * value / maxCount;
+    const x = padding.left + index * barWidth;
+    const y = height - padding.bottom - barHeight;
+    const fill = heatColor(value, maxCount);
+    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(1, barWidth - 1).toFixed(2)}" height="${barHeight.toFixed(2)}" fill="${fill}" opacity="0.82"><title>${escapeAttr(formatDate(row.bucketTime))}: ${value}</title></rect>`;
+  }).join('');
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${bars}<line x1="${padding.left}" y1="${height-padding.bottom}" x2="${width-padding.right}" y2="${height-padding.bottom}" stroke="rgba(29,42,56,.18)" /></svg>`;
+}
+
+function renderOverviewTimeline(){
+  renderTimelineChart(overviewTimelineEl, state.payload ? state.payload.timeline : [], 'No events in the selected period.');
 }
 
 function renderTiles(){
@@ -318,6 +368,31 @@ function renderTiles(){
     }
   }
   tilesEl.innerHTML=html;
+}
+
+function heatmapTileUrl(z,x,y){
+  if (!isPointTileHeatmapMode()) return null;
+  const period = state.periodMode === 'previous' ? 'previous' : state.periodMode === 'all' ? 'all' : `weekday/${state.weekday}`;
+  return `./tiles/overtakes/point-heatmap/${state.scope}/${period}/${z}/${x}/${y}.png?v=${encodeURIComponent(state.payload?.updatedAt || '')}`;
+}
+
+function renderHeatmapTiles(){
+  if (!state.config || !isPointTileHeatmapMode()) {
+    heatmapTilesEl.innerHTML = '';
+    return;
+  }
+  const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin();
+  let html='';
+  const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  for(let x=minTileX;x<=maxTileX;x++){
+    for(let y=minTileY;y<=maxTileY;y++){
+      if(y<0||y>maxTile) continue;
+      const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top;
+      html += `<img src="${heatmapTileUrl(z,wrappedX,y)}" style="left:${left}px;top:${top}px" alt="" onerror="this.style.display='none'">`;
+    }
+  }
+  heatmapTilesEl.innerHTML=html;
 }
 
 function renderOverlay(){
@@ -441,7 +516,15 @@ function listNote(item){
 
 function detailsForItem(item){
   if (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle') return [];
-  return state.detailsCache[detailsCacheKey(item)] || [];
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  return (state.detailsCache[detailsPageKey(item, page)] || {}).details || [];
+}
+
+function detailPayloadForItem(item){
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  return state.detailsCache[detailsPageKey(item, page)] || null;
 }
 
 function detailLine(detail){
@@ -456,14 +539,23 @@ function detailLine(detail){
 
 function renderItemDetails(item, active){
   if (!active || (state.mode !== 'vehicle' && state.mode !== 'segmentVehicle')) return '';
-  if (state.detailsLoading[detailsCacheKey(item)]) {
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  if (state.detailsLoading[detailsPageKey(item, page)]) {
     return '<div class="details"><div class="detail">Loading detailed overtake facts...</div></div>';
   }
+  const payload = detailPayloadForItem(item);
   const details = detailsForItem(item);
-  if (!details.length) {
+  if (!payload) {
     return '<div class="details"><div class="detail">Click row to load detailed overtake facts for this selection.</div></div>';
   }
-  return `<div class="details">${details.map(detailLine).join('')}</div>`;
+  if (!details.length) {
+    return '<div class="details"><div class="detail">No detailed overtake facts for this selection in the selected period.</div></div>';
+  }
+  const start = (Number(payload.page || 1) - 1) * Number(payload.pageSize || 50) + 1;
+  const end = start + details.length - 1;
+  const pager = `<div class="pager"><button type="button" data-page-action="prev" ${Number(payload.page || 1) <= 1 ? 'disabled' : ''}>Previous</button><span>${start}-${end} of ${payload.totalEvents || details.length}</span><button type="button" data-page-action="next" ${payload.hasMore ? '' : 'disabled'}>Next</button></div>`;
+  return `<div class="details"><div class="timeline" data-detail-timeline="${escapeAttr(itemKey(item))}"></div>${pager}${details.map(detailLine).join('')}</div>`;
 }
 
 function renderList(){
@@ -480,6 +572,23 @@ function renderList(){
   listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
     selectItemByKey(element.dataset.key);
   }));
+  listEl.querySelectorAll('[data-page-action]').forEach(button => button.addEventListener('click', event => {
+    event.stopPropagation();
+    const activeItem = filteredItems().find(item => itemKey(item) === state.selectedKey);
+    if (!activeItem) return;
+    const baseKey = detailsCacheKey(activeItem);
+    const currentPage = state.detailsPage[baseKey] || 1;
+    state.detailsPage[baseKey] = button.dataset.pageAction === 'next' ? currentPage + 1 : Math.max(1, currentPage - 1);
+    ensureDetailsLoaded(activeItem);
+  }));
+  const activeItem = items.find(item => itemKey(item) === state.selectedKey);
+  if (activeItem) {
+    const payload = detailPayloadForItem(activeItem);
+    const timelineEl = listEl.querySelector('[data-detail-timeline]');
+    if (timelineEl && payload) {
+      renderTimelineChart(timelineEl, payload.timeline || [], 'No timeline data for this selection.');
+    }
+  }
 }
 
 function renderMeta(){
@@ -490,7 +599,9 @@ function renderMeta(){
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
   document.getElementById('sidebarTitle').textContent = isPointHeatmapMode() ? 'Overtake Point Clusters' : state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
   document.getElementById('sidebarMeta').textContent =
-    isPointHeatmapMode()
+    isPointTileHeatmapMode()
+      ? 'PNG overlay tiles draw every overtake point as a small transparent mark; dense overlaps become brighter.'
+      : isPointHeatmapMode()
       ? 'Rows show clustered overtake event points; the map uses larger/redder circles for denser places.'
       : (state.mode === 'vehicle' || state.mode === 'segmentVehicle')
       ? 'Click a row to expand exact overtake facts and show event markers for the selected period.'
@@ -505,11 +616,12 @@ function adjustZoom(delta){
   if(nz===state.zoom) return;
   state.zoom=nz;
   renderTiles();
+  renderHeatmapTiles();
   renderOverlay();
 }
 
 function onPointerDown(e){ state.dragging=true; state.dragMoved=false; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
-function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
+function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderHeatmapTiles(); renderOverlay(); }
 function onPointerUp(){ state.dragging=false; mapEl.classList.remove('dragging'); }
 
 function populateWeekdays(){
@@ -522,6 +634,8 @@ function renderAll(){
   renderSortOptions();
   renderMeta();
   renderTiles();
+  renderHeatmapTiles();
+  renderOverviewTimeline();
   renderList();
   renderOverlay();
 }
@@ -575,7 +689,7 @@ document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1))
 mapEl.addEventListener('pointerdown', onPointerDown);
 window.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
-window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderOverlay(); });
+window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderHeatmapTiles(); renderOverviewTimeline(); renderOverlay(); });
 
 loadAll().catch(error => {
   emptyEl.style.display='grid';

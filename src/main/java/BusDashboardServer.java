@@ -15,7 +15,9 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class BusDashboardServer {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ZoneId CITY_ZONE = ZoneId.of(System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow"));
 
     private final AtomicReference<byte[]> cachedStatsJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementJson = new AtomicReference<>();
@@ -360,10 +363,15 @@ public class BusDashboardServer {
         String weekday = query.getOrDefault("weekday", "1");
         String sectionKey = overtakeSectionKey(scope, mode);
         payload.put(sectionKey, compactOvertakeSection(source.get(sectionKey), period, weekday));
+        try {
+            payload.put("timeline", loadOvertakeTimeline(query, scope, null, null));
+        } catch (Exception e) {
+            payload.put("timeline", List.of());
+        }
 
         if (("vehicle".equals(mode))) {
             copyIfPresent(source, payload, "routeShapes");
-        } else if (!"physical".equals(scope) && !"pointHeatmap".equals(mode)) {
+        } else if (!"physical".equals(scope) && !"pointHeatmap".equals(mode) && !"pointTileHeatmap".equals(mode)) {
             copyIfPresent(source, payload, "segmentShapes");
         }
         if (!payload.containsKey("segmentShapes")) {
@@ -377,7 +385,7 @@ public class BusDashboardServer {
     }
 
     private static String overtakeSectionKey(String scope, String mode) {
-        if ("pointHeatmap".equals(mode)) {
+        if ("pointHeatmap".equals(mode) || "pointTileHeatmap".equals(mode)) {
             return "physical".equals(scope) ? "physicalPointHeatmapData" : "pointHeatmapData";
         }
         if ("physical".equals(scope)) {
@@ -443,70 +451,50 @@ public class BusDashboardServer {
                 return;
             }
 
-            List<Map<String, Object>> details = loadOvertakeDetails(query, scope, plate);
+            Map<String, Object> detailsPayload = loadOvertakeDetails(query, scope, plate);
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
             payload.put("status", "ok");
             payload.put("scope", scope);
             payload.put("plate", plate);
-            payload.put("details", details);
+            payload.putAll(detailsPayload);
             writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
         } catch (Exception e) {
             writeResponse(exchange, 500, "application/json; charset=utf-8", errorPayload(e.getMessage()));
         }
     }
 
-    private List<Map<String, Object>> loadOvertakeDetails(Map<String, String> query, String scope, String plate) throws Exception {
+    private Map<String, Object> loadOvertakeDetails(Map<String, String> query, String scope, String plate) throws Exception {
         boolean physical = "physical".equalsIgnoreCase(scope);
         Path eventsDir = trafficBehaviorDir.resolve(physical ? "physical-overtake-events" : "overtake-events");
         if (!Files.exists(eventsDir)) {
-            return List.of();
+            return Map.of("details", List.of(), "timeline", List.of(), "page", 1, "pageSize", 50, "totalEvents", 0, "hasMore", false);
         }
 
         String segmentColumn = physical ? "physicalSegmentId" : "segmentId";
         String routeColumn = physical ? "overtakenRouteNumber" : "routeNumber";
+        int page = Math.max(1, parsePositiveInt(query.get("page"), 1));
+        int pageSize = Math.min(50, Math.max(1, parsePositiveInt(query.get("pageSize"), 50)));
+        int offset = (page - 1) * pageSize;
+
+        FilterSpec filter = buildOvertakeFilter(query, eventsDir, segmentColumn, plate);
         StringBuilder sql = new StringBuilder("SELECT ");
         sql.append("CAST(serviceDate AS VARCHAR), weekdayIso, overtakerPlate, overtakerRouteNumber, ");
         sql.append("overtakenPlate, ").append(routeColumn).append(", ").append(segmentColumn).append(", ");
         sql.append("startStopName, endStopName, startStopLatitude, startStopLongitude, endStopLatitude, endStopLongitude, ");
         sql.append("distanceMeters, overtakeAt, overtakerTravelDurationSeconds, overtakenTravelDurationSeconds, ");
         sql.append("overtakerAvgSegmentSpeedKmh, overtakenAvgSegmentSpeedKmh ");
-        sql.append("FROM read_parquet(?) WHERE overtakerPlate = ? ");
-
-        List<Object> parameters = new ArrayList<>();
-        parameters.add(parquetGlob(eventsDir));
-        parameters.add(plate);
-
-        String segment = query.getOrDefault("segment", "").trim();
-        if (!segment.isEmpty()) {
-            sql.append("AND ").append(segmentColumn).append(" = ? ");
-            parameters.add(segment);
-        }
-
-        String period = query.getOrDefault("period", "all");
-        if ("previous".equals(period)) {
-            String serviceDate = query.getOrDefault("serviceDate", "").trim();
-            if (!serviceDate.isEmpty()) {
-                sql.append("AND CAST(serviceDate AS VARCHAR) = ? ");
-                parameters.add(serviceDate);
-            }
-        } else if ("weekday".equals(period)) {
-            String weekday = query.getOrDefault("weekday", "").trim();
-            if (!weekday.isEmpty()) {
-                sql.append("AND weekdayIso = ? ");
-                parameters.add(Integer.parseInt(weekday));
-            }
-        }
-        sql.append("ORDER BY overtakeAt DESC");
+        sql.append("FROM read_parquet(?) WHERE ").append(filter.whereClause).append(" ");
+        sql.append("ORDER BY overtakeAt DESC LIMIT ? OFFSET ?");
 
         Class.forName("org.duckdb.DuckDBDriver");
-        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
-             PreparedStatement statement = connection.prepareStatement(sql.toString())) {
-            for (int i = 0; i < parameters.size(); i++) {
-                statement.setObject(i + 1, parameters.get(i));
-            }
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+                bindParameters(statement, filter.parameters);
+                statement.setInt(filter.parameters.size() + 1, pageSize);
+                statement.setInt(filter.parameters.size() + 2, offset);
             try (ResultSet rs = statement.executeQuery()) {
-                List<Map<String, Object>> rows = new ArrayList<>();
                 while (rs.next()) {
                     Map<String, Object> row = new LinkedHashMap<>();
                     row.put("serviceDate", rs.getString(1));
@@ -533,8 +521,116 @@ public class BusDashboardServer {
                     row.put("overtakenAvgSegmentSpeedKmh", rs.getDouble(19));
                     rows.add(row);
                 }
+            }
+        }
+            long totalEvents = countOvertakeEvents(connection, filter);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("details", rows);
+            payload.put("timeline", loadOvertakeTimeline(connection, filter));
+            payload.put("page", page);
+            payload.put("pageSize", pageSize);
+            payload.put("totalEvents", totalEvents);
+            payload.put("hasMore", offset + rows.size() < totalEvents);
+            return payload;
+        }
+    }
+
+    private List<Map<String, Object>> loadOvertakeTimeline(Map<String, String> query, String scope, String plate, String segment) throws Exception {
+        boolean physical = "physical".equalsIgnoreCase(scope);
+        Path eventsDir = trafficBehaviorDir.resolve(physical ? "physical-overtake-events" : "overtake-events");
+        if (!Files.exists(eventsDir)) {
+            return List.of();
+        }
+        Map<String, String> timelineQuery = new LinkedHashMap<>(query);
+        if (segment != null && !segment.isBlank()) {
+            timelineQuery.put("segment", segment);
+        }
+        String segmentColumn = physical ? "physicalSegmentId" : "segmentId";
+        FilterSpec filter = buildOvertakeFilter(timelineQuery, eventsDir, segmentColumn, plate);
+        Class.forName("org.duckdb.DuckDBDriver");
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
+            return loadOvertakeTimeline(connection, filter);
+        }
+    }
+
+    private List<Map<String, Object>> loadOvertakeTimeline(Connection connection, FilterSpec filter) throws Exception {
+        String sql = "SELECT time_bucket(INTERVAL '5 minutes', overtakeAt) AS bucketTime, COUNT(*) "
+                + "FROM read_parquet(?) WHERE " + filter.whereClause + " AND overtakeAt IS NOT NULL "
+                + "GROUP BY bucketTime ORDER BY bucketTime";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            bindParameters(statement, filter.parameters);
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("bucketTime", toIsoString(rs.getObject(1)));
+                    row.put("count", rs.getLong(2));
+                    rows.add(row);
+                }
                 return rows;
             }
+        }
+    }
+
+    private long countOvertakeEvents(Connection connection, FilterSpec filter) throws Exception {
+        String sql = "SELECT COUNT(*) FROM read_parquet(?) WHERE " + filter.whereClause;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            bindParameters(statement, filter.parameters);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    private FilterSpec buildOvertakeFilter(Map<String, String> query, Path eventsDir, String segmentColumn, String plate) {
+        List<String> clauses = new ArrayList<>();
+        List<Object> parameters = new ArrayList<>();
+        clauses.add("TRUE");
+        parameters.add(parquetGlob(eventsDir));
+        if (plate != null && !plate.isBlank()) {
+            clauses.add("overtakerPlate = ?");
+            parameters.add(plate);
+        }
+        String segment = query.getOrDefault("segment", "").trim();
+        if (!segment.isEmpty()) {
+            clauses.add(segmentColumn + " = ?");
+            parameters.add(segment);
+        }
+        String period = query.getOrDefault("period", "all");
+        if ("previous".equals(period)) {
+            String serviceDate = query.getOrDefault("serviceDate", "").trim();
+            if (!serviceDate.isEmpty()) {
+                clauses.add("CAST(serviceDate AS VARCHAR) = ?");
+                parameters.add(serviceDate);
+            }
+        } else {
+            clauses.add("CAST(serviceDate AS VARCHAR) < ?");
+            parameters.add(LocalDate.now(CITY_ZONE).toString());
+            if ("weekday".equals(period)) {
+                String weekday = query.getOrDefault("weekday", "").trim();
+                if (!weekday.isEmpty()) {
+                    clauses.add("weekdayIso = ?");
+                    parameters.add(Integer.parseInt(weekday));
+                }
+            }
+        }
+        return new FilterSpec(String.join(" AND ", clauses), parameters);
+    }
+
+    private static void bindParameters(PreparedStatement statement, List<Object> parameters) throws Exception {
+        for (int i = 0; i < parameters.size(); i++) {
+            statement.setObject(i + 1, parameters.get(i));
+        }
+    }
+
+    private static int parsePositiveInt(String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
 
@@ -623,6 +719,16 @@ public class BusDashboardServer {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             writeResponse(exchange, 200, contentType, body);
+        }
+    }
+
+    private static final class FilterSpec {
+        private final String whereClause;
+        private final List<Object> parameters;
+
+        private FilterSpec(String whereClause, List<Object> parameters) {
+            this.whereClause = whereClause;
+            this.parameters = parameters;
         }
     }
 }
