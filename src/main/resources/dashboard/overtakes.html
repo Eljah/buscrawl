@@ -60,6 +60,13 @@
     <article class="card map-card">
       <div class="controls">
         <div class="control-row">
+          <strong>Scope</strong>
+          <div class="radio-group" id="scopeGroup">
+            <label><input type="radio" name="scope" value="route" checked> Route-specific</label>
+            <label><input type="radio" name="scope" value="physical"> Expanded physical</label>
+          </div>
+        </div>
+        <div class="control-row">
           <strong>Mode</strong>
           <div class="radio-group" id="modeGroup">
             <label><input type="radio" name="mode" value="segment" checked> Segment</label>
@@ -128,7 +135,7 @@ const weekdaySelect = document.getElementById('weekdaySelect');
 const sortFieldSelect = document.getElementById('sortField');
 const sortDirSelect = document.getElementById('sortDir');
 
-const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, scope:'route', mode:'segment', periodMode:'previous', weekday:'1', filterText:'', selectedKey:'', sortField:'count', sortDir:'desc', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
 const sortOptions = {
   previous: [
@@ -161,9 +168,15 @@ function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<',
 function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
 function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
 function isSegmentMode(){ return state.mode !== 'vehicle'; }
+function isPhysicalScope(){ return state.scope === 'physical'; }
 
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
+  if (isPhysicalScope()) {
+    return state.mode === 'vehicle'
+      ? (state.payload.physicalVehicleData || { previousDay:[], allDays:[], weekday:{} })
+      : (state.payload.physicalSegmentData || { previousDay:[], allDays:[], weekday:{} });
+  }
   if (state.mode === 'segment') return state.payload.segmentData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'segmentRoute') return state.payload.segmentRouteData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'segmentVehicle') return state.payload.segmentVehicleData || { previousDay:[], allDays:[], weekday:{} };
@@ -178,6 +191,7 @@ function currentDataset(){
 }
 
 function itemKey(item){
+  if (isPhysicalScope() && state.mode !== 'vehicle') return item.physicalSegmentId || item.segmentId;
   if (state.mode === 'segment') return item.segmentId;
   if (state.mode === 'segmentRoute') return `${item.segmentId}|${item.overtakerRouteNumber}`;
   if (state.mode === 'segmentVehicle') return `${item.segmentId}|${item.overtakerPlate}`;
@@ -186,7 +200,8 @@ function itemKey(item){
 
 function itemFilterValue(item){
   return normalize([
-    item.segmentId, item.routeNumber, item.overtakerRouteNumber, item.overtakerPlate,
+    item.segmentId, item.physicalSegmentId, item.routeNumber, item.overtakerRouteNumber, item.overtakerPlate,
+    item.latestOvertakenRouteNumber, item.latestOvertakenPlate,
     item.startStopName, item.endStopName, item.latestStartStopName, item.latestEndStopName
   ].join(' '));
 }
@@ -260,6 +275,16 @@ function renderOverlay(){
   const parts = [];
   if (isSegmentMode()) {
     const visible = new Set(items.map(item => item.segmentId));
+    if (isPhysicalScope()) {
+      for (const item of items) {
+        const key = itemKey(item);
+        const active = key === state.selectedKey;
+        const start = project(item.startStopLatitude, item.startStopLongitude, state.zoom);
+        const end = project(item.endStopLatitude, item.endStopLongitude, state.zoom);
+        const pts = `${(start.x-origin.left).toFixed(2)},${(start.y-origin.top).toFixed(2)} ${(end.x-origin.left).toFixed(2)},${(end.y-origin.top).toFixed(2)}`;
+        parts.push(`<polyline data-key="${escapeAttr(key)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+      }
+    } else {
     for (const shape of state.payload.segmentShapes || []) {
       if (!visible.has(shape.segmentId)) continue;
       const active = items.some(item => itemKey(item) === state.selectedKey && item.segmentId === shape.segmentId);
@@ -268,6 +293,7 @@ function renderOverlay(){
         return `${(pr.x-origin.left).toFixed(2)},${(pr.y-origin.top).toFixed(2)}`;
       }).join(' ');
       parts.push(`<polyline data-key="${escapeAttr(shape.segmentId)}" points="${pts}" fill="none" stroke="${active ? 'rgba(204,98,52,0.96)' : 'rgba(29,42,56,0.36)'}" stroke-width="${active ? '5' : '3.4'}" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:auto; cursor:pointer"></polyline>`);
+    }
     }
   } else {
     const routes = new Set(items.map(item => item.overtakerRouteNumber).filter(Boolean));
@@ -297,6 +323,7 @@ function renderOverlay(){
 }
 
 function listTitle(item){
+  if (isPhysicalScope() && state.mode !== 'vehicle') return `${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segment') return `${item.routeNumber} · ${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segmentRoute') return `${item.overtakerRouteNumber} · ${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segmentVehicle') return `${item.overtakerPlate} · ${item.startStopName} -> ${item.endStopName}`;
@@ -314,6 +341,9 @@ function listNote(item){
     if (state.mode === 'vehicle') {
       return `${base}; latest segment ${item.latestStartStopName || '?'} -> ${item.latestEndStopName || '?'}`;
     }
+    if (isPhysicalScope()) {
+      return `${base}; overtaker ${item.latestOvertakerRouteNumber || '?'} / ${item.latestOvertakerPlate || '?'}; overtaken ${item.latestOvertakenRouteNumber || '?'} / ${item.latestOvertakenPlate || '?'}`;
+    }
     return `${base}; overtaker ${item.overtakerRouteNumber || item.latestOvertakerRouteNumber || item.routeNumber || '?'} / ${item.overtakerPlate || item.latestOvertakerPlate || '?'}`;
   }
   return `days ${item.sampleDays}, avg/day ${item.averageDailyOvertakes}, max/day ${item.maxDailyOvertakes}`;
@@ -321,7 +351,8 @@ function listNote(item){
 
 function detailsForVehicle(item){
   if (state.mode !== 'vehicle') return [];
-  const allDetails = ((state.payload.vehicleDetails || {})[item.overtakerPlate] || []);
+  const detailSource = isPhysicalScope() ? state.payload.physicalVehicleDetails : state.payload.vehicleDetails;
+  const allDetails = ((detailSource || {})[item.overtakerPlate] || []);
   return allDetails.filter(detail => {
     if (state.periodMode === 'previous') return detail.serviceDate === state.payload.yesterday;
     if (state.periodMode === 'weekday') return String(detail.weekdayIso) === String(state.weekday);
@@ -368,7 +399,7 @@ function renderMeta(){
   const items = filteredItems();
   document.getElementById('updatedAt').textContent = `Updated: ${formatDate(state.payload.updatedAt)}`;
   document.getElementById('modeMeta').textContent =
-    `${state.mode}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
+    `${state.scope}, ${state.mode}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
   document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
   document.getElementById('sidebarMeta').textContent =
@@ -421,6 +452,7 @@ async function loadAll(){
   renderAll();
 }
 
+document.getElementById('scopeGroup').addEventListener('change', event => { state.scope = event.target.value; state.selectedKey=''; renderAll(); });
 document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; state.selectedKey=''; renderAll(); });
 document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; state.selectedKey=''; renderAll(); });
 weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; renderAll(); });

@@ -90,9 +90,132 @@ public class BusOvertakeCacheJob {
                     connection,
                     dataRoot.resolve("overtake-events")
             ));
+            payload.put("physicalSegmentData", buildPhysicalSection(
+                    connection,
+                    dataRoot.resolve("daily-physical-overtake-segment"),
+                    dataRoot.resolve("summary-physical-overtake-segment-all-days"),
+                    dataRoot.resolve("summary-physical-overtake-segment-by-weekday"),
+                    yesterday,
+                    true
+            ));
+            payload.put("physicalVehicleData", buildPhysicalSection(
+                    connection,
+                    dataRoot.resolve("daily-physical-overtake-vehicle"),
+                    dataRoot.resolve("summary-physical-overtake-vehicle-all-days"),
+                    dataRoot.resolve("summary-physical-overtake-vehicle-by-weekday"),
+                    yesterday,
+                    false
+            ));
+            payload.put("physicalVehicleDetails", loadPhysicalVehicleDetails(
+                    connection,
+                    dataRoot.resolve("physical-overtake-events")
+            ));
 
             writeJsonAtomic(cacheFile, payload);
         }
+    }
+
+    private static Map<String, Object> buildPhysicalSection(
+            Connection connection,
+            Path dailyDir,
+            Path summaryAllDir,
+            Path summaryWeekdayDir,
+            LocalDate yesterday,
+            boolean segmentMode
+    ) throws Exception {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("previousDay", loadPhysicalRows(connection, parquetGlob(dailyDir), yesterday, null, segmentMode));
+        section.put("allDays", loadPhysicalRows(connection, parquetGlob(summaryAllDir), null, null, segmentMode));
+        Map<String, List<Map<String, Object>>> weekday = new LinkedHashMap<>();
+        for (int weekdayIso = 1; weekdayIso <= 7; weekdayIso++) {
+            weekday.put(String.valueOf(weekdayIso), loadPhysicalRows(connection, parquetGlob(summaryWeekdayDir), null, weekdayIso, segmentMode));
+        }
+        section.put("weekday", weekday);
+        return section;
+    }
+
+    private static List<Map<String, Object>> loadPhysicalRows(
+            Connection connection,
+            String parquetGlob,
+            LocalDate serviceDate,
+            Integer weekdayIso,
+            boolean segmentMode
+    ) throws Exception {
+        boolean summary = serviceDate == null;
+        String selectColumns = segmentMode
+                ? (summary
+                ? "physicalSegmentId, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt, latestOvertakerPlate, latestOvertakerRouteNumber, latestOvertakenPlate, latestOvertakenRouteNumber"
+                : "physicalSegmentId, startStopId, startStopName, startStopLatitude, startStopLongitude, endStopId, endStopName, endStopLatitude, endStopLongitude, distanceMeters, overtakeCount, latestOvertakeAt, latestOvertakerPlate, latestOvertakerRouteNumber, latestOvertakenPlate, latestOvertakenRouteNumber, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds")
+                : (summary
+                ? "overtakerRouteNumber, overtakerPlate, totalOvertakes, sampleDays, averageDailyOvertakes, maxDailyOvertakes, latestOvertakeAt, latestStartStopName, latestEndStopName"
+                : "overtakerRouteNumber, overtakerPlate, overtakeCount, latestOvertakeAt, latestStartStopName, latestEndStopName, averageOvertakerDurationSeconds, averageOvertakenDurationSeconds");
+
+        StringBuilder sql = new StringBuilder("SELECT ");
+        sql.append(selectColumns);
+        sql.append(" FROM read_parquet(?) ");
+        if (serviceDate != null) {
+            sql.append("WHERE CAST(serviceDate AS VARCHAR) = ? ");
+        } else if (weekdayIso != null) {
+            sql.append("WHERE weekdayIso = ? ");
+        }
+        sql.append("ORDER BY ");
+        sql.append(summary ? "totalOvertakes DESC, averageDailyOvertakes DESC" : "overtakeCount DESC, latestOvertakeAt DESC");
+
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            statement.setString(1, parquetGlob);
+            if (serviceDate != null) {
+                statement.setString(2, serviceDate.toString());
+            } else if (weekdayIso != null) {
+                statement.setInt(2, weekdayIso);
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    rows.add(segmentMode ? readPhysicalSegmentRow(rs, summary) : readPhysicalVehicleRow(rs, summary));
+                }
+                return rows;
+            }
+        }
+    }
+
+    private static Map<String, Object> readPhysicalSegmentRow(ResultSet rs, boolean summary) throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("physicalSegmentId", rs.getString(1));
+        row.put("segmentId", rs.getString(1));
+        row.put("startStopId", rs.getString(2));
+        row.put("startStopName", rs.getString(3));
+        row.put("startStopLatitude", rs.getDouble(4));
+        row.put("startStopLongitude", rs.getDouble(5));
+        row.put("endStopId", rs.getString(6));
+        row.put("endStopName", rs.getString(7));
+        row.put("endStopLatitude", rs.getDouble(8));
+        row.put("endStopLongitude", rs.getDouble(9));
+        row.put("distanceMeters", rs.getDouble(10));
+        if (summary) {
+            row.put("totalOvertakes", rs.getLong(11));
+            row.put("sampleDays", rs.getLong(12));
+            row.put("averageDailyOvertakes", rs.getDouble(13));
+            row.put("maxDailyOvertakes", rs.getLong(14));
+            row.put("latestOvertakeAt", toIsoString(rs.getObject(15)));
+            row.put("latestOvertakerPlate", rs.getString(16));
+            row.put("latestOvertakerRouteNumber", rs.getString(17));
+            row.put("latestOvertakenPlate", rs.getString(18));
+            row.put("latestOvertakenRouteNumber", rs.getString(19));
+        } else {
+            row.put("overtakeCount", rs.getLong(11));
+            row.put("latestOvertakeAt", toIsoString(rs.getObject(12)));
+            row.put("latestOvertakerPlate", rs.getString(13));
+            row.put("latestOvertakerRouteNumber", rs.getString(14));
+            row.put("latestOvertakenPlate", rs.getString(15));
+            row.put("latestOvertakenRouteNumber", rs.getString(16));
+            row.put("averageOvertakerDurationSeconds", rs.getInt(17));
+            row.put("averageOvertakenDurationSeconds", rs.getInt(18));
+        }
+        return row;
+    }
+
+    private static Map<String, Object> readPhysicalVehicleRow(ResultSet rs, boolean summary) throws Exception {
+        return OvertakeMode.VEHICLE.readRow(rs, summary);
     }
 
     private static Map<String, Object> buildSection(
@@ -191,6 +314,48 @@ public class BusOvertakeCacheJob {
         return result;
     }
 
+    private static Map<String, List<Map<String, Object>>> loadPhysicalVehicleDetails(Connection connection, Path overtakeEventsDir) throws Exception {
+        Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+        if (!Files.exists(overtakeEventsDir)) {
+            return result;
+        }
+
+        String sql = "SELECT "
+                + "CAST(serviceDate AS VARCHAR), weekdayIso, overtakerPlate, overtakerRouteNumber, "
+                + "overtakenPlate, overtakenRouteNumber, physicalSegmentId, startStopName, endStopName, distanceMeters, "
+                + "overtakeAt, overtakerTravelDurationSeconds, overtakenTravelDurationSeconds, "
+                + "overtakerAvgSegmentSpeedKmh, overtakenAvgSegmentSpeedKmh "
+                + "FROM read_parquet(?) "
+                + "ORDER BY overtakeAt DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, parquetGlob(overtakeEventsDir));
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    String overtakerPlate = rs.getString(3);
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("serviceDate", rs.getString(1));
+                    row.put("weekdayIso", rs.getInt(2));
+                    row.put("overtakerPlate", overtakerPlate);
+                    row.put("overtakerRouteNumber", rs.getString(4));
+                    row.put("overtakenPlate", rs.getString(5));
+                    row.put("overtakenRouteNumber", rs.getString(6));
+                    row.put("segmentId", rs.getString(7));
+                    row.put("physicalSegmentId", rs.getString(7));
+                    row.put("startStopName", rs.getString(8));
+                    row.put("endStopName", rs.getString(9));
+                    row.put("distanceMeters", rs.getDouble(10));
+                    row.put("overtakeAt", toIsoString(rs.getObject(11)));
+                    row.put("overtakerTravelDurationSeconds", rs.getLong(12));
+                    row.put("overtakenTravelDurationSeconds", rs.getLong(13));
+                    row.put("overtakerAvgSegmentSpeedKmh", rs.getDouble(14));
+                    row.put("overtakenAvgSegmentSpeedKmh", rs.getDouble(15));
+                    result.computeIfAbsent(overtakerPlate, ignored -> new ArrayList<>()).add(row);
+                }
+            }
+        }
+        return result;
+    }
+
     private static List<Map<String, Object>> buildWeekdays() {
         List<Map<String, Object>> weekdays = new ArrayList<>();
         for (int weekday = 1; weekday <= 7; weekday++) {
@@ -236,6 +401,9 @@ public class BusOvertakeCacheJob {
         payload.put("segmentVehicleData", emptySection);
         payload.put("vehicleData", emptySection);
         payload.put("vehicleDetails", Map.of());
+        payload.put("physicalSegmentData", emptySection);
+        payload.put("physicalVehicleData", emptySection);
+        payload.put("physicalVehicleDetails", Map.of());
         return payload;
     }
 
