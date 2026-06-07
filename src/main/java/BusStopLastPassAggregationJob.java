@@ -19,6 +19,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.apache.spark.sql.functions.avg;
+import static org.apache.spark.sql.functions.abs;
+import static org.apache.spark.sql.functions.broadcast;
 import static org.apache.spark.sql.functions.callUDF;
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.count;
@@ -26,6 +28,7 @@ import static org.apache.spark.sql.functions.expr;
 import static org.apache.spark.sql.functions.from_utc_timestamp;
 import static org.apache.spark.sql.functions.input_file_name;
 import static org.apache.spark.sql.functions.lag;
+import static org.apache.spark.sql.functions.lit;
 import static org.apache.spark.sql.functions.max;
 import static org.apache.spark.sql.functions.min;
 import static org.apache.spark.sql.functions.round;
@@ -64,6 +67,10 @@ public class BusStopLastPassAggregationJob {
         int initialLookbackDays = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_INITIAL_LOOKBACK_DAYS", "3"));
         String bootstrapStrategy = System.getenv().getOrDefault("BUS_STOP_LAST_PASS_BOOTSTRAP_MODE", "full-history");
         int maxFilesPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN", "512"));
+        boolean visitsOnly = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_VISITS_ONLY", "false"));
+        boolean dailyOnly = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_DAILY_ONLY", "false"));
+        boolean newestFirst = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_NEWEST_FIRST", "false"));
+        boolean inputHasSourceFile = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_INPUT_HAS_SOURCE_FILE", "false"));
 
         Files.createDirectories(outputRoot);
         Files.createDirectories(sparkLocalDir);
@@ -92,25 +99,27 @@ public class BusStopLastPassAggregationJob {
                 IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath);
         boolean bootstrapMode = state.lastProcessedModifiedAt == null;
         int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, maxFilesPerRun));
-        List<IncrementalParquetSupport.ParquetFileInfo> newFiles;
-        if (bootstrapMode) {
-            newFiles = new ArrayList<>(selectedNewFiles.subList(0, cappedSize));
-        } else {
-            newFiles = new ArrayList<>(selectedNewFiles.subList(0, cappedSize));
-        }
+        int startIndex = newestFirst ? Math.max(0, selectedNewFiles.size() - cappedSize) : 0;
+        int endIndex = newestFirst ? selectedNewFiles.size() : cappedSize;
+        List<IncrementalParquetSupport.ParquetFileInfo> newFiles =
+                new ArrayList<>(selectedNewFiles.subList(startIndex, endIndex));
 
-        if (newFiles.isEmpty()) {
+        if (newFiles.isEmpty() && !dailyOnly) {
             System.out.println("BusStopLastPassAggregationJob: no new parquet files to process");
             return;
         }
 
-        System.out.printf(
-                "BusStopLastPassAggregationJob: processing %d files out of %d available since %s (bootstrapMode=%s)%n",
-                newFiles.size(),
-                selectedNewFiles.size(),
-                modifiedSince,
-                bootstrapMode ? bootstrapStrategy : "incremental"
-        );
+        if (dailyOnly) {
+            System.out.println("BusStopLastPassAggregationJob: rebuilding daily and summary parquet from stop visits");
+        } else {
+            System.out.printf(
+                    "BusStopLastPassAggregationJob: processing %d files out of %d available since %s (bootstrapMode=%s)%n",
+                    newFiles.size(),
+                    selectedNewFiles.size(),
+                    modifiedSince,
+                    bootstrapMode ? bootstrapStrategy : "incremental"
+            );
+        }
 
         Path stopVisitsDir = outputRoot.resolve(STOP_VISITS_DIR);
         Path dailyRouteStopDir = outputRoot.resolve(DAILY_ROUTE_STOP_DIR);
@@ -133,13 +142,39 @@ public class BusStopLastPassAggregationJob {
         RouteTopology topology = RouteTopology.load(null);
 
         try {
+            if (dailyOnly) {
+                if (!hasParquetFiles(stopVisitsDir)) {
+                    throw new IllegalStateException("Stop visits directory is empty: " + stopVisitsDir);
+                }
+                Dataset<Row> allStopVisits = spark.read()
+                        .parquet(stopVisitsDir.toAbsolutePath().toString());
+                rebuildDailyAndSummaries(
+                        allStopVisits,
+                        outputRoot,
+                        dailyRouteStopDir,
+                        dailyRouteDir,
+                        dailyStopDir,
+                        outputPartitions,
+                        cityTimezone,
+                        today
+                );
+                return;
+            }
+
             Dataset<Row> routeMetadata = topology.createRouteMetadataDataFrame(spark);
             Dataset<Row> routeStopPoints = topology.createRouteStopPointsDataFrame(spark);
 
-            Dataset<Row> newBusData = spark.read()
-                    .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
-                    .select("plate", "internalRouteId", "latitude", "longitude", "eventTime")
-                    .withColumn("sourceFile", input_file_name())
+            Dataset<Row> rawBusData = spark.read()
+                    .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new));
+            Dataset<Row> newBusData;
+            if (inputHasSourceFile) {
+                newBusData = rawBusData.select("plate", "internalRouteId", "latitude", "longitude", "eventTime", "sourceFile");
+            } else {
+                newBusData = rawBusData
+                        .select("plate", "internalRouteId", "latitude", "longitude", "eventTime")
+                        .withColumn("sourceFile", input_file_name());
+            }
+            newBusData = newBusData
                     .filter(col("plate").isNotNull())
                     .filter(col("internalRouteId").isNotNull())
                     .filter(col("latitude").isNotNull())
@@ -147,7 +182,23 @@ public class BusStopLastPassAggregationJob {
                     .filter(col("eventTime").isNotNull())
                     .join(routeMetadata, "internalRouteId");
 
-            Dataset<Row> stopMatches = newBusData.join(routeStopPoints, new String[]{"internalRouteId", "routeNumber"})
+            double gridCellDegrees = stopRadiusMeters / 111_320.0;
+            double latitudeDeltaDegrees = gridCellDegrees;
+            Dataset<Row> busPointsWithCells = newBusData
+                    .withColumn("latCell", expr("floor(latitude / " + gridCellDegrees + ")"))
+                    .withColumn("lonCell", expr("floor(longitude / " + gridCellDegrees + ")"));
+            Dataset<Row> stopPointsWithCells = routeStopPoints
+                    .withColumn("stopLatCell", expr("floor(stopLatitude / " + gridCellDegrees + ")"))
+                    .withColumn("stopLonCell", expr("floor(stopLongitude / " + gridCellDegrees + ")"))
+                    .selectExpr("*", "explode(flatten(transform(sequence(-2, 2), dx -> transform(sequence(-2, 2), dy -> named_struct('latCell', stopLatCell + dx, 'lonCell', stopLonCell + dy))))) as cell")
+                    .withColumn("latCell", col("cell.latCell"))
+                    .withColumn("lonCell", col("cell.lonCell"))
+                    .drop("cell", "stopLatCell", "stopLonCell");
+
+            Dataset<Row> stopMatches = busPointsWithCells.join(broadcast(stopPointsWithCells), new String[]{"internalRouteId", "routeNumber", "latCell", "lonCell"})
+                    .filter(abs(col("latitude").minus(col("stopLatitude"))).leq(lit(latitudeDeltaDegrees)))
+                    .filter(expr("abs(longitude - stopLongitude) <= "
+                            + stopRadiusMeters + " / (111320.0 * greatest(abs(cos(radians(stopLatitude))), 0.000001))"))
                     .withColumn("distanceMeters", callUDF(
                             "haversineMeters",
                             col("latitude"),
@@ -230,135 +281,162 @@ public class BusStopLastPassAggregationJob {
 
             overwriteAffectedPartitions(affectedStopVisits, stopVisitsDir, outputPartitions, "serviceDate");
 
-            Dataset<Row> dailyRouteStop = affectedStopVisits.groupBy(
-                            col("serviceDate"),
-                            col("weekdayIso"),
-                            col("routeNumber"),
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            max("exitedStopAt").alias("lastPassAt"),
-                            expr("max_by(enteredStopAt, exitedStopAt)").alias("lastEnteredStopAt"),
-                            expr("max_by(dwellTimeSeconds, exitedStopAt)").alias("lastDwellTimeSeconds")
-                    )
-                    .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
-                    .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
-                    .drop("lastPassLocalTime");
+            if (visitsOnly) {
+                updateState(stateFile, state, newFiles);
+                return;
+            }
 
-            Dataset<Row> dailyRoute = dailyRouteStop.groupBy(
-                            col("serviceDate"),
-                            col("weekdayIso"),
-                            col("routeNumber")
-                    )
-                    .agg(max("lastPassAt").alias("lastPassAt"))
-                    .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
-                    .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
-                    .drop("lastPassLocalTime");
-
-            Dataset<Row> dailyStop = dailyRouteStop.groupBy(
-                            col("serviceDate"),
-                            col("weekdayIso"),
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            max("lastPassAt").alias("lastPassAt"),
-                            expr("max_by(routeNumber, lastPassAt)").alias("lastRouteNumber")
-                    )
-                    .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
-                    .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
-                    .drop("lastPassLocalTime");
-
-            overwriteAffectedPartitions(dailyRouteStop, dailyRouteStopDir, outputPartitions, "serviceDate");
-            overwriteAffectedPartitions(dailyRoute, dailyRouteDir, outputPartitions, "serviceDate");
-            overwriteAffectedPartitions(dailyStop, dailyStopDir, outputPartitions, "serviceDate");
-
-            Dataset<Row> fullDailyRouteStop = spark.read()
-                    .parquet(dailyRouteStopDir.toAbsolutePath().toString())
-                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
-            Dataset<Row> fullDailyRoute = spark.read()
-                    .parquet(dailyRouteDir.toAbsolutePath().toString())
-                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
-            Dataset<Row> fullDailyStop = spark.read()
-                    .parquet(dailyStopDir.toAbsolutePath().toString())
-                    .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
-
-            Dataset<Row> summaryRouteStopAll = fullDailyRouteStop.groupBy(
-                            col("routeNumber"),
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            Dataset<Row> summaryRouteStopWeekday = fullDailyRouteStop.groupBy(
-                            col("weekdayIso"),
-                            col("routeNumber"),
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            Dataset<Row> summaryRouteAll = fullDailyRoute.groupBy(col("routeNumber"))
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            Dataset<Row> summaryRouteWeekday = fullDailyRoute.groupBy(col("weekdayIso"), col("routeNumber"))
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            Dataset<Row> summaryStopAll = fullDailyStop.groupBy(
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            Dataset<Row> summaryStopWeekday = fullDailyStop.groupBy(
-                            col("weekdayIso"),
-                            col("stopId"),
-                            col("stopName"),
-                            col("stopLatitude"),
-                            col("stopLongitude")
-                    )
-                    .agg(
-                            round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
-                            count("*").alias("sampleDays")
-                    );
-
-            writeDataset(summaryRouteStopAll, outputRoot.resolve(SUMMARY_ROUTE_STOP_ALL_DIR), outputPartitions);
-            writeDataset(summaryRouteStopWeekday, outputRoot.resolve(SUMMARY_ROUTE_STOP_WEEKDAY_DIR), outputPartitions);
-            writeDataset(summaryRouteAll, outputRoot.resolve(SUMMARY_ROUTE_ALL_DIR), outputPartitions);
-            writeDataset(summaryRouteWeekday, outputRoot.resolve(SUMMARY_ROUTE_WEEKDAY_DIR), outputPartitions);
-            writeDataset(summaryStopAll, outputRoot.resolve(SUMMARY_STOP_ALL_DIR), outputPartitions);
-            writeDataset(summaryStopWeekday, outputRoot.resolve(SUMMARY_STOP_WEEKDAY_DIR), outputPartitions);
+            rebuildDailyAndSummaries(
+                    affectedStopVisits,
+                    outputRoot,
+                    dailyRouteStopDir,
+                    dailyRouteDir,
+                    dailyStopDir,
+                    outputPartitions,
+                    cityTimezone,
+                    today
+            );
         } finally {
             spark.stop();
         }
 
         updateState(stateFile, state, newFiles);
+    }
+
+    private static void rebuildDailyAndSummaries(
+            Dataset<Row> stopVisits,
+            Path outputRoot,
+            Path dailyRouteStopDir,
+            Path dailyRouteDir,
+            Path dailyStopDir,
+            int outputPartitions,
+            String cityTimezone,
+            LocalDate today
+    ) {
+        Dataset<Row> dailyRouteStop = stopVisits.groupBy(
+                        col("serviceDate"),
+                        col("weekdayIso"),
+                        col("routeNumber"),
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        max("exitedStopAt").alias("lastPassAt"),
+                        expr("max_by(enteredStopAt, exitedStopAt)").alias("lastEnteredStopAt"),
+                        expr("max_by(dwellTimeSeconds, exitedStopAt)").alias("lastDwellTimeSeconds")
+                )
+                .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
+                .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
+                .drop("lastPassLocalTime");
+
+        Dataset<Row> dailyRoute = dailyRouteStop.groupBy(
+                        col("serviceDate"),
+                        col("weekdayIso"),
+                        col("routeNumber")
+                )
+                .agg(max("lastPassAt").alias("lastPassAt"))
+                .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
+                .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
+                .drop("lastPassLocalTime");
+
+        Dataset<Row> dailyStop = dailyRouteStop.groupBy(
+                        col("serviceDate"),
+                        col("weekdayIso"),
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        max("lastPassAt").alias("lastPassAt"),
+                        expr("max_by(routeNumber, lastPassAt)").alias("lastRouteNumber")
+                )
+                .withColumn("lastPassLocalTime", from_utc_timestamp(col("lastPassAt"), cityTimezone))
+                .withColumn("lastPassSeconds", expr("hour(lastPassLocalTime) * 3600 + minute(lastPassLocalTime) * 60 + second(lastPassLocalTime)"))
+                .drop("lastPassLocalTime");
+
+        overwriteAffectedPartitions(dailyRouteStop, dailyRouteStopDir, outputPartitions, "serviceDate");
+        overwriteAffectedPartitions(dailyRoute, dailyRouteDir, outputPartitions, "serviceDate");
+        overwriteAffectedPartitions(dailyStop, dailyStopDir, outputPartitions, "serviceDate");
+
+        Dataset<Row> fullDailyRouteStop = dailyRouteStop.sparkSession().read()
+                .parquet(dailyRouteStopDir.toAbsolutePath().toString())
+                .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+        Dataset<Row> fullDailyRoute = dailyRoute.sparkSession().read()
+                .parquet(dailyRouteDir.toAbsolutePath().toString())
+                .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+        Dataset<Row> fullDailyStop = dailyStop.sparkSession().read()
+                .parquet(dailyStopDir.toAbsolutePath().toString())
+                .filter(col("serviceDate").lt(expr("DATE '" + today + "'")));
+
+        Dataset<Row> summaryRouteStopAll = fullDailyRouteStop.groupBy(
+                        col("routeNumber"),
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        Dataset<Row> summaryRouteStopWeekday = fullDailyRouteStop.groupBy(
+                        col("weekdayIso"),
+                        col("routeNumber"),
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        Dataset<Row> summaryRouteAll = fullDailyRoute.groupBy(col("routeNumber"))
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        Dataset<Row> summaryRouteWeekday = fullDailyRoute.groupBy(col("weekdayIso"), col("routeNumber"))
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        Dataset<Row> summaryStopAll = fullDailyStop.groupBy(
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        Dataset<Row> summaryStopWeekday = fullDailyStop.groupBy(
+                        col("weekdayIso"),
+                        col("stopId"),
+                        col("stopName"),
+                        col("stopLatitude"),
+                        col("stopLongitude")
+                )
+                .agg(
+                        round(avg("lastPassSeconds")).cast(DataTypes.IntegerType).alias("averageLastPassSeconds"),
+                        count("*").alias("sampleDays")
+                );
+
+        writeDataset(summaryRouteStopAll, outputRoot.resolve(SUMMARY_ROUTE_STOP_ALL_DIR), outputPartitions);
+        writeDataset(summaryRouteStopWeekday, outputRoot.resolve(SUMMARY_ROUTE_STOP_WEEKDAY_DIR), outputPartitions);
+        writeDataset(summaryRouteAll, outputRoot.resolve(SUMMARY_ROUTE_ALL_DIR), outputPartitions);
+        writeDataset(summaryRouteWeekday, outputRoot.resolve(SUMMARY_ROUTE_WEEKDAY_DIR), outputPartitions);
+        writeDataset(summaryStopAll, outputRoot.resolve(SUMMARY_STOP_ALL_DIR), outputPartitions);
+        writeDataset(summaryStopWeekday, outputRoot.resolve(SUMMARY_STOP_WEEKDAY_DIR), outputPartitions);
     }
 
     private static void overwriteAffectedPartitions(Dataset<Row> dataset, Path outputDir, int partitions, String partitionColumn) {

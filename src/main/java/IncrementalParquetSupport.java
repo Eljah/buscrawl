@@ -21,6 +21,7 @@ public final class IncrementalParquetSupport {
         try (Stream<Path> files = Files.walk(parquetDir, FileVisitOption.FOLLOW_LINKS)) {
             return files
                     .filter(Files::isRegularFile)
+                    .filter(IncrementalParquetSupport::isStableParquetPath)
                     .filter(path -> path.getFileName().toString().endsWith(".parquet"))
                     .map(path -> toParquetFileInfo(path, modifiedSinceTime))
                     .filter(file -> file != null)
@@ -81,6 +82,16 @@ public final class IncrementalParquetSupport {
             System.err.println("Skipping parquet file " + path + ": " + e.getMessage());
             return null;
         }
+    }
+
+    private static boolean isStableParquetPath(Path path) {
+        for (Path part : path) {
+            String name = part.toString();
+            if (name.startsWith(".") || "_temporary".equals(name)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isReadableParquetFile(Path path) {

@@ -84,7 +84,9 @@ public class BusTrafficBehaviorAggregationJob {
         int maxFilesPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_MAX_FILES_PER_RUN", "512"));
         int initialLookbackDays = Integer.parseInt(System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_INITIAL_LOOKBACK_DAYS", "3"));
         String bootstrapStrategy = System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_BOOTSTRAP_MODE", "full-history");
-        int maxSegmentGapSeconds = Integer.parseInt(System.getenv().getOrDefault("BUS_SEGMENT_MAX_GAP_SECONDS", "7200"));
+        int maxSegmentGapSeconds = Integer.parseInt(System.getenv().getOrDefault("BUS_SEGMENT_MAX_GAP_SECONDS", "900"));
+        double minSegmentSpeedKmh = Double.parseDouble(System.getenv().getOrDefault("BUS_SEGMENT_MIN_SPEED_KMH", "3.0"));
+        double maxSegmentSpeedKmh = Double.parseDouble(System.getenv().getOrDefault("BUS_SEGMENT_MAX_SPEED_KMH", "80.0"));
         String cityTimezone = System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow");
         LocalDate today = LocalDate.now(ZoneId.of(cityTimezone));
 
@@ -178,6 +180,39 @@ public class BusTrafficBehaviorAggregationJob {
                             ),
                             new String[]{"internalRouteId", "routeNumber", "stopId", "direction"}
                     );
+            Dataset<Row> ambiguousVisits = affectedVisits
+                    .groupBy(
+                            "serviceDate",
+                            "plate",
+                            "internalRouteId",
+                            "routeNumber",
+                            "stopId",
+                            "enteredStopAt",
+                            "exitedStopAt"
+                    )
+                    .agg(countDistinct("direction").alias("matchedDirections"))
+                    .filter(col("matchedDirections").gt(1));
+            Dataset<Row> directionSafeVisits = affectedVisits.join(
+                    ambiguousVisits.select(
+                            "serviceDate",
+                            "plate",
+                            "internalRouteId",
+                            "routeNumber",
+                            "stopId",
+                            "enteredStopAt",
+                            "exitedStopAt"
+                    ),
+                    new String[]{
+                            "serviceDate",
+                            "plate",
+                            "internalRouteId",
+                            "routeNumber",
+                            "stopId",
+                            "enteredStopAt",
+                            "exitedStopAt"
+                    },
+                    "left_anti"
+            );
 
             Dataset<Row> dwellEvents = affectedVisits.select(
                             "visitId",
@@ -206,8 +241,8 @@ public class BusTrafficBehaviorAggregationJob {
             Path dwellEventsDir = outputRoot.resolve(DWELL_EVENTS_DIR);
             overwriteAffectedPartitions(dwellEvents, dwellEventsDir, outputPartitions, "serviceDate");
 
-            Dataset<Row> startVisits = affectedVisits.alias("start");
-            Dataset<Row> endVisits = affectedVisits.alias("finish");
+            Dataset<Row> startVisits = directionSafeVisits.alias("start");
+            Dataset<Row> endVisits = directionSafeVisits.alias("finish");
             Dataset<Row> segmentCandidates = startVisits.join(
                             endVisits,
                             col("start.serviceDate").equalTo(col("finish.serviceDate"))
@@ -266,6 +301,8 @@ public class BusTrafficBehaviorAggregationJob {
                             "avgSegmentSpeedKmh",
                             expr("(distanceMeters / travelDurationSeconds) * 3.6")
                     )
+                    .filter(col("avgSegmentSpeedKmh").geq(minSegmentSpeedKmh))
+                    .filter(col("avgSegmentSpeedKmh").leq(maxSegmentSpeedKmh))
                     .withColumn(
                             "tripId",
                             sha2(

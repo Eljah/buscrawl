@@ -6,6 +6,7 @@ cd /home/eljah/apps/buscrawl
 export BUS_PARQUET_DIR=${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet}
 export BUS_DASHBOARD_CACHE_FILE=${BUS_DASHBOARD_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/stats.json}
 export BUS_DASHBOARD_ROUTE_CACHE_FILE=${BUS_DASHBOARD_ROUTE_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/route-last-movement.json}
+export BUS_TRAFFIC_BEHAVIOR_DIR=${BUS_TRAFFIC_BEHAVIOR_DIR:-/home/eljah/data/buscrawl/traffic-behavior}
 export BUS_DASHBOARD_SPARK_LOCAL_DIR=${BUS_DASHBOARD_SPARK_LOCAL_DIR:-/home/eljah/data/buscrawl/dashboard-spark-temp}
 export BUS_DASHBOARD_SPARK_MASTER=${BUS_DASHBOARD_SPARK_MASTER:-local[2]}
 export BUS_CITY_TIMEZONE=${BUS_CITY_TIMEZONE:-Europe/Moscow}

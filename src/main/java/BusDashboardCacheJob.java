@@ -64,6 +64,10 @@ public class BusDashboardCacheJob {
                 "BUS_DASHBOARD_SPARK_LOCAL_DIR",
                 "./var/bus/dashboard-spark-temp"
         ));
+        Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
+                "BUS_TRAFFIC_BEHAVIOR_DIR",
+                "./var/bus/traffic-behavior"
+        ));
         String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
 
         Files.createDirectories(statsCacheFile.getParent());
@@ -101,7 +105,8 @@ public class BusDashboardCacheJob {
                 fileCutoff
         );
 
-        if (!newFiles.isEmpty()) {
+        DerivedStats derivedStats = DerivedStats.empty();
+        if (!newFiles.isEmpty() || Files.exists(trafficBehaviorDir)) {
             SparkSession spark = SparkSession.builder()
                     .appName("BusDashboardCacheJob")
                     .master(sparkMaster)
@@ -113,13 +118,16 @@ public class BusDashboardCacheJob {
             spark.sparkContext().setLogLevel("WARN");
 
             try {
-                Dataset<Row> newBusData = spark.read()
-                        .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
-                        .select("internalRouteId", "realRouteNumber", "eventTime", "speed")
-                        .filter(col("eventTime").isNotNull());
+                if (!newFiles.isEmpty()) {
+                    Dataset<Row> newBusData = spark.read()
+                            .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
+                            .select("internalRouteId", "realRouteNumber", "eventTime", "speed")
+                            .filter(col("eventTime").isNotNull());
 
-                mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
-                mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+                    mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
+                    mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+                }
+                derivedStats = computeDerivedStats(spark, trafficBehaviorDir, statsStart, now);
             } finally {
                 spark.stop();
             }
@@ -127,7 +135,7 @@ public class BusDashboardCacheJob {
 
         pruneStatsBuckets(statsBuckets, statsStart);
 
-        Map<String, Object> statsPayload = buildStatsPayload(statsBuckets, statsStart, now);
+        Map<String, Object> statsPayload = buildStatsPayload(statsBuckets, derivedStats, statsStart, now);
         Map<String, Object> routePayload = buildRoutePayload(routeMapper, routeCache, today, yesterday);
 
         state.updatedAt = now.atOffset(ZoneOffset.UTC).toString();
@@ -178,7 +186,101 @@ public class BusDashboardCacheJob {
         previousDayMap.forEach((routeNumber, instant) -> routeCache.previousDay.merge(routeNumber, instant, BusDashboardCacheJob::maxInstant));
     }
 
-    private static Map<String, Object> buildStatsPayload(Map<Instant, Long> statsBuckets, Instant rangeStart, Instant rangeEnd) {
+    private static DerivedStats computeDerivedStats(SparkSession spark, Path trafficBehaviorDir, Instant rangeStart, Instant rangeEnd) {
+        if (!Files.exists(trafficBehaviorDir)) {
+            return DerivedStats.empty();
+        }
+
+        Map<String, List<Map<String, Object>>> series = new LinkedHashMap<>();
+        series.put("segmentTrips", collectDerivedSeries(
+                spark,
+                trafficBehaviorDir.resolve("segment-trips"),
+                "endEnteredStopAt",
+                rangeStart,
+                rangeEnd
+        ));
+        series.put("overtakes", collectDerivedSeries(
+                spark,
+                trafficBehaviorDir.resolve("overtake-events"),
+                "overtakeAt",
+                rangeStart,
+                rangeEnd
+        ));
+        series.put("dwellEvents", collectDerivedSeries(
+                spark,
+                trafficBehaviorDir.resolve("dwell-events"),
+                "enteredStopAt",
+                rangeStart,
+                rangeEnd
+        ));
+
+        Map<String, Long> totals = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Map<String, Object>>> entry : series.entrySet()) {
+            long total = 0L;
+            for (Map<String, Object> item : entry.getValue()) {
+                Object points = item.get("points");
+                if (points instanceof Number) {
+                    total += ((Number) points).longValue();
+                }
+            }
+            totals.put(entry.getKey(), total);
+        }
+
+        return new DerivedStats(series, totals);
+    }
+
+    private static List<Map<String, Object>> collectDerivedSeries(
+            SparkSession spark,
+            Path parquetDir,
+            String timestampColumn,
+            Instant rangeStart,
+            Instant rangeEnd
+    ) {
+        if (!hasReadableParquetFiles(parquetDir)) {
+            return List.of();
+        }
+
+        Timestamp rangeStartTs = Timestamp.from(rangeStart);
+        Timestamp rangeEndTs = Timestamp.from(rangeEnd);
+        List<Row> rows = spark.read()
+                .parquet(parquetDir.toAbsolutePath().toString())
+                .filter(col(timestampColumn).isNotNull())
+                .filter(col(timestampColumn).geq(rangeStartTs).and(col(timestampColumn).leq(rangeEndTs)))
+                .withColumn("bucket_time", window(col(timestampColumn), "5 minutes").getField("start"))
+                .groupBy("bucket_time")
+                .count()
+                .sort("bucket_time")
+                .collectAsList();
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Row row : rows) {
+            Timestamp bucketTime = row.getTimestamp(0);
+            long points = row.getLong(1);
+
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("label", BUCKET_LABEL.format(bucketTime.toInstant().atZone(CITY_ZONE)));
+            item.put("points", points);
+            result.add(item);
+        }
+        return result;
+    }
+
+    private static boolean hasReadableParquetFiles(Path parquetDir) {
+        if (!Files.exists(parquetDir)) {
+            return false;
+        }
+        try (Stream<Path> files = Files.walk(parquetDir, FileVisitOption.FOLLOW_LINKS)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .filter(BusDashboardCacheJob::isStableParquetPath)
+                    .filter(path -> path.getFileName().toString().endsWith(".parquet"))
+                    .anyMatch(BusDashboardCacheJob::isReadableParquetFile);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static Map<String, Object> buildStatsPayload(Map<Instant, Long> statsBuckets, DerivedStats derivedStats, Instant rangeStart, Instant rangeEnd) {
         List<Map<String, Object>> series = new ArrayList<>();
         long totalPoints = 0;
 
@@ -204,6 +306,8 @@ public class BusDashboardCacheJob {
         payload.put("rangeStart", rangeStart.toString());
         payload.put("rangeEnd", rangeEnd.toString());
         payload.put("series", series);
+        payload.put("derivedSeries", derivedStats.series);
+        payload.put("derivedTotals", derivedStats.totals);
         return payload;
     }
 
@@ -408,6 +512,7 @@ public class BusDashboardCacheJob {
         try (Stream<Path> files = Files.walk(parquetDir, FileVisitOption.FOLLOW_LINKS)) {
             return files
                     .filter(Files::isRegularFile)
+                    .filter(BusDashboardCacheJob::isStableParquetPath)
                     .filter(path -> path.getFileName().toString().endsWith(".parquet"))
                     .map(path -> toParquetFileInfo(path, modifiedSinceTime))
                     .filter(file -> file != null)
@@ -430,6 +535,16 @@ public class BusDashboardCacheJob {
             System.err.println("Skipping parquet file " + path + ": " + e.getMessage());
             return null;
         }
+    }
+
+    private static boolean isStableParquetPath(Path path) {
+        for (Path part : path) {
+            String name = part.toString();
+            if (name.startsWith(".") || "_temporary".equals(name)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isReadableParquetFile(Path path) {
@@ -476,6 +591,8 @@ public class BusDashboardCacheJob {
         payload.put("rangeStart", null);
         payload.put("rangeEnd", null);
         payload.put("series", List.of());
+        payload.put("derivedSeries", Map.of());
+        payload.put("derivedTotals", Map.of());
         return payload;
     }
 
@@ -562,6 +679,20 @@ public class BusDashboardCacheJob {
     public static final class ParquetFileInfo {
         public String path;
         public String modifiedAt;
+    }
+
+    private static final class DerivedStats {
+        private final Map<String, List<Map<String, Object>>> series;
+        private final Map<String, Long> totals;
+
+        private DerivedStats(Map<String, List<Map<String, Object>>> series, Map<String, Long> totals) {
+            this.series = series;
+            this.totals = totals;
+        }
+
+        private static DerivedStats empty() {
+            return new DerivedStats(Map.of(), Map.of());
+        }
     }
 
     private static final class RouteCache {

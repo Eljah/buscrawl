@@ -91,6 +91,12 @@
     .chart-card {
       padding: 20px;
     }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
     .chart-head {
       display: flex;
       justify-content: space-between;
@@ -122,6 +128,15 @@
       width: 100%;
       height: 360px;
       overflow: visible;
+    }
+    .chart-grid svg {
+      height: 240px;
+    }
+    .chart-grid .chart-box {
+      min-height: 240px;
+    }
+    .chart-grid .empty {
+      min-height: 240px;
     }
     .empty {
       display: grid;
@@ -171,6 +186,18 @@
         <p class="label">Last Update</p>
         <p class="value" id="updatedAt" style="font-size:22px">...</p>
       </article>
+      <article class="card">
+        <p class="label">Segment Trips</p>
+        <p class="value" id="segmentTripsTotal">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Overtakes</p>
+        <p class="value" id="overtakesTotal">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Dwell Events</p>
+        <p class="value" id="dwellEventsTotal">...</p>
+      </article>
     </section>
 
     <section class="card chart-card">
@@ -185,6 +212,42 @@
         <div class="empty">Loading data...</div>
       </div>
       <div class="footer">The chart is rendered from a cached JSON snapshot refreshed by a separate Java sidecar job.</div>
+    </section>
+
+    <section class="chart-grid">
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Segment Trips</h2>
+            <p class="chart-meta">Inter-stop movement facts</p>
+          </div>
+        </div>
+        <div class="chart-box" id="segmentTripsChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Overtakes</h2>
+            <p class="chart-meta">Order violation facts</p>
+          </div>
+        </div>
+        <div class="chart-box" id="overtakesChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Dwell Events</h2>
+            <p class="chart-meta">Stop-zone stay facts</p>
+          </div>
+        </div>
+        <div class="chart-box" id="dwellEventsChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
     </section>
   </div>
 
@@ -209,8 +272,8 @@
       return `${dateTimeFormatter.format(new Date(value))} MSK`;
     }
 
-    function renderChart(series) {
-      const box = document.getElementById('chartBox');
+    function renderChart(targetId, series, noun = 'events') {
+      const box = document.getElementById(targetId);
       if (!series.length) {
         box.innerHTML = '<div class="empty">Not enough data to render the chart yet.</div>';
         return;
@@ -262,7 +325,7 @@
 
       const dots = points.map(point => `
         <circle cx="${point.x}" cy="${point.y}" r="2.5" fill="var(--line)">
-          <title>${point.label}: ${fmtNumber.format(point.points)} points</title>
+          <title>${point.label}: ${fmtNumber.format(point.points)} ${noun}</title>
         </circle>
       `).join('');
 
@@ -284,6 +347,10 @@
       setText('updatedAt', formatDate(data.updatedAt));
       setText('bucket', data.bucket || 'no data');
       setText('totalPoints', fmtNumber.format(data.totalPoints || 0));
+      const derivedTotals = data.derivedTotals || {};
+      setText('segmentTripsTotal', fmtNumber.format(derivedTotals.segmentTrips || 0));
+      setText('overtakesTotal', fmtNumber.format(derivedTotals.overtakes || 0));
+      setText('dwellEventsTotal', fmtNumber.format(derivedTotals.dwellEvents || 0));
 
       if (data.status === 'empty') {
         setText('rangeMeta', data.message || 'Cache is empty.');
@@ -295,7 +362,11 @@
 
       setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}`);
       setText('cacheMeta', `Updated: ${formatDate(data.updatedAt)}`);
-      renderChart(data.series || []);
+      renderChart('chartBox', data.series || [], 'points');
+      const derivedSeries = data.derivedSeries || {};
+      renderChart('segmentTripsChart', derivedSeries.segmentTrips || [], 'segment trips');
+      renderChart('overtakesChart', derivedSeries.overtakes || [], 'overtakes');
+      renderChart('dwellEventsChart', derivedSeries.dwellEvents || [], 'dwell events');
     }
 
     load().catch(error => {

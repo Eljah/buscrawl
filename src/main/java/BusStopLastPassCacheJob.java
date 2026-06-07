@@ -36,6 +36,10 @@ public class BusStopLastPassCacheJob {
                 "BUS_TILE_ROOT",
                 cacheFile.resolveSibling("tiles").toString()
         ));
+        boolean renderTiles = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_STOP_LAST_PASS_RENDER_TILES",
+                "true"
+        ));
 
         Files.createDirectories(cacheFile.getParent());
         Files.createDirectories(tileRoot);
@@ -79,7 +83,9 @@ public class BusStopLastPassCacheJob {
             payload.put("stopsData", stops);
 
             writeJsonAtomic(cacheFile, payload);
-            DashboardOverlayTileRenderer.renderStopLastPassTiles(cacheFile, mapConfigFile, tileRoot);
+            if (renderTiles) {
+                DashboardOverlayTileRenderer.renderStopLastPassTiles(cacheFile, mapConfigFile, tileRoot);
+            }
         }
     }
 
