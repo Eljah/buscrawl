@@ -86,7 +86,7 @@ public class BusTrafficBehaviorAggregationJob {
         String bootstrapStrategy = System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_BOOTSTRAP_MODE", "full-history");
         int maxSegmentGapSeconds = Integer.parseInt(System.getenv().getOrDefault("BUS_SEGMENT_MAX_GAP_SECONDS", "900"));
         double minSegmentSpeedKmh = Double.parseDouble(System.getenv().getOrDefault("BUS_SEGMENT_MIN_SPEED_KMH", "3.0"));
-        double maxSegmentSpeedKmh = Double.parseDouble(System.getenv().getOrDefault("BUS_SEGMENT_MAX_SPEED_KMH", "80.0"));
+        double maxSegmentSpeedKmh = Double.parseDouble(System.getenv().getOrDefault("BUS_SEGMENT_MAX_SPEED_KMH", "120.0"));
         String cityTimezone = System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow");
         LocalDate today = LocalDate.now(ZoneId.of(cityTimezone));
 

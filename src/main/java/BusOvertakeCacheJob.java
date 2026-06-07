@@ -86,6 +86,10 @@ public class BusOvertakeCacheJob {
                     yesterday,
                     OvertakeMode.VEHICLE
             ));
+            payload.put("vehicleDetails", loadVehicleDetails(
+                    connection,
+                    dataRoot.resolve("overtake-events")
+            ));
 
             writeJsonAtomic(cacheFile, payload);
         }
@@ -146,6 +150,47 @@ public class BusOvertakeCacheJob {
         }
     }
 
+    private static Map<String, List<Map<String, Object>>> loadVehicleDetails(Connection connection, Path overtakeEventsDir) throws Exception {
+        Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+        if (!Files.exists(overtakeEventsDir)) {
+            return result;
+        }
+
+        String sql = "SELECT "
+                + "CAST(serviceDate AS VARCHAR), weekdayIso, overtakerPlate, overtakerRouteNumber, "
+                + "overtakenPlate, routeNumber, segmentId, startStopName, endStopName, distanceMeters, "
+                + "overtakeAt, overtakerTravelDurationSeconds, overtakenTravelDurationSeconds, "
+                + "overtakerAvgSegmentSpeedKmh, overtakenAvgSegmentSpeedKmh "
+                + "FROM read_parquet(?) "
+                + "ORDER BY overtakeAt DESC";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, parquetGlob(overtakeEventsDir));
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    String overtakerPlate = rs.getString(3);
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("serviceDate", rs.getString(1));
+                    row.put("weekdayIso", rs.getInt(2));
+                    row.put("overtakerPlate", overtakerPlate);
+                    row.put("overtakerRouteNumber", rs.getString(4));
+                    row.put("overtakenPlate", rs.getString(5));
+                    row.put("overtakenRouteNumber", rs.getString(6));
+                    row.put("segmentId", rs.getString(7));
+                    row.put("startStopName", rs.getString(8));
+                    row.put("endStopName", rs.getString(9));
+                    row.put("distanceMeters", rs.getDouble(10));
+                    row.put("overtakeAt", toIsoString(rs.getObject(11)));
+                    row.put("overtakerTravelDurationSeconds", rs.getLong(12));
+                    row.put("overtakenTravelDurationSeconds", rs.getLong(13));
+                    row.put("overtakerAvgSegmentSpeedKmh", rs.getDouble(14));
+                    row.put("overtakenAvgSegmentSpeedKmh", rs.getDouble(15));
+                    result.computeIfAbsent(overtakerPlate, ignored -> new ArrayList<>()).add(row);
+                }
+            }
+        }
+        return result;
+    }
+
     private static List<Map<String, Object>> buildWeekdays() {
         List<Map<String, Object>> weekdays = new ArrayList<>();
         for (int weekday = 1; weekday <= 7; weekday++) {
@@ -190,6 +235,7 @@ public class BusOvertakeCacheJob {
         payload.put("segmentRouteData", emptySection);
         payload.put("segmentVehicleData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("vehicleDetails", Map.of());
         return payload;
     }
 

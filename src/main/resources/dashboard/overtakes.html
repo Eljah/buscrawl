@@ -36,6 +36,9 @@
     .item-name { font-size:18px; }
     .item-time { color:var(--muted); font-size:14px; white-space:nowrap; }
     .item-note { margin-top:6px; font-size:13px; }
+    .details { margin-top:10px; display:grid; gap:7px; }
+    .detail { padding:8px 10px; border-radius:10px; background:rgba(29,42,56,.05); font-size:13px; line-height:1.35; }
+    .detail strong { font-weight:700; }
     @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
   </style>
 </head>
@@ -316,6 +319,34 @@ function listNote(item){
   return `days ${item.sampleDays}, avg/day ${item.averageDailyOvertakes}, max/day ${item.maxDailyOvertakes}`;
 }
 
+function detailsForVehicle(item){
+  if (state.mode !== 'vehicle') return [];
+  const allDetails = ((state.payload.vehicleDetails || {})[item.overtakerPlate] || []);
+  return allDetails.filter(detail => {
+    if (state.periodMode === 'previous') return detail.serviceDate === state.payload.yesterday;
+    if (state.periodMode === 'weekday') return String(detail.weekdayIso) === String(state.weekday);
+    return true;
+  });
+}
+
+function detailLine(detail){
+  const overtakerSpeed = Number(detail.overtakerAvgSegmentSpeedKmh || 0).toFixed(1);
+  const overtakenSpeed = Number(detail.overtakenAvgSegmentSpeedKmh || 0).toFixed(1);
+  return `<div class="detail"><strong>${escapeHtml(formatDate(detail.overtakeAt))}</strong><br>` +
+    `${escapeHtml(detail.startStopName || '?')} -> ${escapeHtml(detail.endStopName || '?')} · ` +
+    `route ${escapeHtml(detail.overtakerRouteNumber || '?')} · overtaken ${escapeHtml(detail.overtakenPlate || '?')} / route ${escapeHtml(detail.overtakenRouteNumber || '?')}<br>` +
+    `segment ${escapeHtml(detail.segmentId || '?')}; distance ${Math.round(Number(detail.distanceMeters || 0))} m; speeds ${overtakerSpeed}/${overtakenSpeed} km/h</div>`;
+}
+
+function renderVehicleDetails(item, active){
+  if (!active || state.mode !== 'vehicle') return '';
+  const details = detailsForVehicle(item);
+  if (!details.length) {
+    return '<div class="details"><div class="detail">No detailed overtake facts for this vehicle in the selected period.</div></div>';
+  }
+  return `<div class="details">${details.map(detailLine).join('')}</div>`;
+}
+
 function renderList(){
   const items = filteredItems();
   if (!items.length) {
@@ -325,7 +356,7 @@ function renderList(){
   listEl.innerHTML = items.map(item => {
     const key = itemKey(item);
     const active = state.selectedKey === key ? ' active' : '';
-    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div></div>`;
+    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div>${renderVehicleDetails(item, Boolean(active))}</div>`;
   }).join('');
   listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
     state.selectedKey = element.dataset.key;
@@ -341,7 +372,9 @@ function renderMeta(){
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
   document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
   document.getElementById('sidebarMeta').textContent =
-    state.periodMode === 'previous'
+    state.mode === 'vehicle'
+      ? 'Click a vehicle row to expand exact overtake facts for the selected period.'
+      : state.periodMode === 'previous'
       ? 'Rows show concrete latest overtake time and overtaker identity.'
       : 'Rows show aggregated overtakes across finished days.';
 }
