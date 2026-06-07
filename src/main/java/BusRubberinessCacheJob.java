@@ -98,12 +98,94 @@ public class BusRubberinessCacheJob {
                     yesterday,
                     RubberMode.VEHICLE
             ));
+            payload.put("longStopData", buildLongRubberSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, RubberMode.STOP));
+            payload.put("longStopRouteData", buildLongRubberSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, RubberMode.STOP_ROUTE));
+            payload.put("longRouteData", buildLongRubberSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, RubberMode.ROUTE));
+            payload.put("longVehicleData", buildLongRubberSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, RubberMode.VEHICLE));
             payload.put("heatmapData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 0));
             payload.put("longHeatmapData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 60));
             payload.put("longDwellPointData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 60));
 
             writeJsonAtomic(cacheFile, payload);
             DashboardOverlayTileRenderer.renderRubberinessHeatmapTiles(cacheFile, mapConfigFile, tileRoot);
+        }
+    }
+
+    private static Map<String, Object> buildLongRubberSection(
+            Connection connection,
+            Path dwellEventsDir,
+            LocalDate yesterday,
+            LocalDate today,
+            RubberMode mode
+    ) throws Exception {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("previousDay", loadLongRubberRows(connection, dwellEventsDir, mode, yesterday, null, today));
+        section.put("allDays", loadLongRubberRows(connection, dwellEventsDir, mode, null, null, today));
+        Map<String, List<Map<String, Object>>> weekday = new LinkedHashMap<>();
+        for (int weekdayIso = 1; weekdayIso <= 7; weekdayIso++) {
+            weekday.put(String.valueOf(weekdayIso), loadLongRubberRows(connection, dwellEventsDir, mode, null, weekdayIso, today));
+        }
+        section.put("weekday", weekday);
+        return section;
+    }
+
+    private static List<Map<String, Object>> loadLongRubberRows(
+            Connection connection,
+            Path dwellEventsDir,
+            RubberMode mode,
+            LocalDate serviceDate,
+            Integer weekdayIso,
+            LocalDate today
+    ) throws Exception {
+        if (!Files.exists(dwellEventsDir)) {
+            return List.of();
+        }
+        boolean summary = serviceDate == null;
+        String dimensions = mode.dwellEventDimensions();
+        StringBuilder sql = new StringBuilder();
+        sql.append("WITH policy_events AS (");
+        sql.append("SELECT 'with-terminals' AS terminalPolicy, * FROM read_parquet(?) ");
+        sql.append("UNION ALL SELECT 'without-terminals' AS terminalPolicy, * FROM read_parquet(?) WHERE NOT isTerminalStop");
+        sql.append(") SELECT ");
+        sql.append(dimensions);
+        sql.append(", SUM(dwellTimeSeconds) AS totalDwellSeconds, MAX(dwellTimeSeconds) AS maxDwellSeconds, ");
+        sql.append("ROUND(AVG(dwellTimeSeconds), 0) AS averageDwellSeconds, COUNT(*) AS visitCount");
+        if (summary) {
+            sql.append(", COUNT(DISTINCT serviceDate) AS sampleDays");
+        }
+        sql.append(" FROM policy_events WHERE dwellTimeSeconds > 60 ");
+        if (serviceDate != null) {
+            sql.append("AND CAST(serviceDate AS VARCHAR) = ? ");
+        } else {
+            sql.append("AND CAST(serviceDate AS VARCHAR) < ? ");
+            if (weekdayIso != null) {
+                sql.append("AND weekdayIso = ? ");
+            }
+        }
+        sql.append("GROUP BY ");
+        sql.append(dimensions);
+        sql.append(" ORDER BY totalDwellSeconds DESC, maxDwellSeconds DESC");
+
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            String glob = parquetGlob(dwellEventsDir);
+            statement.setString(1, glob);
+            statement.setString(2, glob);
+            int parameterIndex = 3;
+            if (serviceDate != null) {
+                statement.setString(parameterIndex++, serviceDate.toString());
+            } else {
+                statement.setString(parameterIndex++, today.toString());
+                if (weekdayIso != null) {
+                    statement.setInt(parameterIndex++, weekdayIso);
+                }
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    rows.add(mode.readRow(rs, summary));
+                }
+                return rows;
+            }
         }
     }
 
@@ -292,6 +374,10 @@ public class BusRubberinessCacheJob {
         payload.put("stopRouteData", emptySection);
         payload.put("routeData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("longStopData", emptySection);
+        payload.put("longStopRouteData", emptySection);
+        payload.put("longRouteData", emptySection);
+        payload.put("longVehicleData", emptySection);
         payload.put("heatmapData", emptySection);
         payload.put("longHeatmapData", emptySection);
         payload.put("longDwellPointData", emptySection);
@@ -342,6 +428,21 @@ public class BusRubberinessCacheJob {
 
         String selectColumns(boolean hasSampleDays) {
             return hasSampleDays ? summarySelectColumns : dailySelectColumns;
+        }
+
+        String dwellEventDimensions() {
+            switch (this) {
+                case STOP:
+                    return "terminalPolicy, stopId, stopName, stopLatitude, stopLongitude";
+                case STOP_ROUTE:
+                    return "terminalPolicy, stopId, stopName, stopLatitude, stopLongitude, routeNumber";
+                case ROUTE:
+                    return "terminalPolicy, routeNumber";
+                case VEHICLE:
+                    return "terminalPolicy, plate, routeNumber";
+                default:
+                    throw new IllegalStateException("Unexpected value: " + this);
+            }
         }
 
         Map<String, Object> readRow(ResultSet rs, boolean hasSampleDays) throws Exception {

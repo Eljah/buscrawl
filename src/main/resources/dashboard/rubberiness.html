@@ -77,6 +77,13 @@
           </div>
         </div>
         <div class="control-row">
+          <strong>Dwell Set</strong>
+          <div class="radio-group" id="dwellFilterGroup">
+            <label><input type="radio" name="dwellFilter" value="all" checked> All waits</label>
+            <label><input type="radio" name="dwellFilter" value="over60"> &gt; 1 minute</label>
+          </div>
+        </div>
+        <div class="control-row">
           <strong>Terminal Policy</strong>
           <div class="radio-group" id="terminalGroup">
             <label><input type="radio" name="terminalPolicy" value="with-terminals" checked> With Terminals</label>
@@ -153,7 +160,7 @@ const sortFieldSelect = document.getElementById('sortField');
 const sortDirSelect = document.getElementById('sortDir');
 const overviewTimelineEl = document.getElementById('overviewTimeline');
 
-const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, detailsPage:{}, centerLat:55.79, centerLon:49.12, zoom:12, mode:'stop', terminalPolicy:'with-terminals', periodMode:'previous', weekday:'1', sortField:'total', sortDir:'desc', filterText:'', selectedKey:'', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, detailsPage:{}, centerLat:55.79, centerLon:49.12, zoom:12, mode:'stop', dwellFilter:'all', terminalPolicy:'with-terminals', periodMode:'previous', weekday:'1', sortField:'total', sortDir:'desc', filterText:'', selectedKey:'', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
 function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} MSK` : 'no data'; }
 function formatSeconds(totalSeconds){ const seconds=Number(totalSeconds||0); const h=Math.floor(seconds/3600); const m=Math.floor((seconds%3600)/60); const s=seconds%60; return h>0 ? `${h}h ${m}m ${s}s` : m>0 ? `${m}m ${s}s` : `${s}s`; }
@@ -171,16 +178,18 @@ function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySel
 function isHeatmapMode(){ return state.mode === 'heatmap' || state.mode === 'longHeatmap'; }
 function isLongClusterMode(){ return state.mode === 'longClusters'; }
 function isStopMode(){ return state.mode === 'stop' || state.mode === 'stopRoute' || isLongClusterMode(); }
+function effectiveDwellFilter(){ return state.mode === 'longHeatmap' || state.mode === 'longClusters' ? 'over60' : state.dwellFilter; }
+function hasExpandableDetails(){ return effectiveDwellFilter() === 'over60' && ['stop','stopRoute','route','vehicle','longClusters'].includes(state.mode); }
 
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
-  if (state.mode === 'heatmap') return state.payload.heatmapData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'heatmap') return (effectiveDwellFilter() === 'over60' ? state.payload.longHeatmapData : state.payload.heatmapData) || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'longHeatmap') return state.payload.longHeatmapData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'longClusters') return state.payload.longDwellPointData || { previousDay:[], allDays:[], weekday:{} };
-  if (state.mode === 'stop') return state.payload.stopData || { previousDay:[], allDays:[], weekday:{} };
-  if (state.mode === 'stopRoute') return state.payload.stopRouteData || { previousDay:[], allDays:[], weekday:{} };
-  if (state.mode === 'route') return state.payload.routeData || { previousDay:[], allDays:[], weekday:{} };
-  return state.payload.vehicleData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'stop') return (effectiveDwellFilter() === 'over60' ? state.payload.longStopData : state.payload.stopData) || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'stopRoute') return (effectiveDwellFilter() === 'over60' ? state.payload.longStopRouteData : state.payload.stopRouteData) || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'route') return (effectiveDwellFilter() === 'over60' ? state.payload.longRouteData : state.payload.routeData) || { previousDay:[], allDays:[], weekday:{} };
+  return (effectiveDwellFilter() === 'over60' ? state.payload.longVehicleData : state.payload.vehicleData) || { previousDay:[], allDays:[], weekday:{} };
 }
 
 function currentDataset(){
@@ -256,16 +265,19 @@ function renderOverviewTimeline(){
   renderTimelineChart(overviewTimelineEl, state.payload ? state.payload.timeline : [], 'No dwell events in the selected period.');
 }
 
-function detailsCacheKey(item){ return [state.mode,state.terminalPolicy,state.periodMode,state.weekday,state.payload?.yesterday || '',itemKey(item)].join('|'); }
+function detailsCacheKey(item){ return [state.mode,effectiveDwellFilter(),state.terminalPolicy,state.periodMode,state.weekday,state.payload?.yesterday || '',itemKey(item)].join('|'); }
 function detailsPageKey(item,page){ return `${detailsCacheKey(item)}|page:${page}`; }
 function detailsQuery(item,page){
-  const params = new URLSearchParams({ mode:state.mode, stopId:item.stopId || '', terminalPolicy:state.terminalPolicy, period:state.periodMode, page:String(page), pageSize:'50' });
+  const params = new URLSearchParams({ mode:state.mode, dwellFilter:effectiveDwellFilter(), terminalPolicy:state.terminalPolicy, period:state.periodMode, page:String(page), pageSize:'50' });
+  if (item.stopId) params.set('stopId', item.stopId);
+  if (item.routeNumber) params.set('routeNumber', item.routeNumber);
+  if (item.plate) params.set('plate', item.plate);
   if (state.periodMode === 'previous' && state.payload?.yesterday) params.set('serviceDate', state.payload.yesterday);
   if (state.periodMode === 'weekday') params.set('weekday', state.weekday);
   return params.toString();
 }
 async function ensureDetailsLoaded(item){
-  if (!item || !isLongClusterMode()) return;
+  if (!item || !hasExpandableDetails()) return;
   const baseKey = detailsCacheKey(item);
   const page = state.detailsPage[baseKey] || 1;
   const key = detailsPageKey(item,page);
@@ -290,7 +302,7 @@ function detailPayloadForItem(item){
 function selectItemByKey(key){
   state.selectedKey = key;
   const item = filteredItems().find(candidate => itemKey(candidate) === key);
-  if (item && isLongClusterMode()) {
+  if (item && hasExpandableDetails()) {
     const baseKey = detailsCacheKey(item);
     if (!state.detailsPage[baseKey]) state.detailsPage[baseKey] = 1;
     ensureDetailsLoaded(item);
@@ -317,7 +329,7 @@ function renderTiles(){
 
 function heatmapTileUrl(z,x,y){
   if (!isHeatmapMode()) return null;
-  const kind = state.mode === 'longHeatmap' ? 'over60' : 'all';
+  const kind = effectiveDwellFilter() === 'over60' ? 'over60' : 'all';
   const period = state.periodMode === 'previous' ? 'previous' : state.periodMode === 'all' ? 'all' : `weekday/${state.weekday}`;
   return `./tiles/rubberiness/heatmap/${kind}/${state.terminalPolicy}/${period}/${z}/${x}/${y}.png?v=${encodeURIComponent(state.payload?.updatedAt || '')}`;
 }
@@ -414,12 +426,12 @@ function detailLine(detail){
 }
 
 function renderItemDetails(item, active){
-  if (!active || !isLongClusterMode()) return '';
+  if (!active || !hasExpandableDetails()) return '';
   const baseKey = detailsCacheKey(item);
   const page = state.detailsPage[baseKey] || 1;
   if (state.detailsLoading[detailsPageKey(item,page)]) return '<div class="details"><div class="detail">Loading dwell details...</div></div>';
   const payload = detailPayloadForItem(item);
-  if (!payload) return '<div class="details"><div class="detail">Click row to load dwell details.</div></div>';
+  if (!payload) return '<div class="details"><div class="detail">Click row to load dwell details longer than one minute.</div></div>';
   const details = payload.details || [];
   if (!details.length) return '<div class="details"><div class="detail">No dwell details for this selection.</div></div>';
   const start = (Number(payload.page || 1) - 1) * Number(payload.pageSize || 50) + 1;
@@ -452,7 +464,7 @@ function renderList(){
     ensureDetailsLoaded(activeItem);
   }));
   const activeItem = items.find(item => itemKey(item) === state.selectedKey);
-  if (activeItem) {
+  if (activeItem && hasExpandableDetails()) {
     const payload = detailPayloadForItem(activeItem);
     const timelineEl = listEl.querySelector('[data-detail-timeline]');
     if (timelineEl && payload) renderTimelineChart(timelineEl, payload.timeline || [], 'No timeline data for this stop.');
@@ -463,13 +475,15 @@ function renderMeta(){
   const items = filteredItems();
   document.getElementById('updatedAt').textContent = `Updated: ${formatDate(state.payload.updatedAt)}`;
   document.getElementById('modeMeta').textContent =
-    `${state.mode}, ${state.terminalPolicy}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
+    `${state.mode}, ${effectiveDwellFilter() === 'over60' ? '>1m only' : 'all waits'}, ${state.terminalPolicy}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
   document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Vehicles' : state.mode === 'route' ? 'Routes' : isHeatmapMode() ? 'Dwell Heatmap Points' : 'Stops';
   document.getElementById('sidebarMeta').textContent = isHeatmapMode()
     ? 'PNG overlay tiles draw dwell-time density; redder areas have more accumulated waiting time.'
     : isLongClusterMode()
     ? 'Click a stop cluster to page through dwell events longer than one minute and inspect timing.'
+    : hasExpandableDetails()
+    ? 'Click a row to page through dwell events longer than one minute. All-waits mode intentionally has no nested details.'
     : 'Sort works on all displayed numeric metrics. Use terminal policy to compare endpoint-inflated dwell against internal stops only.';
 }
 
@@ -503,7 +517,7 @@ function renderAll(){
 }
 
 function rubberinessQuery(){
-  return new URLSearchParams({ mode:state.mode, terminalPolicy:state.terminalPolicy, period:state.periodMode, weekday:state.weekday }).toString();
+  return new URLSearchParams({ mode:state.mode, dwellFilter:effectiveDwellFilter(), terminalPolicy:state.terminalPolicy, period:state.periodMode, weekday:state.weekday }).toString();
 }
 
 async function loadRubberiness(){
@@ -535,6 +549,7 @@ async function loadAll(){
 }
 
 document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; reloadRubberiness(); });
+document.getElementById('dwellFilterGroup').addEventListener('change', event => { state.dwellFilter = event.target.value; reloadRubberiness(); });
 document.getElementById('terminalGroup').addEventListener('change', event => { state.terminalPolicy = event.target.value; reloadRubberiness(); });
 document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; reloadRubberiness(); });
 weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; reloadRubberiness(); });

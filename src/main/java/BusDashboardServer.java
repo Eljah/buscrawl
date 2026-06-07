@@ -332,6 +332,10 @@ public class BusDashboardServer {
         payload.put("stopRouteData", emptySection);
         payload.put("routeData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("longStopData", emptySection);
+        payload.put("longStopRouteData", emptySection);
+        payload.put("longRouteData", emptySection);
+        payload.put("longVehicleData", emptySection);
         payload.put("heatmapData", emptySection);
         payload.put("longHeatmapData", emptySection);
         payload.put("longDwellPointData", emptySection);
@@ -474,7 +478,8 @@ public class BusDashboardServer {
         String mode = query.getOrDefault("mode", "stop");
         String period = query.getOrDefault("period", "previous");
         String weekday = query.getOrDefault("weekday", "1");
-        String sectionKey = rubberinessSectionKey(mode);
+        String dwellFilter = query.getOrDefault("dwellFilter", "all");
+        String sectionKey = rubberinessSectionKey(mode, dwellFilter);
         payload.put(sectionKey, compactOvertakeSection(source.get(sectionKey), period, weekday));
         if ("route".equals(mode) || "vehicle".equals(mode)) {
             copyIfPresent(source, payload, "routeShapes");
@@ -499,15 +504,16 @@ public class BusDashboardServer {
         writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
     }
 
-    private static String rubberinessSectionKey(String mode) {
+    private static String rubberinessSectionKey(String mode, String dwellFilter) {
+        boolean over60 = "over60".equals(dwellFilter);
         if ("stopRoute".equals(mode)) {
-            return "stopRouteData";
+            return over60 ? "longStopRouteData" : "stopRouteData";
         }
         if ("route".equals(mode)) {
-            return "routeData";
+            return over60 ? "longRouteData" : "routeData";
         }
         if ("vehicle".equals(mode)) {
-            return "vehicleData";
+            return over60 ? "longVehicleData" : "vehicleData";
         }
         if ("longClusters".equals(mode)) {
             return "longDwellPointData";
@@ -516,20 +522,22 @@ public class BusDashboardServer {
             return "longHeatmapData";
         }
         if ("heatmap".equals(mode)) {
-            return "heatmapData";
+            return over60 ? "longHeatmapData" : "heatmapData";
         }
-        return "stopData";
+        return over60 ? "longStopData" : "stopData";
     }
 
     private void handleRubberinessDetailsRequest(HttpExchange exchange) throws IOException {
         try {
             Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
             String stopId = query.getOrDefault("stopId", "").trim();
-            if (stopId.isEmpty()) {
-                writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Missing stopId parameter"));
+            String routeNumber = query.getOrDefault("routeNumber", "").trim();
+            String plate = query.getOrDefault("plate", "").trim();
+            if (stopId.isEmpty() && routeNumber.isEmpty() && plate.isEmpty()) {
+                writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Missing stopId, routeNumber, or plate parameter"));
                 return;
             }
-            Map<String, Object> payload = loadRubberinessDetails(query, stopId);
+            Map<String, Object> payload = loadRubberinessDetails(query);
             payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
             payload.put("status", "ok");
             writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
@@ -538,7 +546,7 @@ public class BusDashboardServer {
         }
     }
 
-    private Map<String, Object> loadRubberinessDetails(Map<String, String> query, String stopId) throws Exception {
+    private Map<String, Object> loadRubberinessDetails(Map<String, String> query) throws Exception {
         Path eventsDir = trafficBehaviorDir.resolve("dwell-events");
         if (!Files.exists(eventsDir)) {
             return new LinkedHashMap<>(Map.of("details", List.of(), "timeline", List.of(), "page", 1, "pageSize", 50, "totalEvents", 0, "hasMore", false));
@@ -546,7 +554,7 @@ public class BusDashboardServer {
         int page = Math.max(1, parsePositiveInt(query.get("page"), 1));
         int pageSize = Math.min(50, Math.max(1, parsePositiveInt(query.get("pageSize"), 50)));
         int offset = (page - 1) * pageSize;
-        FilterSpec filter = buildRubberinessFilter(query, stopId);
+        FilterSpec filter = buildRubberinessFilter(query, null);
 
         String sql = "SELECT CAST(serviceDate AS VARCHAR), weekdayIso, plate, routeNumber, stopId, stopName, stopLatitude, stopLongitude, "
                 + "enteredStopAt, exitedStopAt, dwellTimeSeconds, isTerminalStop "
@@ -621,11 +629,25 @@ public class BusDashboardServer {
         List<String> clauses = new ArrayList<>();
         List<Object> parameters = new ArrayList<>();
         clauses.add("dwellTimeSeconds > ?");
-        parameters.add("longClusters".equals(query.get("mode")) || "longHeatmap".equals(query.get("mode")) ? 60 : 0);
+        parameters.add(isLongRubberinessQuery(query) ? 60 : 0);
         parameters.add(0, parquetGlob(eventsDir));
-        if (stopId != null && !stopId.isBlank()) {
+        String effectiveStopId = stopId;
+        if (effectiveStopId == null || effectiveStopId.isBlank()) {
+            effectiveStopId = query.getOrDefault("stopId", "").trim();
+        }
+        if (effectiveStopId != null && !effectiveStopId.isBlank()) {
             clauses.add("stopId = ?");
-            parameters.add(stopId);
+            parameters.add(effectiveStopId);
+        }
+        String routeNumber = query.getOrDefault("routeNumber", "").trim();
+        if (!routeNumber.isEmpty()) {
+            clauses.add("routeNumber = ?");
+            parameters.add(routeNumber);
+        }
+        String plate = query.getOrDefault("plate", "").trim();
+        if (!plate.isEmpty()) {
+            clauses.add("plate = ?");
+            parameters.add(plate);
         }
         String policy = query.getOrDefault("terminalPolicy", "with-terminals");
         if ("without-terminals".equals(policy)) {
@@ -650,6 +672,13 @@ public class BusDashboardServer {
             }
         }
         return new FilterSpec(String.join(" AND ", clauses), parameters);
+    }
+
+    private static boolean isLongRubberinessQuery(Map<String, String> query) {
+        String mode = query.getOrDefault("mode", "");
+        return "over60".equals(query.get("dwellFilter"))
+                || "longClusters".equals(mode)
+                || "longHeatmap".equals(mode);
     }
 
     private void handleOvertakeDetailsRequest(HttpExchange exchange) throws IOException {

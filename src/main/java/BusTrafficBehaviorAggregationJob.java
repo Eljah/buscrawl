@@ -25,6 +25,7 @@ import static org.apache.spark.sql.functions.expr;
 import static org.apache.spark.sql.functions.lit;
 import static org.apache.spark.sql.functions.max;
 import static org.apache.spark.sql.functions.max_by;
+import static org.apache.spark.sql.functions.min;
 import static org.apache.spark.sql.functions.not;
 import static org.apache.spark.sql.functions.round;
 import static org.apache.spark.sql.functions.row_number;
@@ -154,7 +155,10 @@ public class BusTrafficBehaviorAggregationJob {
         try {
             Dataset<Row> routeStops = topology.createRouteStopPointsDataFrame(spark);
             Dataset<Row> routeTerminalBounds = routeStops.groupBy("internalRouteId", "routeNumber", "direction")
-                    .agg(max("stopOrder").alias("maxStopOrder"));
+                    .agg(
+                            min("stopOrder").alias("minStopOrder"),
+                            max("stopOrder").alias("maxStopOrder")
+                    );
             Dataset<Row> routeStopContext = routeStops.join(
                     routeTerminalBounds,
                     new String[]{"internalRouteId", "routeNumber", "direction"}
@@ -186,6 +190,7 @@ public class BusTrafficBehaviorAggregationJob {
                                     "stopId",
                                     "direction",
                                     "stopOrder",
+                                    "minStopOrder",
                                     "maxStopOrder"
                             ),
                             new String[]{"internalRouteId", "routeNumber", "stopId", "direction"}
@@ -237,6 +242,7 @@ public class BusTrafficBehaviorAggregationJob {
                             "stopLatitude",
                             "stopLongitude",
                             "stopOrder",
+                            "minStopOrder",
                             "maxStopOrder",
                             "enteredStopAt",
                             "exitedStopAt",
@@ -245,7 +251,7 @@ public class BusTrafficBehaviorAggregationJob {
                             "minDistanceMeters",
                             "maxDistanceMeters"
                     )
-                    .withColumn("isTerminalStop", col("stopOrder").equalTo(lit(1)).or(col("stopOrder").equalTo(col("maxStopOrder"))));
+                    .withColumn("isTerminalStop", col("stopOrder").equalTo(col("minStopOrder")).or(col("stopOrder").equalTo(col("maxStopOrder"))));
 
             WindowSpec dwellDedupWindow = Window.partitionBy(
                             "serviceDate",
