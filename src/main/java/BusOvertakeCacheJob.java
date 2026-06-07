@@ -25,6 +25,10 @@ public class BusOvertakeCacheJob {
             "BUS_OVERTAKE_CACHE_PHYSICAL_SEGMENT_VEHICLE_ROW_LIMIT",
             "1000"
     ));
+    private static final int POINT_HEATMAP_ROW_LIMIT = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_OVERTAKE_CACHE_POINT_HEATMAP_ROW_LIMIT",
+            "2000"
+    ));
 
     public static void main(String[] args) throws Exception {
         Path dataRoot = Path.of(System.getenv().getOrDefault(
@@ -46,6 +50,7 @@ public class BusOvertakeCacheJob {
 
         RouteTopology topology = RouteTopology.load(null);
         LocalDate yesterday = LocalDate.now(CITY_ZONE).minusDays(1);
+        LocalDate today = LocalDate.now(CITY_ZONE);
 
         Class.forName("org.duckdb.DuckDBDriver");
         try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
@@ -91,6 +96,13 @@ public class BusOvertakeCacheJob {
                     OvertakeMode.VEHICLE
             ));
             payload.put("vehicleDetails", Map.of());
+            payload.put("pointHeatmapData", buildPointHeatmapSection(
+                    connection,
+                    dataRoot.resolve("overtake-events"),
+                    yesterday,
+                    today,
+                    false
+            ));
             payload.put("physicalSegmentData", buildPhysicalSection(
                     connection,
                     dataRoot.resolve("daily-physical-overtake-segment"),
@@ -115,8 +127,102 @@ public class BusOvertakeCacheJob {
                     false
             ));
             payload.put("physicalVehicleDetails", Map.of());
+            payload.put("physicalPointHeatmapData", buildPointHeatmapSection(
+                    connection,
+                    dataRoot.resolve("physical-overtake-events"),
+                    yesterday,
+                    today,
+                    true
+            ));
 
             writeJsonAtomic(cacheFile, payload);
+        }
+    }
+
+    private static Map<String, Object> buildPointHeatmapSection(
+            Connection connection,
+            Path eventsDir,
+            LocalDate yesterday,
+            LocalDate today,
+            boolean physical
+    ) throws Exception {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("previousDay", loadPointHeatmapRows(connection, eventsDir, yesterday, null, today, physical));
+        section.put("allDays", loadPointHeatmapRows(connection, eventsDir, null, null, today, physical));
+        Map<String, List<Map<String, Object>>> weekday = new LinkedHashMap<>();
+        for (int weekdayIso = 1; weekdayIso <= 7; weekdayIso++) {
+            weekday.put(String.valueOf(weekdayIso), loadPointHeatmapRows(connection, eventsDir, null, weekdayIso, today, physical));
+        }
+        section.put("weekday", weekday);
+        return section;
+    }
+
+    private static List<Map<String, Object>> loadPointHeatmapRows(
+            Connection connection,
+            Path eventsDir,
+            LocalDate serviceDate,
+            Integer weekdayIso,
+            LocalDate today,
+            boolean physical
+    ) throws Exception {
+        if (!Files.exists(eventsDir)) {
+            return List.of();
+        }
+
+        String overtakenRouteColumn = physical ? "overtakenRouteNumber" : "routeNumber";
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT ");
+        sql.append("ROUND((startStopLatitude + endStopLatitude) / 2, 3) AS pointLatitude, ");
+        sql.append("ROUND((startStopLongitude + endStopLongitude) / 2, 3) AS pointLongitude, ");
+        sql.append("COUNT(*) AS overtakeCount, ");
+        sql.append("MAX(overtakeAt) AS latestOvertakeAt, ");
+        sql.append("max_by(overtakerPlate, overtakeAt) AS latestOvertakerPlate, ");
+        sql.append("max_by(overtakerRouteNumber, overtakeAt) AS latestOvertakerRouteNumber, ");
+        sql.append("max_by(overtakenPlate, overtakeAt) AS latestOvertakenPlate, ");
+        sql.append("max_by(").append(overtakenRouteColumn).append(", overtakeAt) AS latestOvertakenRouteNumber ");
+        sql.append("FROM read_parquet(?) ");
+        sql.append("WHERE startStopLatitude IS NOT NULL AND startStopLongitude IS NOT NULL ");
+        sql.append("AND endStopLatitude IS NOT NULL AND endStopLongitude IS NOT NULL ");
+        if (serviceDate != null) {
+            sql.append("AND CAST(serviceDate AS VARCHAR) = ? ");
+        } else {
+            sql.append("AND CAST(serviceDate AS VARCHAR) < ? ");
+            if (weekdayIso != null) {
+                sql.append("AND weekdayIso = ? ");
+            }
+        }
+        sql.append("GROUP BY pointLatitude, pointLongitude ");
+        sql.append("ORDER BY overtakeCount DESC, latestOvertakeAt DESC ");
+        sql.append("LIMIT ?");
+
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            statement.setString(1, parquetGlob(eventsDir));
+            int parameterIndex = 2;
+            if (serviceDate != null) {
+                statement.setString(parameterIndex++, serviceDate.toString());
+            } else {
+                statement.setString(parameterIndex++, today.toString());
+                if (weekdayIso != null) {
+                    statement.setInt(parameterIndex++, weekdayIso);
+                }
+            }
+            statement.setInt(parameterIndex, POINT_HEATMAP_ROW_LIMIT);
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("pointLatitude", rs.getDouble(1));
+                    row.put("pointLongitude", rs.getDouble(2));
+                    row.put("overtakeCount", rs.getLong(3));
+                    row.put("latestOvertakeAt", toIsoString(rs.getObject(4)));
+                    row.put("latestOvertakerPlate", rs.getString(5));
+                    row.put("latestOvertakerRouteNumber", rs.getString(6));
+                    row.put("latestOvertakenPlate", rs.getString(7));
+                    row.put("latestOvertakenRouteNumber", rs.getString(8));
+                    rows.add(row);
+                }
+                return rows;
+            }
         }
     }
 
@@ -509,10 +615,12 @@ public class BusOvertakeCacheJob {
         payload.put("segmentVehicleData", emptySection);
         payload.put("vehicleData", emptySection);
         payload.put("vehicleDetails", Map.of());
+        payload.put("pointHeatmapData", emptySection);
         payload.put("physicalSegmentData", emptySection);
         payload.put("physicalSegmentVehicleData", emptySection);
         payload.put("physicalVehicleData", emptySection);
         payload.put("physicalVehicleDetails", Map.of());
+        payload.put("physicalPointHeatmapData", emptySection);
         return payload;
     }
 

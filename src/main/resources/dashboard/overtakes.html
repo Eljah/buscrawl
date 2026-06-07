@@ -75,6 +75,7 @@
             <label><input type="radio" name="mode" value="segmentRoute"> Segment + Route</label>
             <label><input type="radio" name="mode" value="segmentVehicle"> Segment + Vehicle</label>
             <label><input type="radio" name="mode" value="vehicle"> Vehicle</label>
+            <label><input type="radio" name="mode" value="pointHeatmap"> Event Point Heatmap</label>
           </div>
         </div>
         <div class="control-row">
@@ -170,11 +171,17 @@ function normalize(v){ return String(v || '').trim().toLowerCase(); }
 function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
 function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
-function isSegmentMode(){ return state.mode !== 'vehicle'; }
+function isPointHeatmapMode(){ return state.mode === 'pointHeatmap'; }
+function isSegmentMode(){ return state.mode !== 'vehicle' && !isPointHeatmapMode(); }
 function isPhysicalScope(){ return state.scope === 'physical'; }
 
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
+  if (isPointHeatmapMode()) {
+    return isPhysicalScope()
+      ? (state.payload.physicalPointHeatmapData || { previousDay:[], allDays:[], weekday:{} })
+      : (state.payload.pointHeatmapData || { previousDay:[], allDays:[], weekday:{} });
+  }
   if (isPhysicalScope()) {
     if (state.mode === 'vehicle') return state.payload.physicalVehicleData || { previousDay:[], allDays:[], weekday:{} };
     if (state.mode === 'segmentVehicle') return state.payload.physicalSegmentVehicleData || { previousDay:[], allDays:[], weekday:{} };
@@ -194,6 +201,7 @@ function currentDataset(){
 }
 
 function itemKey(item){
+  if (isPointHeatmapMode()) return `${item.pointLatitude}|${item.pointLongitude}`;
   if (isPhysicalScope() && state.mode === 'segmentVehicle') return `${item.physicalSegmentId || item.segmentId}|${item.overtakerPlate}`;
   if (isPhysicalScope() && state.mode !== 'vehicle') return item.physicalSegmentId || item.segmentId;
   if (state.mode === 'segment') return item.segmentId;
@@ -205,6 +213,7 @@ function itemKey(item){
 function itemFilterValue(item){
   return normalize([
     item.segmentId, item.physicalSegmentId, item.routeNumber, item.overtakerRouteNumber, item.overtakerPlate,
+    item.pointLatitude, item.pointLongitude,
     item.latestOvertakenRouteNumber, item.latestOvertakenPlate,
     item.startStopName, item.endStopName, item.latestStartStopName, item.latestEndStopName
   ].join(' '));
@@ -326,7 +335,17 @@ function renderOverlay(){
   const origin = getViewportOrigin();
   const parts = [];
   const maxMetric = Math.max(...items.map(metricValue), 1);
-  if (isSegmentMode()) {
+  if (isPointHeatmapMode()) {
+    for (const item of items) {
+      const key = itemKey(item);
+      const active = key === state.selectedKey;
+      const point = project(item.pointLatitude, item.pointLongitude, state.zoom);
+      const ratio = maxMetric > 0 ? Math.max(0, Math.min(1, metricValue(item) / maxMetric)) : 0;
+      const radius = active ? 20 + ratio * 18 : 10 + ratio * 24;
+      const fill = heatColor(metricValue(item), maxMetric);
+      parts.push(`<circle data-key="${escapeAttr(key)}" cx="${(point.x-origin.left).toFixed(2)}" cy="${(point.y-origin.top).toFixed(2)}" r="${radius.toFixed(1)}" fill="${active ? 'rgba(31,120,255,0.74)' : fill}" stroke="${active ? '#fff' : 'rgba(255,255,255,0.62)'}" stroke-width="${active ? '3' : '1.5'}" opacity="${active ? '0.9' : '0.54'}" style="pointer-events:auto; cursor:pointer"><title>${escapeAttr(metricValue(item))} overtakes</title></circle>`);
+    }
+  } else if (isSegmentMode()) {
     if (isPhysicalScope()) {
       for (const item of items) {
         const key = itemKey(item);
@@ -377,9 +396,9 @@ function renderOverlay(){
     }
   }
   overlayEl.innerHTML = parts.join('');
-  overlayEl.querySelectorAll('polyline').forEach(element => {
+  overlayEl.querySelectorAll('polyline,circle[data-key]').forEach(element => {
     element.addEventListener('click', () => {
-      if (isSegmentMode()) {
+      if (isPointHeatmapMode() || isSegmentMode()) {
         selectItemByKey(element.dataset.key);
       } else {
         selectItemByKey(filteredItems().find(item => item.overtakerRouteNumber === element.dataset.key)?.overtakerPlate || element.dataset.key);
@@ -389,6 +408,7 @@ function renderOverlay(){
 }
 
 function listTitle(item){
+  if (isPointHeatmapMode()) return `Point ${Number(item.pointLatitude).toFixed(3)}, ${Number(item.pointLongitude).toFixed(3)}`;
   if (isPhysicalScope() && state.mode === 'segmentVehicle') return `${item.overtakerPlate} · ${item.overtakerRouteNumber || 'route ?'} · ${item.startStopName} -> ${item.endStopName}`;
   if (isPhysicalScope() && state.mode !== 'vehicle') return `${item.startStopName} -> ${item.endStopName}`;
   if (state.mode === 'segment') return `${item.routeNumber} · ${item.startStopName} -> ${item.endStopName}`;
@@ -405,6 +425,9 @@ function listMetric(item){
 function listNote(item){
   if (state.periodMode === 'previous') {
     const base = `time ${formatDate(item.latestOvertakeAt)}`;
+    if (isPointHeatmapMode()) {
+      return `${base}; latest overtaker ${item.latestOvertakerRouteNumber || '?'} / ${item.latestOvertakerPlate || '?'}; overtaken ${item.latestOvertakenRouteNumber || '?'} / ${item.latestOvertakenPlate || '?'}`;
+    }
     if (state.mode === 'vehicle') {
       return `${base}; latest segment ${item.latestStartStopName || '?'} -> ${item.latestEndStopName || '?'}`;
     }
@@ -465,9 +488,11 @@ function renderMeta(){
   document.getElementById('modeMeta').textContent =
     `${state.scope}, ${state.mode}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
-  document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
+  document.getElementById('sidebarTitle').textContent = isPointHeatmapMode() ? 'Overtake Point Clusters' : state.mode === 'vehicle' ? 'Overtaking Vehicles' : 'Segments';
   document.getElementById('sidebarMeta').textContent =
-    (state.mode === 'vehicle' || state.mode === 'segmentVehicle')
+    isPointHeatmapMode()
+      ? 'Rows show clustered overtake event points; the map uses larger/redder circles for denser places.'
+      : (state.mode === 'vehicle' || state.mode === 'segmentVehicle')
       ? 'Click a row to expand exact overtake facts and show event markers for the selected period.'
       : state.periodMode === 'previous'
       ? 'Rows show concrete latest overtake time and overtaker identity.'

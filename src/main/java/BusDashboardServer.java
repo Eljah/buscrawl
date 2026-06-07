@@ -299,6 +299,8 @@ public class BusDashboardServer {
         payload.put("segmentRouteData", emptySection);
         payload.put("segmentVehicleData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("pointHeatmapData", emptySection);
+        payload.put("physicalPointHeatmapData", emptySection);
         return payload;
     }
 
@@ -361,7 +363,7 @@ public class BusDashboardServer {
 
         if (("vehicle".equals(mode))) {
             copyIfPresent(source, payload, "routeShapes");
-        } else if (!"physical".equals(scope)) {
+        } else if (!"physical".equals(scope) && !"pointHeatmap".equals(mode)) {
             copyIfPresent(source, payload, "segmentShapes");
         }
         if (!payload.containsKey("segmentShapes")) {
@@ -375,6 +377,9 @@ public class BusDashboardServer {
     }
 
     private static String overtakeSectionKey(String scope, String mode) {
+        if ("pointHeatmap".equals(mode)) {
+            return "physical".equals(scope) ? "physicalPointHeatmapData" : "pointHeatmapData";
+        }
         if ("physical".equals(scope)) {
             if ("vehicle".equals(mode)) {
                 return "physicalVehicleData";
