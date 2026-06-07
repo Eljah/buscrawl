@@ -38,6 +38,7 @@ public class BusDashboardServer {
     private final AtomicReference<byte[]> cachedStopLastPassJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedOvertakeJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRubberinessJson = new AtomicReference<>();
+    private final AtomicReference<Map<String, Object>> cachedRubberinessPayload = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedMapConfigJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedIndexHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementHtml = new AtomicReference<>();
@@ -154,7 +155,8 @@ public class BusDashboardServer {
         server.createContext("/api/stop-last-pass", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedStopLastPassJson.get()));
         server.createContext("/api/overtakes", this::handleOvertakesRequest);
         server.createContext("/api/overtake-details", this::handleOvertakeDetailsRequest);
-        server.createContext("/api/rubberiness", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRubberinessJson.get()));
+        server.createContext("/api/rubberiness", this::handleRubberinessRequest);
+        server.createContext("/api/rubberiness-details", this::handleRubberinessDetailsRequest);
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
@@ -193,9 +195,12 @@ public class BusDashboardServer {
         cachedOvertakeJson.set(loadJsonCache(overtakeCacheFile, emptyOvertakePayload(
                 "Overtake cache file not found: " + overtakeCacheFile
         )));
-        cachedRubberinessJson.set(loadJsonCache(rubberinessCacheFile, emptyRubberinessPayload(
+        byte[] rubberinessJson = loadJsonCache(rubberinessCacheFile, emptyRubberinessPayload(
                 "Rubberiness cache file not found: " + rubberinessCacheFile
-        )));
+        ));
+        cachedRubberinessJson.set(rubberinessJson);
+        cachedRubberinessPayload.set(MAPPER.readValue(rubberinessJson, new TypeReference<>() {
+        }));
         cachedMapConfigJson.set(loadJsonCache(mapConfigFile, emptyMapConfigPayload(
                 "Map config file not found: " + mapConfigFile
         )));
@@ -327,6 +332,9 @@ public class BusDashboardServer {
         payload.put("stopRouteData", emptySection);
         payload.put("routeData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("heatmapData", emptySection);
+        payload.put("longHeatmapData", emptySection);
+        payload.put("longDwellPointData", emptySection);
         return payload;
     }
 
@@ -439,6 +447,209 @@ public class BusDashboardServer {
         if (source.containsKey(key)) {
             target.put(key, source.get(key));
         }
+    }
+
+    private void handleRubberinessRequest(HttpExchange exchange) throws IOException {
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        if (rawQuery == null || rawQuery.isBlank()) {
+            writeResponse(exchange, 200, "application/json; charset=utf-8", cachedRubberinessJson.get());
+            return;
+        }
+
+        Map<String, String> query = parseQuery(rawQuery);
+        Map<String, Object> source = cachedRubberinessPayload.get();
+        if (source == null) {
+            source = MAPPER.readValue(cachedRubberinessJson.get(), new TypeReference<>() {
+            });
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        copyIfPresent(source, payload, "updatedAt");
+        copyIfPresent(source, payload, "status");
+        copyIfPresent(source, payload, "message");
+        copyIfPresent(source, payload, "timezone");
+        copyIfPresent(source, payload, "yesterday");
+        copyIfPresent(source, payload, "weekdays");
+        copyIfPresent(source, payload, "terminalPolicies");
+
+        String mode = query.getOrDefault("mode", "stop");
+        String period = query.getOrDefault("period", "previous");
+        String weekday = query.getOrDefault("weekday", "1");
+        String sectionKey = rubberinessSectionKey(mode);
+        payload.put(sectionKey, compactOvertakeSection(source.get(sectionKey), period, weekday));
+        if ("route".equals(mode) || "vehicle".equals(mode)) {
+            copyIfPresent(source, payload, "routeShapes");
+        } else if (!"heatmap".equals(mode) && !"longHeatmap".equals(mode)) {
+            copyIfPresent(source, payload, "stops");
+        }
+        if (!payload.containsKey("routeShapes")) {
+            payload.put("routeShapes", List.of());
+        }
+        if (!payload.containsKey("stops")) {
+            payload.put("stops", List.of());
+        }
+        if ("heatmap".equals(mode) || "longHeatmap".equals(mode) || "longClusters".equals(mode)) {
+            try {
+                payload.put("timeline", loadRubberinessTimeline(query, null));
+            } catch (Exception e) {
+                payload.put("timeline", List.of());
+            }
+        } else {
+            payload.put("timeline", List.of());
+        }
+        writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
+    }
+
+    private static String rubberinessSectionKey(String mode) {
+        if ("stopRoute".equals(mode)) {
+            return "stopRouteData";
+        }
+        if ("route".equals(mode)) {
+            return "routeData";
+        }
+        if ("vehicle".equals(mode)) {
+            return "vehicleData";
+        }
+        if ("longClusters".equals(mode)) {
+            return "longDwellPointData";
+        }
+        if ("longHeatmap".equals(mode)) {
+            return "longHeatmapData";
+        }
+        if ("heatmap".equals(mode)) {
+            return "heatmapData";
+        }
+        return "stopData";
+    }
+
+    private void handleRubberinessDetailsRequest(HttpExchange exchange) throws IOException {
+        try {
+            Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
+            String stopId = query.getOrDefault("stopId", "").trim();
+            if (stopId.isEmpty()) {
+                writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Missing stopId parameter"));
+                return;
+            }
+            Map<String, Object> payload = loadRubberinessDetails(query, stopId);
+            payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+            payload.put("status", "ok");
+            writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
+        } catch (Exception e) {
+            writeResponse(exchange, 500, "application/json; charset=utf-8", errorPayload(e.getMessage()));
+        }
+    }
+
+    private Map<String, Object> loadRubberinessDetails(Map<String, String> query, String stopId) throws Exception {
+        Path eventsDir = trafficBehaviorDir.resolve("dwell-events");
+        if (!Files.exists(eventsDir)) {
+            return new LinkedHashMap<>(Map.of("details", List.of(), "timeline", List.of(), "page", 1, "pageSize", 50, "totalEvents", 0, "hasMore", false));
+        }
+        int page = Math.max(1, parsePositiveInt(query.get("page"), 1));
+        int pageSize = Math.min(50, Math.max(1, parsePositiveInt(query.get("pageSize"), 50)));
+        int offset = (page - 1) * pageSize;
+        FilterSpec filter = buildRubberinessFilter(query, stopId);
+
+        String sql = "SELECT CAST(serviceDate AS VARCHAR), weekdayIso, plate, routeNumber, stopId, stopName, stopLatitude, stopLongitude, "
+                + "enteredStopAt, exitedStopAt, dwellTimeSeconds, isTerminalStop "
+                + "FROM read_parquet(?) WHERE " + filter.whereClause + " ORDER BY enteredStopAt DESC LIMIT ? OFFSET ?";
+        Class.forName("org.duckdb.DuckDBDriver");
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                bindParameters(statement, filter.parameters);
+                statement.setInt(filter.parameters.size() + 1, pageSize);
+                statement.setInt(filter.parameters.size() + 2, offset);
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("serviceDate", rs.getString(1));
+                        row.put("weekdayIso", rs.getInt(2));
+                        row.put("plate", rs.getString(3));
+                        row.put("routeNumber", rs.getString(4));
+                        row.put("stopId", rs.getString(5));
+                        row.put("stopName", rs.getString(6));
+                        row.put("latitude", rs.getDouble(7));
+                        row.put("longitude", rs.getDouble(8));
+                        row.put("enteredStopAt", toIsoString(rs.getObject(9)));
+                        row.put("exitedStopAt", toIsoString(rs.getObject(10)));
+                        row.put("dwellTimeSeconds", rs.getLong(11));
+                        row.put("isTerminalStop", rs.getBoolean(12));
+                        rows.add(row);
+                    }
+                }
+            }
+            long totalEvents = countEvents(connection, filter);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("details", rows);
+            payload.put("timeline", loadRubberinessTimeline(connection, filter));
+            payload.put("page", page);
+            payload.put("pageSize", pageSize);
+            payload.put("totalEvents", totalEvents);
+            payload.put("hasMore", offset + rows.size() < totalEvents);
+            return payload;
+        }
+    }
+
+    private List<Map<String, Object>> loadRubberinessTimeline(Map<String, String> query, String stopId) throws Exception {
+        FilterSpec filter = buildRubberinessFilter(query, stopId);
+        Class.forName("org.duckdb.DuckDBDriver");
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
+            return loadRubberinessTimeline(connection, filter);
+        }
+    }
+
+    private List<Map<String, Object>> loadRubberinessTimeline(Connection connection, FilterSpec filter) throws Exception {
+        String sql = "SELECT time_bucket(INTERVAL '5 minutes', enteredStopAt) AS bucketTime, COUNT(*) "
+                + "FROM read_parquet(?) WHERE " + filter.whereClause + " AND enteredStopAt IS NOT NULL "
+                + "GROUP BY bucketTime ORDER BY bucketTime";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            bindParameters(statement, filter.parameters);
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("bucketTime", toIsoString(rs.getObject(1)));
+                    row.put("count", rs.getLong(2));
+                    rows.add(row);
+                }
+                return rows;
+            }
+        }
+    }
+
+    private FilterSpec buildRubberinessFilter(Map<String, String> query, String stopId) {
+        Path eventsDir = trafficBehaviorDir.resolve("dwell-events");
+        List<String> clauses = new ArrayList<>();
+        List<Object> parameters = new ArrayList<>();
+        clauses.add("dwellTimeSeconds > ?");
+        parameters.add("longClusters".equals(query.get("mode")) || "longHeatmap".equals(query.get("mode")) ? 60 : 0);
+        parameters.add(0, parquetGlob(eventsDir));
+        if (stopId != null && !stopId.isBlank()) {
+            clauses.add("stopId = ?");
+            parameters.add(stopId);
+        }
+        String policy = query.getOrDefault("terminalPolicy", "with-terminals");
+        if ("without-terminals".equals(policy)) {
+            clauses.add("NOT isTerminalStop");
+        }
+        String period = query.getOrDefault("period", "all");
+        if ("previous".equals(period)) {
+            String serviceDate = query.getOrDefault("serviceDate", "").trim();
+            if (!serviceDate.isEmpty()) {
+                clauses.add("CAST(serviceDate AS VARCHAR) = ?");
+                parameters.add(serviceDate);
+            }
+        } else {
+            clauses.add("CAST(serviceDate AS VARCHAR) < ?");
+            parameters.add(LocalDate.now(CITY_ZONE).toString());
+            if ("weekday".equals(period)) {
+                String weekday = query.getOrDefault("weekday", "").trim();
+                if (!weekday.isEmpty()) {
+                    clauses.add("weekdayIso = ?");
+                    parameters.add(Integer.parseInt(weekday));
+                }
+            }
+        }
+        return new FilterSpec(String.join(" AND ", clauses), parameters);
     }
 
     private void handleOvertakeDetailsRequest(HttpExchange exchange) throws IOException {
@@ -573,6 +784,10 @@ public class BusDashboardServer {
     }
 
     private long countOvertakeEvents(Connection connection, FilterSpec filter) throws Exception {
+        return countEvents(connection, filter);
+    }
+
+    private long countEvents(Connection connection, FilterSpec filter) throws Exception {
         String sql = "SELECT COUNT(*) FROM read_parquet(?) WHERE " + filter.whereClause;
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             bindParameters(statement, filter.parameters);

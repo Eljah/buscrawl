@@ -31,6 +31,14 @@ public class BusRubberinessCacheJob {
                 "BUS_DASHBOARD_RUBBERINESS_CACHE_FILE",
                 "./var/bus/dashboard-cache/rubberiness.json"
         ));
+        Path mapConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAP_CONFIG_FILE",
+                cacheFile.resolveSibling("map-config.json").toString()
+        ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TILE_ROOT",
+                cacheFile.resolveSibling("tiles").toString()
+        ));
         Files.createDirectories(cacheFile.getParent());
 
         Path dailyStopDir = dataRoot.resolve("daily-rubber-stop");
@@ -41,6 +49,7 @@ public class BusRubberinessCacheJob {
 
         RouteTopology topology = RouteTopology.load(null);
         LocalDate yesterday = LocalDate.now(CITY_ZONE).minusDays(1);
+        LocalDate today = LocalDate.now(CITY_ZONE);
 
         Class.forName("org.duckdb.DuckDBDriver");
         try (Connection connection = DriverManager.getConnection("jdbc:duckdb:")) {
@@ -89,8 +98,108 @@ public class BusRubberinessCacheJob {
                     yesterday,
                     RubberMode.VEHICLE
             ));
+            payload.put("heatmapData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 0));
+            payload.put("longHeatmapData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 60));
+            payload.put("longDwellPointData", buildDwellPointSection(connection, dataRoot.resolve("dwell-events"), yesterday, today, 60));
 
             writeJsonAtomic(cacheFile, payload);
+            DashboardOverlayTileRenderer.renderRubberinessHeatmapTiles(cacheFile, mapConfigFile, tileRoot);
+        }
+    }
+
+    private static Map<String, Object> buildDwellPointSection(
+            Connection connection,
+            Path dwellEventsDir,
+            LocalDate yesterday,
+            LocalDate today,
+            int minDwellSeconds
+    ) throws Exception {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("previousDay", loadDwellPointRows(connection, dwellEventsDir, yesterday, null, today, minDwellSeconds));
+        section.put("allDays", loadDwellPointRows(connection, dwellEventsDir, null, null, today, minDwellSeconds));
+        Map<String, List<Map<String, Object>>> weekday = new LinkedHashMap<>();
+        for (int weekdayIso = 1; weekdayIso <= 7; weekdayIso++) {
+            weekday.put(String.valueOf(weekdayIso), loadDwellPointRows(connection, dwellEventsDir, null, weekdayIso, today, minDwellSeconds));
+        }
+        section.put("weekday", weekday);
+        return section;
+    }
+
+    private static List<Map<String, Object>> loadDwellPointRows(
+            Connection connection,
+            Path dwellEventsDir,
+            LocalDate serviceDate,
+            Integer weekdayIso,
+            LocalDate today,
+            int minDwellSeconds
+    ) throws Exception {
+        if (!Files.exists(dwellEventsDir)) {
+            return List.of();
+        }
+        boolean summary = serviceDate == null;
+        StringBuilder sql = new StringBuilder();
+        sql.append("WITH policy_events AS (");
+        sql.append("SELECT 'with-terminals' AS terminalPolicy, * FROM read_parquet(?) ");
+        sql.append("UNION ALL SELECT 'without-terminals' AS terminalPolicy, * FROM read_parquet(?) WHERE NOT isTerminalStop");
+        sql.append(") SELECT terminalPolicy, stopId, stopName, stopLatitude, stopLongitude, ");
+        sql.append("SUM(dwellTimeSeconds) AS totalDwellSeconds, MAX(dwellTimeSeconds) AS maxDwellSeconds, ");
+        sql.append("ROUND(AVG(dwellTimeSeconds), 0) AS averageDwellSeconds, COUNT(*) AS visitCount, ");
+        if (summary) {
+            sql.append("COUNT(DISTINCT serviceDate) AS sampleDays, ");
+        }
+        sql.append("MAX(enteredStopAt) AS latestEnteredStopAt, ");
+        sql.append("max_by(plate, enteredStopAt) AS latestPlate, max_by(routeNumber, enteredStopAt) AS latestRouteNumber ");
+        sql.append("FROM policy_events WHERE dwellTimeSeconds > ? ");
+        if (serviceDate != null) {
+            sql.append("AND CAST(serviceDate AS VARCHAR) = ? ");
+        } else {
+            sql.append("AND CAST(serviceDate AS VARCHAR) < ? ");
+            if (weekdayIso != null) {
+                sql.append("AND weekdayIso = ? ");
+            }
+        }
+        sql.append("GROUP BY terminalPolicy, stopId, stopName, stopLatitude, stopLongitude ");
+        sql.append("ORDER BY totalDwellSeconds DESC, maxDwellSeconds DESC LIMIT 2000");
+
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            String glob = parquetGlob(dwellEventsDir);
+            statement.setString(1, glob);
+            statement.setString(2, glob);
+            statement.setInt(3, minDwellSeconds);
+            int parameterIndex = 4;
+            if (serviceDate != null) {
+                statement.setString(parameterIndex++, serviceDate.toString());
+            } else {
+                statement.setString(parameterIndex++, today.toString());
+                if (weekdayIso != null) {
+                    statement.setInt(parameterIndex++, weekdayIso);
+                }
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("terminalPolicy", rs.getString(1));
+                    row.put("stopId", rs.getString(2));
+                    row.put("stopName", rs.getString(3));
+                    row.put("latitude", rs.getDouble(4));
+                    row.put("longitude", rs.getDouble(5));
+                    row.put("totalDwellSeconds", rs.getLong(6));
+                    row.put("maxDwellSeconds", rs.getLong(7));
+                    row.put("averageDwellSeconds", rs.getInt(8));
+                    row.put("visitCount", rs.getLong(9));
+                    int latestIndex = 10;
+                    if (summary) {
+                        row.put("sampleDays", rs.getLong(10));
+                        latestIndex = 11;
+                    }
+                    row.put("latestEnteredStopAt", toIsoString(rs.getObject(latestIndex)));
+                    row.put("latestPlate", rs.getString(latestIndex + 1));
+                    row.put("latestRouteNumber", rs.getString(latestIndex + 2));
+                    rows.add(row);
+                }
+                return rows;
+            }
         }
     }
 
@@ -183,6 +292,9 @@ public class BusRubberinessCacheJob {
         payload.put("stopRouteData", emptySection);
         payload.put("routeData", emptySection);
         payload.put("vehicleData", emptySection);
+        payload.put("heatmapData", emptySection);
+        payload.put("longHeatmapData", emptySection);
+        payload.put("longDwellPointData", emptySection);
         return payload;
     }
 
@@ -190,6 +302,16 @@ public class BusRubberinessCacheJob {
         Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
         MAPPER.writeValue(tempFile.toFile(), payload);
         Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private static String toIsoString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof java.sql.Timestamp) {
+            return ((java.sql.Timestamp) value).toInstant().toString();
+        }
+        return String.valueOf(value);
     }
 
     private enum RubberMode {

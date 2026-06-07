@@ -224,7 +224,7 @@ public class BusTrafficBehaviorAggregationJob {
                     "left_anti"
             );
 
-            Dataset<Row> dwellEvents = affectedVisits.select(
+            Dataset<Row> rawDwellEvents = affectedVisits.select(
                             "visitId",
                             "serviceDate",
                             "weekdayIso",
@@ -245,8 +245,22 @@ public class BusTrafficBehaviorAggregationJob {
                             "minDistanceMeters",
                             "maxDistanceMeters"
                     )
-                    .withColumn("isTerminalStop", col("stopOrder").equalTo(lit(1)).or(col("stopOrder").equalTo(col("maxStopOrder"))))
-                    .dropDuplicates("visitId");
+                    .withColumn("isTerminalStop", col("stopOrder").equalTo(lit(1)).or(col("stopOrder").equalTo(col("maxStopOrder"))));
+
+            WindowSpec dwellDedupWindow = Window.partitionBy(
+                            "serviceDate",
+                            "plate",
+                            "internalRouteId",
+                            "routeNumber",
+                            "stopId",
+                            "enteredStopAt",
+                            "exitedStopAt"
+                    )
+                    .orderBy(col("isTerminalStop").asc(), col("stopOrder").asc());
+            Dataset<Row> dwellEvents = rawDwellEvents
+                    .withColumn("dwellDedupRank", row_number().over(dwellDedupWindow))
+                    .filter(col("dwellDedupRank").equalTo(lit(1)))
+                    .drop("dwellDedupRank");
 
             Path dwellEventsDir = outputRoot.resolve(DWELL_EVENTS_DIR);
             overwriteAffectedPartitions(dwellEvents, dwellEventsDir, outputPartitions, "serviceDate");

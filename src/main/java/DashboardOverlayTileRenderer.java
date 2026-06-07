@@ -125,6 +125,23 @@ public final class DashboardOverlayTileRenderer {
         renderPointHeatmapScope(variantRoot.resolve("physical"), config, payload.get("physicalPointHeatmapData"));
     }
 
+    public static void renderRubberinessHeatmapTiles(Path cacheFile, Path mapConfigFile, Path tilesRoot) throws IOException {
+        if (!Files.exists(cacheFile) || !Files.exists(mapConfigFile)) {
+            return;
+        }
+
+        Map<String, Object> payload = MAPPER.readValue(cacheFile.toFile(), MAP_TYPE);
+        MapConfig config = loadMapConfig(mapConfigFile);
+        Path variantRoot = tilesRoot.resolve("rubberiness").resolve("heatmap");
+        if (!"ok".equals(String.valueOf(payload.get("status")))) {
+            clearDirectory(variantRoot);
+            return;
+        }
+
+        renderRubberinessHeatmapScope(variantRoot.resolve("all"), config, payload.get("heatmapData"));
+        renderRubberinessHeatmapScope(variantRoot.resolve("over60"), config, payload.get("longHeatmapData"));
+    }
+
     @SuppressWarnings("unchecked")
     private static void renderPointHeatmapScope(Path scopeRoot, MapConfig config, Object sectionObject) throws IOException {
         if (!(sectionObject instanceof Map<?, ?>)) {
@@ -141,6 +158,34 @@ public final class DashboardOverlayTileRenderer {
         for (Map.Entry<String, List<Map<String, Object>>> entry : variants.entrySet()) {
             Path path = scopeRoot.resolve(entry.getKey());
             renderPointHeatmapVariant(path, config, entry.getValue());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void renderRubberinessHeatmapScope(Path scopeRoot, MapConfig config, Object sectionObject) throws IOException {
+        if (!(sectionObject instanceof Map<?, ?>)) {
+            clearDirectory(scopeRoot);
+            return;
+        }
+
+        Map<String, Object> section = (Map<String, Object>) sectionObject;
+        Map<String, List<Map<String, Object>>> variants = new LinkedHashMap<>();
+        variants.put("previous", castList(section.get("previousDay")));
+        variants.put("all", castList(section.get("allDays")));
+        variants.putAll(extractWeekdayVariants("weekday", section.get("weekday")));
+
+        for (Map.Entry<String, List<Map<String, Object>>> entry : variants.entrySet()) {
+            Map<String, List<Map<String, Object>>> byPolicy = new LinkedHashMap<>();
+            for (Map<String, Object> row : entry.getValue()) {
+                String policy = stringValue(row.get("terminalPolicy"));
+                if (policy == null) {
+                    policy = "with-terminals";
+                }
+                byPolicy.computeIfAbsent(policy, ignored -> new ArrayList<>()).add(row);
+            }
+            for (Map.Entry<String, List<Map<String, Object>>> policyEntry : byPolicy.entrySet()) {
+                renderRubberinessHeatmapVariant(scopeRoot.resolve(policyEntry.getKey()).resolve(entry.getKey()), config, policyEntry.getValue());
+            }
         }
     }
 
@@ -164,6 +209,48 @@ public final class DashboardOverlayTileRenderer {
                     try {
                         graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
                         drawOvertakePoint(graphics, zoom, tileX, tileY, point);
+                    } finally {
+                        graphics.dispose();
+                    }
+                }
+
+                for (Map.Entry<String, BufferedImage> entry : images.entrySet()) {
+                    String[] parts = entry.getKey().split("/");
+                    Path xDir = tempRoot.resolve(String.valueOf(zoom)).resolve(parts[0]);
+                    Files.createDirectories(xDir);
+                    ImageIO.write(entry.getValue(), "PNG", xDir.resolve(parts[1] + ".png").toFile());
+                }
+            }
+
+            clearDirectory(outputDir);
+            Files.createDirectories(outputDir.getParent());
+            Files.move(tempRoot, outputDir, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            clearDirectory(tempRoot);
+            throw e;
+        }
+    }
+
+    private static void renderRubberinessHeatmapVariant(Path outputDir, MapConfig config, List<Map<String, Object>> points) throws IOException {
+        Files.createDirectories(outputDir.getParent());
+        Path tempRoot = Files.createTempDirectory(outputDir.getParent(), outputDir.getFileName().toString() + "-tmp-");
+        try {
+            for (int zoom = config.minZoom; zoom <= config.maxZoom; zoom++) {
+                Map<String, BufferedImage> images = new HashMap<>();
+                for (Map<String, Object> point : points) {
+                    Double latitude = doubleValue(point.get("latitude"));
+                    Double longitude = doubleValue(point.get("longitude"));
+                    if (latitude == null || longitude == null) {
+                        continue;
+                    }
+                    int tileX = (int) Math.floor(lonToWorldX(longitude, zoom) / TILE_SIZE);
+                    int tileY = (int) Math.floor(latToWorldY(latitude, zoom) / TILE_SIZE);
+                    String key = tileX + "/" + tileY;
+                    BufferedImage image = images.computeIfAbsent(key, ignored -> new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB));
+                    Graphics2D graphics = image.createGraphics();
+                    try {
+                        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+                        drawRubberinessPoint(graphics, zoom, tileX, tileY, point);
                     } finally {
                         graphics.dispose();
                     }
@@ -361,6 +448,24 @@ public final class DashboardOverlayTileRenderer {
         }
     }
 
+    private static void drawRubberinessPoint(Graphics2D graphics, int zoom, int tileX, int tileY, Map<String, Object> point) {
+        Double latitude = doubleValue(point.get("latitude"));
+        Double longitude = doubleValue(point.get("longitude"));
+        if (latitude == null || longitude == null) {
+            return;
+        }
+        long dwellSeconds = Math.max(1L, longValue(point.getOrDefault("totalDwellSeconds", 1)));
+        double x = lonToWorldX(longitude, zoom) - tileX * (double) TILE_SIZE;
+        double y = latToWorldY(latitude, zoom) - tileY * (double) TILE_SIZE;
+        int left = (int) Math.round(x - 2.0);
+        int top = (int) Math.round(y - 2.0);
+        int repeats = (int) Math.min(700, Math.max(1, dwellSeconds / 60));
+        for (int i = 0; i < repeats; i++) {
+            graphics.setColor(new Color(206, 44, 36, 10));
+            graphics.fillOval(left, top, 4, 4);
+        }
+    }
+
     private static Map<String, List<Map<String, Object>>> extractWeekdayVariants(String prefix, Object source) {
         Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
         if (!(source instanceof Map<?, ?>)) {
@@ -468,6 +573,20 @@ public final class DashboardOverlayTileRenderer {
             return Double.parseDouble(String.valueOf(value));
         } catch (NumberFormatException e) {
             return null;
+        }
+    }
+
+    private static long longValue(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        if (value == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return 0L;
         }
     }
 

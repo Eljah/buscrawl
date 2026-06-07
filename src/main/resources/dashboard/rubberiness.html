@@ -26,8 +26,9 @@
     .map-shell.dragging { cursor:grabbing; }
     .map-zoom { position:absolute; right:14px; top:14px; z-index:4; display:grid; gap:8px; }
     .map-zoom button { width:42px; height:42px; border:1px solid rgba(29,42,56,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(29,42,56,.12); }
-    .tile-layer,.overlay-layer { position:absolute; inset:0; }
-    .tile-layer img { position:absolute; width:256px; height:256px; }
+    .tile-layer,.heatmap-tiles,.overlay-layer { position:absolute; inset:0; }
+    .tile-layer img,.heatmap-tiles img { position:absolute; width:256px; height:256px; }
+    .heatmap-tiles { z-index:3; pointer-events:none; }
     .overlay-layer { overflow:visible; }
     .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.22); backdrop-filter:blur(2px); }
     .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 160px); overflow:auto; padding-right:4px; }
@@ -36,6 +37,13 @@
     .item-name { font-size:18px; }
     .item-time { color:var(--muted); font-size:14px; white-space:nowrap; }
     .item-note { margin-top:6px; font-size:13px; }
+    .details { margin-top:10px; display:grid; gap:7px; }
+    .detail { padding:8px 10px; border-radius:10px; background:rgba(29,42,56,.05); font-size:13px; line-height:1.35; }
+    .timeline { height:88px; margin:12px 0; border-radius:14px; background:rgba(255,255,255,.48); border:1px solid rgba(29,42,56,.08); overflow:hidden; }
+    .timeline svg { display:block; width:100%; height:100%; }
+    .pager { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; color:var(--muted); font-size:13px; }
+    .pager button { border:1px solid rgba(29,42,56,.16); border-radius:10px; background:rgba(255,255,255,.88); padding:7px 10px; font:inherit; color:var(--ink); cursor:pointer; }
+    .pager button:disabled { opacity:.45; cursor:default; }
     @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
   </style>
 </head>
@@ -63,6 +71,9 @@
             <label><input type="radio" name="mode" value="stopRoute"> Stop + Route</label>
             <label><input type="radio" name="mode" value="route"> Route</label>
             <label><input type="radio" name="mode" value="vehicle"> Vehicle</label>
+            <label><input type="radio" name="mode" value="heatmap"> Dwell Heatmap</label>
+            <label><input type="radio" name="mode" value="longHeatmap"> Dwell &gt;1m Heatmap</label>
+            <label><input type="radio" name="mode" value="longClusters"> Dwell &gt;1m Clusters</label>
           </div>
         </div>
         <div class="control-row">
@@ -113,6 +124,7 @@
           <button type="button" id="zoomOut">-</button>
         </div>
         <div class="tile-layer" id="tiles"></div>
+        <div class="heatmap-tiles" id="heatmapTiles"></div>
         <svg class="overlay-layer" id="overlay"></svg>
         <div class="empty" id="emptyState">Loading...</div>
       </div>
@@ -121,6 +133,7 @@
     <aside class="card sidebar">
       <h2 id="sidebarTitle">Items</h2>
       <div class="sidebar-meta" id="sidebarMeta">Click a point, line, or row to focus the current selection.</div>
+      <div class="timeline" id="overviewTimeline"></div>
       <div class="list" id="list"></div>
     </aside>
   </section>
@@ -130,6 +143,7 @@
 const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', { timeZone:'Europe/Moscow', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
 const mapEl = document.getElementById('map');
 const tilesEl = document.getElementById('tiles');
+const heatmapTilesEl = document.getElementById('heatmapTiles');
 const overlayEl = document.getElementById('overlay');
 const emptyEl = document.getElementById('emptyState');
 const listEl = document.getElementById('list');
@@ -137,8 +151,9 @@ const filterInput = document.getElementById('filterInput');
 const weekdaySelect = document.getElementById('weekdaySelect');
 const sortFieldSelect = document.getElementById('sortField');
 const sortDirSelect = document.getElementById('sortDir');
+const overviewTimelineEl = document.getElementById('overviewTimeline');
 
-const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, mode:'stop', terminalPolicy:'with-terminals', periodMode:'previous', weekday:'1', sortField:'total', sortDir:'desc', filterText:'', selectedKey:'', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+const state = { config:null, payload:null, detailsCache:{}, detailsLoading:{}, detailsPage:{}, centerLat:55.79, centerLon:49.12, zoom:12, mode:'stop', terminalPolicy:'with-terminals', periodMode:'previous', weekday:'1', sortField:'total', sortDir:'desc', filterText:'', selectedKey:'', dragging:false, dragMoved:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
 
 function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} MSK` : 'no data'; }
 function formatSeconds(totalSeconds){ const seconds=Number(totalSeconds||0); const h=Math.floor(seconds/3600); const m=Math.floor((seconds%3600)/60); const s=seconds%60; return h>0 ? `${h}h ${m}m ${s}s` : m>0 ? `${m}m ${s}s` : `${s}s`; }
@@ -153,10 +168,15 @@ function normalize(v){ return String(v || '').trim().toLowerCase(); }
 function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
 function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
 function selectedWeekdayLabel(){ const option = weekdaySelect.options[weekdaySelect.selectedIndex]; return option ? option.textContent : 'weekday'; }
-function isStopMode(){ return state.mode === 'stop' || state.mode === 'stopRoute'; }
+function isHeatmapMode(){ return state.mode === 'heatmap' || state.mode === 'longHeatmap'; }
+function isLongClusterMode(){ return state.mode === 'longClusters'; }
+function isStopMode(){ return state.mode === 'stop' || state.mode === 'stopRoute' || isLongClusterMode(); }
 
 function currentSection(){
   if (!state.payload) return { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'heatmap') return state.payload.heatmapData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'longHeatmap') return state.payload.longHeatmapData || { previousDay:[], allDays:[], weekday:{} };
+  if (state.mode === 'longClusters') return state.payload.longDwellPointData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'stop') return state.payload.stopData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'stopRoute') return state.payload.stopRouteData || { previousDay:[], allDays:[], weekday:{} };
   if (state.mode === 'route') return state.payload.routeData || { previousDay:[], allDays:[], weekday:{} };
@@ -170,7 +190,7 @@ function currentDataset(){
 }
 
 function itemKey(item){
-  if (state.mode === 'stop') return item.stopId;
+  if (state.mode === 'stop' || isHeatmapMode() || isLongClusterMode()) return item.stopId;
   if (state.mode === 'stopRoute') return `${item.stopId}|${item.routeNumber}`;
   if (state.mode === 'route') return item.routeNumber;
   return item.plate;
@@ -206,6 +226,79 @@ function filteredItems(){
 function findRouteShape(routeNumber){ return (state.payload.routeShapes || []).find(item => item.routeNumber === routeNumber); }
 function findStop(stopId){ return (state.payload.stops || []).find(item => item.stopId === stopId); }
 
+function heatColor(value, maxValue){
+  const ratio = maxValue > 0 ? Math.max(0, Math.min(1, value / maxValue)) : 0;
+  const hue = 122 - ratio * 118;
+  return `hsl(${hue}, 62%, 47%)`;
+}
+
+function renderTimelineChart(container, rows, emptyText){
+  const data = rows || [];
+  if (!data.length) {
+    container.innerHTML = `<div class="item-note" style="padding:12px">${escapeHtml(emptyText || 'No timeline data.')}</div>`;
+    return;
+  }
+  const width = Math.max(260, container.clientWidth || 360);
+  const height = Math.max(70, container.clientHeight || 88);
+  const maxCount = Math.max(...data.map(row => Number(row.count || 0)), 1);
+  const barWidth = Math.max(1, (width - 16) / data.length);
+  const bars = data.map((row, index) => {
+    const value = Number(row.count || 0);
+    const barHeight = (height - 24) * value / maxCount;
+    const x = 8 + index * barWidth;
+    const y = height - 16 - barHeight;
+    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(1, barWidth - 1).toFixed(2)}" height="${barHeight.toFixed(2)}" fill="${heatColor(value, maxCount)}" opacity="0.82"><title>${escapeAttr(formatDate(row.bucketTime))}: ${value}</title></rect>`;
+  }).join('');
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${bars}<line x1="8" y1="${height-16}" x2="${width-8}" y2="${height-16}" stroke="rgba(29,42,56,.18)" /></svg>`;
+}
+
+function renderOverviewTimeline(){
+  renderTimelineChart(overviewTimelineEl, state.payload ? state.payload.timeline : [], 'No dwell events in the selected period.');
+}
+
+function detailsCacheKey(item){ return [state.mode,state.terminalPolicy,state.periodMode,state.weekday,state.payload?.yesterday || '',itemKey(item)].join('|'); }
+function detailsPageKey(item,page){ return `${detailsCacheKey(item)}|page:${page}`; }
+function detailsQuery(item,page){
+  const params = new URLSearchParams({ mode:state.mode, stopId:item.stopId || '', terminalPolicy:state.terminalPolicy, period:state.periodMode, page:String(page), pageSize:'50' });
+  if (state.periodMode === 'previous' && state.payload?.yesterday) params.set('serviceDate', state.payload.yesterday);
+  if (state.periodMode === 'weekday') params.set('weekday', state.weekday);
+  return params.toString();
+}
+async function ensureDetailsLoaded(item){
+  if (!item || !isLongClusterMode()) return;
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  const key = detailsPageKey(item,page);
+  if (state.detailsCache[key] || state.detailsLoading[key]) return;
+  state.detailsLoading[key] = true;
+  renderAll();
+  try {
+    const response = await fetch(`./api/rubberiness-details?${detailsQuery(item,page)}`, {cache:'no-store'});
+    state.detailsCache[key] = await response.json();
+  } catch (error) {
+    state.detailsCache[key] = { details:[{error:String(error)}], timeline:[], page, pageSize:50, totalEvents:0, hasMore:false };
+  } finally {
+    delete state.detailsLoading[key];
+    renderAll();
+  }
+}
+function detailPayloadForItem(item){
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  return state.detailsCache[detailsPageKey(item,page)] || null;
+}
+function selectItemByKey(key){
+  state.selectedKey = key;
+  const item = filteredItems().find(candidate => itemKey(candidate) === key);
+  if (item && isLongClusterMode()) {
+    const baseKey = detailsCacheKey(item);
+    if (!state.detailsPage[baseKey]) state.detailsPage[baseKey] = 1;
+    ensureDetailsLoaded(item);
+  } else {
+    renderAll();
+  }
+}
+
 function renderTiles(){
   if(!state.config) return;
   const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin();
@@ -222,6 +315,32 @@ function renderTiles(){
   tilesEl.innerHTML=html;
 }
 
+function heatmapTileUrl(z,x,y){
+  if (!isHeatmapMode()) return null;
+  const kind = state.mode === 'longHeatmap' ? 'over60' : 'all';
+  const period = state.periodMode === 'previous' ? 'previous' : state.periodMode === 'all' ? 'all' : `weekday/${state.weekday}`;
+  return `./tiles/rubberiness/heatmap/${kind}/${state.terminalPolicy}/${period}/${z}/${x}/${y}.png?v=${encodeURIComponent(state.payload?.updatedAt || '')}`;
+}
+
+function renderHeatmapTiles(){
+  if(!state.config || !isHeatmapMode()) {
+    heatmapTilesEl.innerHTML = '';
+    return;
+  }
+  const z=state.zoom, scale=Math.pow(2,z), maxTile=scale-1, origin=getViewportOrigin();
+  let html='';
+  const minTileX=Math.floor(origin.left/256), maxTileX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const minTileY=Math.floor(origin.top/256), maxTileY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  for(let x=minTileX;x<=maxTileX;x++){
+    for(let y=minTileY;y<=maxTileY;y++){
+      if(y<0||y>maxTile) continue;
+      const wrappedX=((x%scale)+scale)%scale, left=x*256-origin.left, top=y*256-origin.top;
+      html += `<img src="${heatmapTileUrl(z,wrappedX,y)}" style="left:${left}px;top:${top}px" alt="" onerror="this.style.display='none'">`;
+    }
+  }
+  heatmapTilesEl.innerHTML=html;
+}
+
 function renderOverlay(){
   overlayEl.setAttribute('viewBox', `0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
   overlayEl.setAttribute('width', mapEl.clientWidth);
@@ -236,7 +355,9 @@ function renderOverlay(){
   emptyEl.style.display = 'none';
   const origin = getViewportOrigin();
   const parts = [];
-  if (isStopMode()) {
+  if (isHeatmapMode()) {
+    // PNG heatmap tiles carry the map layer in this mode.
+  } else if (isStopMode()) {
     for (const item of items) {
       const point = project(item.latitude, item.longitude, state.zoom);
       const radius = Math.max(4, Math.min(12, 4 + Math.log10(Math.max(1, Number(item.totalDwellSeconds || 0))) * 2));
@@ -260,17 +381,16 @@ function renderOverlay(){
   overlayEl.querySelectorAll('circle,polyline').forEach(element => {
     element.addEventListener('click', () => {
       if (isStopMode()) {
-        state.selectedKey = element.dataset.key;
+        selectItemByKey(element.dataset.key);
       } else {
-        state.selectedKey = filteredItems().find(item => item.routeNumber === element.dataset.key)?.plate || element.dataset.key;
+        selectItemByKey(filteredItems().find(item => item.routeNumber === element.dataset.key)?.plate || element.dataset.key);
       }
-      renderAll();
     });
   });
 }
 
 function listTitle(item){
-  if (state.mode === 'stop') return item.stopName;
+  if (state.mode === 'stop' || isHeatmapMode() || isLongClusterMode()) return item.stopName;
   if (state.mode === 'stopRoute') return `${item.stopName} · ${item.routeNumber}`;
   if (state.mode === 'route') return item.routeNumber;
   return `${item.plate} · ${item.routeNumber}`;
@@ -282,7 +402,30 @@ function listMetric(item){
 
 function listNote(item){
   const days = item.sampleDays ? `, days ${item.sampleDays}` : '';
-  return `avg ${formatSeconds(item.averageDwellSeconds)}, max ${formatSeconds(item.maxDwellSeconds)}, visits ${item.visitCount}${days}`;
+  const latest = item.latestPlate ? `, latest ${item.latestRouteNumber || '?'} / ${item.latestPlate}` : '';
+  return `avg ${formatSeconds(item.averageDwellSeconds)}, max ${formatSeconds(item.maxDwellSeconds)}, visits ${item.visitCount}${days}${latest}`;
+}
+
+function detailLine(detail){
+  if (detail.error) return `<div class="detail">Failed to load details: ${escapeHtml(detail.error)}</div>`;
+  return `<div class="detail"><strong>${escapeHtml(formatDate(detail.enteredStopAt))}</strong><br>` +
+    `${escapeHtml(detail.stopName || '?')} · route ${escapeHtml(detail.routeNumber || '?')} · plate ${escapeHtml(detail.plate || '?')}<br>` +
+    `dwell ${escapeHtml(formatSeconds(detail.dwellTimeSeconds))}; terminal ${detail.isTerminalStop ? 'yes' : 'no'}; exited ${escapeHtml(formatDate(detail.exitedStopAt))}</div>`;
+}
+
+function renderItemDetails(item, active){
+  if (!active || !isLongClusterMode()) return '';
+  const baseKey = detailsCacheKey(item);
+  const page = state.detailsPage[baseKey] || 1;
+  if (state.detailsLoading[detailsPageKey(item,page)]) return '<div class="details"><div class="detail">Loading dwell details...</div></div>';
+  const payload = detailPayloadForItem(item);
+  if (!payload) return '<div class="details"><div class="detail">Click row to load dwell details.</div></div>';
+  const details = payload.details || [];
+  if (!details.length) return '<div class="details"><div class="detail">No dwell details for this selection.</div></div>';
+  const start = (Number(payload.page || 1) - 1) * Number(payload.pageSize || 50) + 1;
+  const end = start + details.length - 1;
+  const pager = `<div class="pager"><button type="button" data-page-action="prev" ${Number(payload.page || 1) <= 1 ? 'disabled' : ''}>Previous</button><span>${start}-${end} of ${payload.totalEvents || details.length}</span><button type="button" data-page-action="next" ${payload.hasMore ? '' : 'disabled'}>Next</button></div>`;
+  return `<div class="details"><div class="timeline" data-detail-timeline="${escapeAttr(itemKey(item))}"></div>${pager}${details.map(detailLine).join('')}</div>`;
 }
 
 function renderList(){
@@ -294,12 +437,26 @@ function renderList(){
   listEl.innerHTML = items.map(item => {
     const key = itemKey(item);
     const active = state.selectedKey === key ? ' active' : '';
-    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div></div>`;
+    return `<div class="item${active}" data-key="${escapeAttr(key)}"><div class="item-title"><div class="item-name">${escapeHtml(listTitle(item))}</div><div class="item-time">${escapeHtml(listMetric(item))}</div></div><div class="item-note">${escapeHtml(listNote(item))}</div>${renderItemDetails(item, Boolean(active))}</div>`;
   }).join('');
   listEl.querySelectorAll('.item').forEach(element => element.addEventListener('click', () => {
-    state.selectedKey = element.dataset.key;
-    renderAll();
+    selectItemByKey(element.dataset.key);
   }));
+  listEl.querySelectorAll('[data-page-action]').forEach(button => button.addEventListener('click', event => {
+    event.stopPropagation();
+    const activeItem = filteredItems().find(item => itemKey(item) === state.selectedKey);
+    if (!activeItem) return;
+    const baseKey = detailsCacheKey(activeItem);
+    const currentPage = state.detailsPage[baseKey] || 1;
+    state.detailsPage[baseKey] = button.dataset.pageAction === 'next' ? currentPage + 1 : Math.max(1, currentPage - 1);
+    ensureDetailsLoaded(activeItem);
+  }));
+  const activeItem = items.find(item => itemKey(item) === state.selectedKey);
+  if (activeItem) {
+    const payload = detailPayloadForItem(activeItem);
+    const timelineEl = listEl.querySelector('[data-detail-timeline]');
+    if (timelineEl && payload) renderTimelineChart(timelineEl, payload.timeline || [], 'No timeline data for this stop.');
+  }
 }
 
 function renderMeta(){
@@ -308,8 +465,12 @@ function renderMeta(){
   document.getElementById('modeMeta').textContent =
     `${state.mode}, ${state.terminalPolicy}, ${state.periodMode === 'previous' ? `previous day (${state.payload.yesterday})` : state.periodMode === 'all' ? 'all days' : `weekday ${selectedWeekdayLabel()}`}`;
   document.getElementById('countMeta').textContent = `Items: ${items.length}`;
-  document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Vehicles' : state.mode === 'route' ? 'Routes' : 'Stops';
-  document.getElementById('sidebarMeta').textContent = 'Sort works on all displayed numeric metrics. Use terminal policy to compare endpoint-inflated dwell against internal stops only.';
+  document.getElementById('sidebarTitle').textContent = state.mode === 'vehicle' ? 'Vehicles' : state.mode === 'route' ? 'Routes' : isHeatmapMode() ? 'Dwell Heatmap Points' : 'Stops';
+  document.getElementById('sidebarMeta').textContent = isHeatmapMode()
+    ? 'PNG overlay tiles draw dwell-time density; redder areas have more accumulated waiting time.'
+    : isLongClusterMode()
+    ? 'Click a stop cluster to page through dwell events longer than one minute and inspect timing.'
+    : 'Sort works on all displayed numeric metrics. Use terminal policy to compare endpoint-inflated dwell against internal stops only.';
 }
 
 function adjustZoom(delta){
@@ -318,11 +479,12 @@ function adjustZoom(delta){
   if(nz===state.zoom) return;
   state.zoom=nz;
   renderTiles();
+  renderHeatmapTiles();
   renderOverlay();
 }
 
 function onPointerDown(e){ state.dragging=true; state.dragMoved=false; mapEl.classList.add('dragging'); state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; }
-function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderOverlay(); }
+function onPointerMove(e){ if(!state.dragging) return; if(Math.abs(e.clientX-state.dragStartX)>3||Math.abs(e.clientY-state.dragStartY)>3){ state.dragMoved=true; } const dx=e.clientX-state.dragStartX, dy=e.clientY-state.dragStartY; const cx=state.dragStartCenterX-dx, cy=state.dragStartCenterY-dy; state.centerLon=worldToLon(cx,state.zoom); state.centerLat=worldToLat(cy,state.zoom); renderTiles(); renderHeatmapTiles(); renderOverlay(); }
 function onPointerUp(){ state.dragging=false; mapEl.classList.remove('dragging'); }
 
 function populateWeekdays(){
@@ -331,32 +493,51 @@ function populateWeekdays(){
 }
 
 function renderAll(){
+  if (!state.payload || !state.config) return;
   renderMeta();
   renderTiles();
+  renderHeatmapTiles();
+  renderOverviewTimeline();
   renderList();
   renderOverlay();
 }
 
+function rubberinessQuery(){
+  return new URLSearchParams({ mode:state.mode, terminalPolicy:state.terminalPolicy, period:state.periodMode, weekday:state.weekday }).toString();
+}
+
+async function loadRubberiness(){
+  emptyEl.style.display='grid';
+  emptyEl.textContent='Loading rubberiness data...';
+  const response = await fetch(`./api/rubberiness?${rubberinessQuery()}`, {cache:'no-store'});
+  state.payload = await response.json();
+  populateWeekdays();
+  renderAll();
+}
+
+function reloadRubberiness(){
+  state.selectedKey='';
+  loadRubberiness().catch(error => {
+    emptyEl.style.display='grid';
+    emptyEl.textContent=`Failed to load rubberiness cache: ${error}`;
+  });
+}
+
 async function loadAll(){
-  const [configResponse,payloadResponse] = await Promise.all([
-    fetch('./api/map-config',{cache:'no-store'}),
-    fetch('./api/rubberiness',{cache:'no-store'})
-  ]);
+  const configResponse = await fetch('./api/map-config',{cache:'no-store'});
   state.config = await configResponse.json();
-  state.payload = await payloadResponse.json();
   if (state.config.center) {
     state.centerLon = state.config.center.longitude;
     state.centerLat = state.config.center.latitude;
   }
   state.zoom = state.config.initialZoom || state.zoom;
-  populateWeekdays();
-  renderAll();
+  await loadRubberiness();
 }
 
-document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; state.selectedKey=''; renderAll(); });
-document.getElementById('terminalGroup').addEventListener('change', event => { state.terminalPolicy = event.target.value; state.selectedKey=''; renderAll(); });
-document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; state.selectedKey=''; renderAll(); });
-weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; renderAll(); });
+document.getElementById('modeGroup').addEventListener('change', event => { state.mode = event.target.value; reloadRubberiness(); });
+document.getElementById('terminalGroup').addEventListener('change', event => { state.terminalPolicy = event.target.value; reloadRubberiness(); });
+document.getElementById('periodGroup').addEventListener('change', event => { state.periodMode = event.target.value; reloadRubberiness(); });
+weekdaySelect.addEventListener('change', () => { state.weekday = weekdaySelect.value; reloadRubberiness(); });
 sortFieldSelect.addEventListener('change', () => { state.sortField = sortFieldSelect.value; renderAll(); });
 sortDirSelect.addEventListener('change', () => { state.sortDir = sortDirSelect.value; renderAll(); });
 filterInput.addEventListener('input', () => { state.filterText = filterInput.value; renderAll(); });
@@ -365,7 +546,7 @@ document.getElementById('zoomOut').addEventListener('click', ()=>adjustZoom(-1))
 mapEl.addEventListener('pointerdown', onPointerDown);
 window.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
-window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderOverlay(); });
+window.addEventListener('resize', ()=>{ if (!state.config) return; renderTiles(); renderHeatmapTiles(); renderOverviewTimeline(); renderOverlay(); });
 
 loadAll().catch(error => {
   emptyEl.style.display='grid';
