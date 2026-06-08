@@ -18,17 +18,27 @@ import static org.apache.spark.sql.functions.from_json;
 
 public class BusDataSparkStreaming {
     public static void main(String[] args) throws StreamingQueryException {
+        String ingestSource = System.getenv().getOrDefault("BUS_INGEST_SOURCE", "spool");
         String tcpHost = System.getenv().getOrDefault("BUS_TCP_HOST", "localhost");
         int tcpPort = Integer.parseInt(System.getenv().getOrDefault("BUS_TCP_PORT", "9999"));
         Path storageRoot = Paths.get(System.getenv().getOrDefault("BUS_STORAGE_ROOT", "./var/bus"));
         Path localDir = storageRoot.resolve("spark-temp");
         Path outputDir = storageRoot.resolve("bus-data-parquet");
         Path checkpointDir = storageRoot.resolve("bus-data-checkpoint");
+        Path spoolReadyDir = Paths.get(System.getenv().getOrDefault(
+                "BUS_RAW_SPOOL_READY_DIR",
+                storageRoot.resolve("raw-json-spool").resolve("ready").toString()
+        ));
+        int maxFilesPerTrigger = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_RAW_SPOOL_MAX_FILES_PER_TRIGGER",
+                "64"
+        ));
 
         try {
             Files.createDirectories(localDir);
             Files.createDirectories(outputDir);
             Files.createDirectories(checkpointDir);
+            Files.createDirectories(spoolReadyDir);
         } catch (Exception e) {
             throw new RuntimeException("Failed to prepare storage directories", e);
         }
@@ -43,8 +53,6 @@ public class BusDataSparkStreaming {
 
         spark.sparkContext().setLogLevel("WARN");
 
-        System.out.println("Spark started, connecting to TCP server...");
-
         StructType schema = new StructType()
                 .add("internalRouteId", DataTypes.StringType)
                 .add("realRouteNumber", DataTypes.StringType)
@@ -57,12 +65,26 @@ public class BusDataSparkStreaming {
                 .add("sourceTimestamp", DataTypes.LongType)
                 .add("sourceReadableTime", DataTypes.StringType);
 
-        Dataset<String> lines = spark.readStream()
-                .format("socket")
-                .option("host", tcpHost)
-                .option("port", tcpPort)
-                .load()
-                .as(Encoders.STRING());
+        Dataset<String> lines;
+        if ("socket".equalsIgnoreCase(ingestSource)) {
+            System.out.printf("Spark started, reading raw events from TCP %s:%d%n", tcpHost, tcpPort);
+            lines = spark.readStream()
+                    .format("socket")
+                    .option("host", tcpHost)
+                    .option("port", tcpPort)
+                    .load()
+                    .as(Encoders.STRING());
+        } else if ("spool".equalsIgnoreCase(ingestSource)) {
+            System.out.println("Spark started, reading raw events from disk spool: "
+                    + spoolReadyDir.toAbsolutePath());
+            lines = spark.readStream()
+                    .format("text")
+                    .option("maxFilesPerTrigger", maxFilesPerTrigger)
+                    .load(spoolReadyDir.toAbsolutePath().toString())
+                    .as(Encoders.STRING());
+        } else {
+            throw new IllegalArgumentException("Unsupported BUS_INGEST_SOURCE: " + ingestSource);
+        }
 
         Dataset<Row> busData = lines.select(from_json(col("value"), schema).alias("data"))
                 .filter(col("data").isNotNull())

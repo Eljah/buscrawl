@@ -308,13 +308,24 @@ public class BusDashboardCacheJob {
     private static Map<String, Object> buildStatsPayload(Map<Instant, Long> statsBuckets, DerivedStats derivedStats, Instant rangeStart, Instant rangeEnd) {
         List<Map<String, Object>> series = new ArrayList<>();
         long totalPoints = 0;
+        Instant bucketStart = floorToBucket(rangeStart);
+        Instant bucketEnd = floorToBucket(rangeEnd);
+        Instant firstDataBucket = null;
+        Instant lastDataBucket = null;
 
-        for (Map.Entry<Instant, Long> entry : new TreeMap<>(statsBuckets).entrySet()) {
-            long points = entry.getValue();
+        TreeMap<Instant, Long> sortedBuckets = new TreeMap<>(statsBuckets);
+        for (Instant bucket = bucketStart; !bucket.isAfter(bucketEnd); bucket = bucket.plus(Duration.ofMinutes(5))) {
+            long points = sortedBuckets.getOrDefault(bucket, 0L);
             totalPoints += points;
+            if (points > 0) {
+                if (firstDataBucket == null) {
+                    firstDataBucket = bucket;
+                }
+                lastDataBucket = bucket;
+            }
 
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("label", BUCKET_LABEL.format(entry.getKey().atZone(CITY_ZONE)));
+            item.put("label", BUCKET_LABEL.format(bucket.atZone(CITY_ZONE)));
             item.put("points", points);
             series.add(item);
         }
@@ -330,10 +341,19 @@ public class BusDashboardCacheJob {
         payload.put("downsampled", false);
         payload.put("rangeStart", rangeStart.toString());
         payload.put("rangeEnd", rangeEnd.toString());
+        payload.put("bucketRangeStart", bucketStart.toString());
+        payload.put("bucketRangeEnd", bucketEnd.toString());
+        payload.put("dataStart", firstDataBucket == null ? null : firstDataBucket.toString());
+        payload.put("dataEnd", lastDataBucket == null ? null : lastDataBucket.toString());
         payload.put("series", series);
         payload.put("derivedSeries", derivedStats.series);
         payload.put("derivedTotals", derivedStats.totals);
         return payload;
+    }
+
+    private static Instant floorToBucket(Instant instant) {
+        long bucketSeconds = Duration.ofMinutes(5).toSeconds();
+        return Instant.ofEpochSecond(Math.floorDiv(instant.getEpochSecond(), bucketSeconds) * bucketSeconds);
     }
 
     private static Map<String, Object> buildRoutePayload(RouteMapper routeMapper, RouteCache routeCache, LocalDate today, LocalDate yesterday) {

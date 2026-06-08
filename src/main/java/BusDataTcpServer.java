@@ -25,14 +25,26 @@ public class BusDataTcpServer {
     private final ServerSocket serverSocket;
     private final LinkedBlockingDeque<String> queue = new LinkedBlockingDeque<>();
     private final AtomicLong enqueuedMessages = new AtomicLong();
+    private final BusRawJsonSpool rawSpool;
+    private final boolean tcpEnabled;
     private Socket clientSocket;
     private BufferedWriter writer;
 
     public BusDataTcpServer(int port) throws IOException {
-        serverSocket = new ServerSocket(port);
+        this(port, null, true);
+    }
+
+    public BusDataTcpServer(int port, BusRawJsonSpool rawSpool, boolean tcpEnabled) throws IOException {
+        this.rawSpool = rawSpool;
+        this.tcpEnabled = tcpEnabled;
+        serverSocket = tcpEnabled ? new ServerSocket(port) : null;
     }
 
     public void start() throws IOException {
+        if (!tcpEnabled) {
+            System.out.println("TCP server disabled; raw data is written to disk spool only");
+            return;
+        }
         System.out.println("TCP server started on port " + serverSocket.getLocalPort());
         startWriterThread();
 
@@ -55,6 +67,20 @@ public class BusDataTcpServer {
     }
 
     public void sendData(String jsonData) {
+        if (rawSpool != null) {
+            try {
+                rawSpool.append(jsonData);
+            } catch (IOException e) {
+                System.err.println("Fatal: failed to write raw bus event to disk spool");
+                e.printStackTrace(System.err);
+                System.exit(2);
+            }
+        }
+
+        if (!tcpEnabled) {
+            return;
+        }
+
         queue.offerLast(jsonData);
 
         long queueSize = queue.size();

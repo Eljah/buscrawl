@@ -9,6 +9,8 @@ import org.json.JSONObject;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,7 +40,11 @@ public class BusRealtimeClient {
 
         RouteMapper routeMapper = new RouteMapper(System.getenv("ROUTES_JSON_PATH"));
         int tcpPort = Integer.parseInt(System.getenv().getOrDefault("BUS_TCP_PORT", "9999"));
-        BusDataTcpServer tcpServer = new BusDataTcpServer(tcpPort);
+        boolean tcpEnabled = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TCP_ENABLED", "false"));
+        Path storageRoot = Paths.get(System.getenv().getOrDefault("BUS_STORAGE_ROOT", "./var/bus"));
+        BusRawJsonSpool rawSpool = BusRawJsonSpool.fromEnvironment(storageRoot);
+        System.out.println("Raw bus events spool: " + rawSpool.getRootDir().toAbsolutePath());
+        BusDataTcpServer tcpServer = new BusDataTcpServer(tcpPort, rawSpool, tcpEnabled);
 
         new Thread(() -> {
             try {

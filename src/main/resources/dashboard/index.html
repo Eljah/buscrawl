@@ -392,7 +392,8 @@
         return;
       }
 
-      setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}`);
+      const dataFreshness = data.dataEnd ? `; last data point: ${formatDate(data.dataEnd)}` : '';
+      setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}${dataFreshness}`);
       setText('cacheMeta', `Updated: ${formatDate(data.updatedAt)}`);
       renderChart('chartBox', data.series || [], 'points');
       const derivedSeries = data.derivedSeries || {};
