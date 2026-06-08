@@ -68,6 +68,7 @@ public class BusActiveTraceCacheJob {
                 .appName("BusActiveTraceCacheJob")
                 .master(System.getenv().getOrDefault("BUS_TRACE_SPARK_MASTER", "local[2]"))
                 .config("spark.local.dir", System.getenv().getOrDefault("BUS_TRACE_SPARK_LOCAL_DIR", "./var/bus/trace-cache-spark-temp"))
+                .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.driver.memory", System.getenv().getOrDefault("BUS_TRACE_SPARK_DRIVER_MEMORY", "2g"))
                 .config("spark.executor.memory", System.getenv().getOrDefault("BUS_TRACE_SPARK_EXECUTOR_MEMORY", "2g"))
                 .config("spark.driver.host", "127.0.0.1")

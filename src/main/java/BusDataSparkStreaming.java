@@ -47,6 +47,7 @@ public class BusDataSparkStreaming {
                 .appName("BusDataStreaming")
                 .master("local[*]")
                 .config("spark.local.dir", localDir.toAbsolutePath().toString())
+                .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.driver.memory", "10g")
                 .config("spark.executor.memory", "10g")
                 .getOrCreate();

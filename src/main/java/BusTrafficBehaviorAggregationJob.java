@@ -144,6 +144,7 @@ public class BusTrafficBehaviorAggregationJob {
                 .appName("BusTrafficBehaviorAggregationJob")
                 .master(sparkMaster)
                 .config("spark.local.dir", sparkLocalDir.toAbsolutePath().toString())
+                .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.driver.memory", System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_DRIVER_MEMORY", "4g"))
                 .config("spark.executor.memory", System.getenv().getOrDefault("BUS_TRAFFIC_BEHAVIOR_EXECUTOR_MEMORY", "4g"))
                 .getOrCreate();

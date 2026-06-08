@@ -71,6 +71,10 @@ public class BusStopLastPassAggregationJob {
         boolean dailyOnly = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_DAILY_ONLY", "false"));
         boolean newestFirst = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_NEWEST_FIRST", "false"));
         boolean inputHasSourceFile = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_STOP_LAST_PASS_INPUT_HAS_SOURCE_FILE", "false"));
+        boolean replaceAffectedPartitions = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_STOP_LAST_PASS_REPLACE_AFFECTED_PARTITIONS",
+                "false"
+        ));
 
         Files.createDirectories(outputRoot);
         Files.createDirectories(sparkLocalDir);
@@ -130,6 +134,7 @@ public class BusStopLastPassAggregationJob {
                 .appName("BusStopLastPassAggregationJob")
                 .master(sparkMaster)
                 .config("spark.local.dir", sparkLocalDir.toAbsolutePath().toString())
+                .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.driver.memory", System.getenv().getOrDefault("BUS_STOP_LAST_PASS_DRIVER_MEMORY", "4g"))
                 .config("spark.executor.memory", System.getenv().getOrDefault("BUS_STOP_LAST_PASS_EXECUTOR_MEMORY", "4g"))
                 .getOrCreate();
@@ -270,7 +275,7 @@ public class BusStopLastPassAggregationJob {
             }
 
             Dataset<Row> affectedStopVisits = newStopVisits;
-            if (hasParquetFiles(stopVisitsDir)) {
+            if (!replaceAffectedPartitions && hasParquetFiles(stopVisitsDir)) {
                 Dataset<Row> existingAffectedStopVisits = spark.read()
                         .parquet(stopVisitsDir.toAbsolutePath().toString())
                         .filter(col("serviceDate").isin(affectedDates.toArray()));

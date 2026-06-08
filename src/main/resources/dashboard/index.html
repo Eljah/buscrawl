@@ -292,6 +292,14 @@
       minute: '2-digit',
       second: '2-digit'
     });
+    const bucketTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
 
     function setText(id, text) {
       document.getElementById(id).textContent = text;
@@ -300,6 +308,11 @@
     function formatDate(value) {
       if (!value) return 'no data';
       return `${dateTimeFormatter.format(new Date(value))} MSK`;
+    }
+
+    function formatBucket(value, fallback) {
+      if (!value) return fallback || 'no data';
+      return `${bucketTimeFormatter.format(new Date(value))} MSK`;
     }
 
     function renderChart(targetId, series, noun = 'events') {
@@ -323,7 +336,7 @@
       const points = series.map((item, index) => {
         const x = left + stepX * index;
         const y = top + plotHeight - (item.points / maxY) * plotHeight;
-        return { x, y, label: item.label, points: item.points };
+        return { x, y, label: formatBucket(item.bucketStart, item.label), points: item.points };
       });
 
       const linePath = points.map((point, index) =>
@@ -393,7 +406,8 @@
       }
 
       const dataFreshness = data.dataEnd ? `; last data point: ${formatDate(data.dataEnd)}` : '';
-      setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}${dataFreshness}`);
+      const timezone = data.displayTimezone || 'Europe/Moscow';
+      setText('rangeMeta', `Data window: ${formatDate(data.rangeStart)} - ${formatDate(data.rangeEnd)}${dataFreshness}; x-axis: ${timezone}`);
       setText('cacheMeta', `Updated: ${formatDate(data.updatedAt)}`);
       renderChart('chartBox', data.series || [], 'points');
       const derivedSeries = data.derivedSeries || {};

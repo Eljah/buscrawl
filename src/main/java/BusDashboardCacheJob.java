@@ -112,6 +112,7 @@ public class BusDashboardCacheJob {
                     .appName("BusDashboardCacheJob")
                     .master(sparkMaster)
                     .config("spark.local.dir", sparkLocalDir.toAbsolutePath().toString())
+                    .config("spark.sql.session.timeZone", "UTC")
                     .config("spark.driver.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_DRIVER_MEMORY", "2g"))
                     .config("spark.executor.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_EXECUTOR_MEMORY", "2g"))
                     .getOrCreate();
@@ -277,13 +278,22 @@ public class BusDashboardCacheJob {
                 .sort("bucket_time")
                 .collectAsList();
 
-        List<Map<String, Object>> result = new ArrayList<>();
+        TreeMap<Instant, Long> bucketCounts = new TreeMap<>();
         for (Row row : rows) {
             Timestamp bucketTime = row.getTimestamp(0);
             long points = row.getLong(1);
+            bucketCounts.put(bucketTime.toInstant(), points);
+        }
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        Instant bucketStart = floorToBucket(rangeStart);
+        Instant bucketEnd = floorToBucket(rangeEnd);
+        for (Instant bucket = bucketStart; !bucket.isAfter(bucketEnd); bucket = bucket.plus(Duration.ofMinutes(5))) {
+            long points = bucketCounts.getOrDefault(bucket, 0L);
 
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("label", BUCKET_LABEL.format(bucketTime.toInstant().atZone(CITY_ZONE)));
+            item.put("bucketStart", bucket.toString());
+            item.put("label", BUCKET_LABEL.format(bucket.atZone(CITY_ZONE)));
             item.put("points", points);
             result.add(item);
         }
@@ -325,6 +335,7 @@ public class BusDashboardCacheJob {
             }
 
             Map<String, Object> item = new LinkedHashMap<>();
+            item.put("bucketStart", bucket.toString());
             item.put("label", BUCKET_LABEL.format(bucket.atZone(CITY_ZONE)));
             item.put("points", points);
             series.add(item);
@@ -339,6 +350,7 @@ public class BusDashboardCacheJob {
         payload.put("totalPoints", totalPoints);
         payload.put("bucket", "5 minutes");
         payload.put("downsampled", false);
+        payload.put("displayTimezone", CITY_ZONE.getId());
         payload.put("rangeStart", rangeStart.toString());
         payload.put("rangeEnd", rangeEnd.toString());
         payload.put("bucketRangeStart", bucketStart.toString());
