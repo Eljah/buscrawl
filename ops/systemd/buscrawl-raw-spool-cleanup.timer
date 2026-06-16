@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Buscrawl raw JSON spool cleanup periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+Unit=buscrawl-raw-spool-cleanup.service
+
+[Install]
+WantedBy=timers.target
