@@ -22,6 +22,24 @@ dashboard stats cache
 
 After `dashboard stats cache` is written, the script releases the critical lock. This is intentional: new raw data catchup must not wait for map tiles, heatmaps, or large UI detail caches.
 
+Raw parquet compaction runs in multiple bounded batches per critical catchup invocation. Defaults:
+
+```text
+BUS_DERIVED_COMPACTION_MAX_BATCHES=8
+BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN=1000
+BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS=8
+```
+
+This is required because one small compaction batch per timer tick can fall behind during daytime source peaks. If compacted parquet lags, all dashboard graphs based on derived facts can look stopped even while raw ingestion is healthy.
+
+Stop-visit calculation intentionally processes one compacted file per inner iteration by default:
+
+```text
+BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN=1
+```
+
+Compacted files can be large during catchup; processing several of them in one Spark job can turn the next stage into a long high-memory stage.
+
 The critical traffic-behavior step runs with `BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY=true`. It writes durable event facts and advances traffic state, but does not rebuild all overtake/rubberiness summary parquet in the critical lock.
 
 By default the script starts `run-derived-ui-cache.sh` in the background after releasing the critical lock. Set `BUS_DERIVED_RUN_UI_CACHE_AFTER=false` to disable that.
