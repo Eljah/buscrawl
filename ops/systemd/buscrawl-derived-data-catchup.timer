@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Buscrawl derived data catchup every 5 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=5min
+AccuracySec=1min
+Persistent=true
+Unit=buscrawl-derived-data-catchup.service
+
+[Install]
+WantedBy=timers.target

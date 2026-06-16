@@ -1,0 +1,13 @@
+[Unit]
+Description=Buscrawl derived data catchup
+After=network-online.target buscrawl-stream.service
+Wants=network-online.target
+Requires=buscrawl-stream.service
+
+[Service]
+Type=oneshot
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-derived-data-catchup.sh
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/derived-data-catchup.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/derived-data-catchup.log
