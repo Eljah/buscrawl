@@ -6,10 +6,14 @@ import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -48,10 +52,34 @@ public class BusRawParquetCompactionJob {
             modifiedSince = Instant.now().minus(Duration.ofDays(initialLookbackDays));
         }
 
+        boolean recursiveListing = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_COMPACTED_PARQUET_RECURSIVE_LISTING",
+                "false"
+        ));
+        boolean useFindListing = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_COMPACTED_PARQUET_USE_FIND_LISTING",
+                "true"
+        ));
+        System.out.printf(
+                "BusRawParquetCompactionJob: listing raw parquet files in %s since %s (recursive=%s, find=%s)%n",
+                inputDir,
+                modifiedSince,
+                recursiveListing,
+                useFindListing
+        );
         List<IncrementalParquetSupport.ParquetFileInfo> candidateFiles =
-                IncrementalParquetSupport.listRecentParquetFiles(inputDir, modifiedSince);
+                useFindListing
+                        ? listRecentParquetFilesWithFind(inputDir, modifiedSince)
+                        : recursiveListing
+                        ? IncrementalParquetSupport.listRecentParquetFiles(inputDir, modifiedSince)
+                        : IncrementalParquetSupport.listRecentParquetFilesFlat(inputDir, modifiedSince);
         List<IncrementalParquetSupport.ParquetFileInfo> selectedNewFiles =
                 IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath);
+        System.out.printf(
+                "BusRawParquetCompactionJob: listed %d candidates, %d selected new files%n",
+                candidateFiles.size(),
+                selectedNewFiles.size()
+        );
 
         int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, maxFilesPerRun));
         int startIndex = newestFirst ? Math.max(0, selectedNewFiles.size() - cappedSize) : 0;
@@ -90,12 +118,75 @@ public class BusRawParquetCompactionJob {
 
         return "COPY ("
                 + "SELECT "
-                + "plate, internalRouteId, realRouteNumber, latitude, longitude, eventTime, speed, "
-                + "timestamp, readableTime, sourceTimestamp, sourceReadableTime, "
-                + "filename AS sourceFile "
+                + "plate, internalRouteId, realRouteNumber, latitude, longitude, "
+                + "min(eventTime) AS eventTime, speed, "
+                + "min(timestamp) AS timestamp, min(readableTime) AS readableTime, "
+                + "sourceTimestamp, min(sourceReadableTime) AS sourceReadableTime, "
+                + "min(filename) AS sourceFile "
                 + "FROM read_parquet(" + fileList + ", union_by_name=true, filename=true) "
                 + "WHERE eventTime IS NOT NULL"
+                + " AND timestamp IS NOT NULL"
+                + " AND plate IS NOT NULL"
+                + " AND internalRouteId IS NOT NULL"
+                + " AND latitude IS NOT NULL"
+                + " AND longitude IS NOT NULL"
+                + " GROUP BY internalRouteId, realRouteNumber, plate, latitude, longitude, speed, sourceTimestamp"
                 + ") TO '" + sqlEscape(outputFile.toAbsolutePath().toString()) + "' (FORMAT PARQUET, COMPRESSION ZSTD)";
+    }
+
+    private static List<IncrementalParquetSupport.ParquetFileInfo> listRecentParquetFilesWithFind(
+            Path inputDir,
+            Instant modifiedSince
+    ) throws Exception {
+        Instant searchSince = modifiedSince.minusMillis(1);
+        double epochSeconds = searchSince.toEpochMilli() / 1000.0;
+        Process process = new ProcessBuilder(
+                "find",
+                inputDir.toAbsolutePath().toString(),
+                "-maxdepth",
+                "1",
+                "-type",
+                "f",
+                "-name",
+                "*.parquet",
+                "-newermt",
+                String.format(Locale.US, "@%.3f", epochSeconds),
+                "-printf",
+                "%T@ %p\\0"
+        ).start();
+
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        process.getInputStream().transferTo(stdout);
+        process.getErrorStream().transferTo(stderr);
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IllegalStateException("find failed with exit code " + exitCode + ": "
+                    + stderr.toString(StandardCharsets.UTF_8));
+        }
+
+        List<IncrementalParquetSupport.ParquetFileInfo> result = new ArrayList<>();
+        for (String record : stdout.toString(StandardCharsets.UTF_8).split("\\u0000")) {
+            if (record.isBlank()) {
+                continue;
+            }
+            int separator = record.indexOf(' ');
+            if (separator <= 0 || separator >= record.length() - 1) {
+                continue;
+            }
+            double modifiedAtSeconds = Double.parseDouble(record.substring(0, separator));
+            long epochSecond = (long) modifiedAtSeconds;
+            long nanos = Math.round((modifiedAtSeconds - epochSecond) * 1_000_000_000L);
+
+            IncrementalParquetSupport.ParquetFileInfo file = new IncrementalParquetSupport.ParquetFileInfo();
+            file.modifiedAt = Instant.ofEpochSecond(epochSecond, nanos).toString();
+            file.path = Path.of(record.substring(separator + 1)).toAbsolutePath().toString();
+            result.add(file);
+        }
+        result.sort(Comparator
+                .comparing((IncrementalParquetSupport.ParquetFileInfo file) -> IncrementalParquetSupport.parseInstant(file.modifiedAt))
+                .thenComparing(file -> file.path));
+        return result;
     }
 
     private static String sqlEscape(String value) {

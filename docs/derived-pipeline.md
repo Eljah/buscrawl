@@ -32,6 +32,14 @@ BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS=8
 
 This is required because one small compaction batch per timer tick can fall behind during daytime source peaks. If compacted parquet lags, all dashboard graphs based on derived facts can look stopped even while raw ingestion is healthy.
 
+Compaction must deduplicate raw source events by the canonical provider identity:
+
+```text
+internalRouteId, realRouteNumber, plate, latitude, longitude, speed, sourceTimestamp
+```
+
+The realtime client writes append-only raw events, and reconnect bugs or provider repeats must not inflate dashboard density or downstream facts. For one-off repair of an already inflated compacted layer, use `bin/run-compacted-parquet-dedup-duckdb.sh`. It writes a deduplicated compacted parquet tree to a temporary directory and does not switch production paths automatically; validate row counts and then perform a controlled cutover.
+
 Stop-visit calculation intentionally processes one compacted file per inner iteration by default:
 
 ```text
