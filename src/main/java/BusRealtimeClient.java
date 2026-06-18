@@ -12,8 +12,10 @@ import java.time.format.DateTimeFormatter;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import io.socket.emitter.Emitter;
 
 public class BusRealtimeClient {
     private static final ZoneId CITY_ZONE = ZoneId.of(
@@ -34,6 +36,7 @@ public class BusRealtimeClient {
     private static final boolean MODE11_DEBUG_LOG =
             Boolean.parseBoolean(System.getenv().getOrDefault("BUS_MODE11_DEBUG_LOG", "false"));
     private static final Set<String> SUBSCRIBED_ROUTE_IDS = ConcurrentHashMap.newKeySet();
+    private static final Map<String, Emitter.Listener> ROUTE_LISTENERS = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws Exception {
         String url = "https://ru.busti.me";
@@ -77,6 +80,7 @@ public class BusRealtimeClient {
 
         socket.on(Socket.EVENT_CONNECT, args1 -> {
             System.out.println("Connected successfully");
+            clearRouteSubscriptions(socket);
             SUBSCRIBED_ROUTE_IDS.clear();
 
             send(socket, "2probe");
@@ -139,7 +143,12 @@ public class BusRealtimeClient {
                                        BusDataTcpServer tcpServer, String internalRouteId) {
         String eventName = "ru.bustime.bus_mode10__" + internalRouteId;
 
-        socket.on(eventName, args -> {
+        Emitter.Listener previousListener = ROUTE_LISTENERS.remove(eventName);
+        if (previousListener != null) {
+            socket.off(eventName, previousListener);
+        }
+
+        Emitter.Listener listener = args -> {
             JSONObject data = (JSONObject) args[0];
             if (MODE10_DEBUG_LOG) {
                 System.out.println("Mode10 debug payload keys: " + data.keySet());
@@ -148,9 +157,18 @@ public class BusRealtimeClient {
             if (data.has("bdata_mode10")) {
                 handleBusData(routeMapper, tcpServer, internalRouteId, data.getJSONObject("bdata_mode10"));
             }
-        });
+        };
+        ROUTE_LISTENERS.put(eventName, listener);
+        socket.on(eventName, listener);
 
         emit(socket, "join", eventName);
+    }
+
+    private static void clearRouteSubscriptions(Socket socket) {
+        for (Map.Entry<String, Emitter.Listener> entry : ROUTE_LISTENERS.entrySet()) {
+            socket.off(entry.getKey(), entry.getValue());
+        }
+        ROUTE_LISTENERS.clear();
     }
 
     private static void handleBusData(RouteMapper routeMapper, BusDataTcpServer tcpServer,
