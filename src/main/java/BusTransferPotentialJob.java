@@ -77,8 +77,9 @@ public class BusTransferPotentialJob {
         ZoneId cityZone = ZoneId.of(cityTimezone);
         int bucketMinutes = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_BUCKET_MINUTES", "10"));
         int maxRides = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_RIDES", "10"));
-        int maxCandidateEventsPerStop = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP", "64"));
+        int maxCandidateEventsPerStop = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP", "1"));
         int outputPartitions = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS", "24"));
+        int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "1"));
         long maxDetailedJourneysPerDay = Long.parseLong(System.getenv().getOrDefault(
                 "BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY",
                 "5000000"
@@ -119,9 +120,11 @@ public class BusTransferPotentialJob {
 
             RouteTopology topology = RouteTopology.load(null);
             Set<String> topologyStops = collectTopologyStopIds(topology);
-            List<LocalDate> processedDates = new ArrayList<>();
+            State state = loadState(stateFile);
+            List<String> processedBucketKeys = new ArrayList<>();
+            int remainingBuckets = Math.max(1, maxBucketsPerRun);
             for (LocalDate serviceDate : serviceDates) {
-                processServiceDate(
+                ProcessResult result = processServiceDate(
                         spark,
                         allSegmentTrips,
                         outputRoot,
@@ -132,12 +135,22 @@ public class BusTransferPotentialJob {
                         maxRides,
                         maxCandidateEventsPerStop,
                         maxDetailedJourneysPerDay,
-                        outputPartitions
+                        outputPartitions,
+                        state.processedBucketKeys,
+                        remainingBuckets
                 );
-                processedDates.add(serviceDate);
+                processedBucketKeys.addAll(result.processedBucketKeys);
+                remainingBuckets -= result.processedBucketKeys.size();
+                if (remainingBuckets <= 0) {
+                    break;
+                }
+            }
+            if (processedBucketKeys.isEmpty()) {
+                System.out.println("BusTransferPotentialJob: no unprocessed 10-minute buckets found");
+                return;
             }
             rebuildSummaries(spark, outputRoot, outputPartitions);
-            updateState(stateFile, processedDates);
+            updateState(stateFile, processedBucketKeys);
         } finally {
             spark.stop();
         }
@@ -156,17 +169,15 @@ public class BusTransferPotentialJob {
         if (!targetDateText.isBlank()) {
             return List.of(LocalDate.parse(targetDateText));
         }
-        State state = loadState(stateFile);
-        Set<String> processed = backfill ? Set.of() : new HashSet<>(state.processedServiceDates);
         List<String> dateTexts = allSegmentTrips
                 .selectExpr("CAST(serviceDate AS STRING) AS serviceDate")
                 .distinct()
-                .sort("serviceDate")
                 .as(org.apache.spark.sql.Encoders.STRING())
                 .collectAsList();
+        dateTexts.sort(Comparator.reverseOrder());
         List<LocalDate> dates = new ArrayList<>();
         for (String text : dateTexts) {
-            if (text == null || text.isBlank() || processed.contains(text)) {
+            if (text == null || text.isBlank()) {
                 continue;
             }
             LocalDate date = LocalDate.parse(text);
@@ -177,7 +188,7 @@ public class BusTransferPotentialJob {
         return dates;
     }
 
-    private static void processServiceDate(
+    private static ProcessResult processServiceDate(
             SparkSession spark,
             Dataset<Row> allSegmentTrips,
             Path outputRoot,
@@ -188,7 +199,9 @@ public class BusTransferPotentialJob {
             int maxRides,
             int maxCandidateEventsPerStop,
             long maxDetailedJourneysPerDay,
-            int outputPartitions
+            int outputPartitions,
+            Collection<String> alreadyProcessedBucketKeys,
+            int maxBucketsToProcess
     ) {
         String serviceDateText = serviceDate.toString();
         Dataset<Row> dayTrips = allSegmentTrips
@@ -217,7 +230,7 @@ public class BusTransferPotentialJob {
         List<Row> rows = dayTrips.collectAsList();
         if (rows.isEmpty()) {
             System.out.println("BusTransferPotentialJob: no segment trips for " + serviceDateText);
-            return;
+            return ProcessResult.empty();
         }
 
         List<Event> events = new ArrayList<>(rows.size());
@@ -238,7 +251,7 @@ public class BusTransferPotentialJob {
             maxDepartureSecond = Math.max(maxDepartureSecond, event.departureSecond);
         }
         if (events.isEmpty()) {
-            return;
+            return ProcessResult.empty();
         }
 
         Map<String, List<Event>> eventsByStartStop = events.stream()
@@ -257,10 +270,28 @@ public class BusTransferPotentialJob {
         List<Row> journeyRows = new ArrayList<>();
         List<Row> fragmentRows = new ArrayList<>();
         List<Row> countRows = new ArrayList<>();
+        List<String> processedBucketKeys = new ArrayList<>();
+        Set<String> processedBucketKeySet = new HashSet<>(alreadyProcessedBucketKeys);
         long detailedJourneyCount = 0L;
         long possiblePerOrigin = Math.max(0, orderedStops.size() - 1L);
 
         for (int bucketSecond = firstBucket; bucketSecond <= lastBucket; bucketSecond += bucketMinutes * 60) {
+            int bucketMinute = bucketSecond / 60;
+            String bucketKey = serviceDateText + "|" + bucketMinute;
+            if (processedBucketKeySet.contains(bucketKey)) {
+                continue;
+            }
+            if (processedBucketKeys.size() >= maxBucketsToProcess) {
+                break;
+            }
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusTransferPotentialJob: processing %s bucketMinute=%d stops=%d events=%d%n",
+                    serviceDateText,
+                    bucketMinute,
+                    orderedStops.size(),
+                    events.size()
+            );
             Timestamp requestedDepartureAt = Timestamp.from(serviceDate.atStartOfDay(cityZone).plusSeconds(bucketSecond).toInstant());
             long possibleRequests = possiblePerOrigin * orderedStops.size();
             long reachableRequests = 0L;
@@ -302,7 +333,7 @@ public class BusTransferPotentialJob {
                             journeyId,
                             Date.valueOf(serviceDate),
                             weekdayIso,
-                            bucketSecond / 60,
+                            bucketMinute,
                             requestedDepartureAt,
                             originStopId,
                             first.startStopName,
@@ -325,7 +356,7 @@ public class BusTransferPotentialJob {
                                 journeyId,
                                 Date.valueOf(serviceDate),
                                 weekdayIso,
-                                bucketSecond / 60,
+                                bucketMinute,
                                 requestedDepartureAt,
                                 i + 1,
                                 fragment.internalRouteId,
@@ -350,7 +381,7 @@ public class BusTransferPotentialJob {
             countRows.add(RowFactory.create(
                     Date.valueOf(serviceDate),
                     weekdayIso,
-                    bucketSecond / 60,
+                    bucketMinute,
                     requestedDepartureAt,
                     possibleRequests,
                     reachableRequests,
@@ -358,8 +389,22 @@ public class BusTransferPotentialJob {
                     fragmentCount,
                     detailedJourneyCount >= maxDetailedJourneysPerDay
             ));
+            processedBucketKeys.add(bucketKey);
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusTransferPotentialJob: finished %s bucketMinute=%d reachable=%d detailed=%d fragments=%d truncated=%s%n",
+                    serviceDateText,
+                    bucketMinute,
+                    reachableRequests,
+                    detailedJourneyCount,
+                    fragmentCount,
+                    detailedJourneyCount >= maxDetailedJourneysPerDay
+            );
         }
 
+        if (processedBucketKeys.isEmpty()) {
+            return ProcessResult.empty();
+        }
         writePartitioned(spark.createDataFrame(journeyRows, journeySchema()), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
         writePartitioned(spark.createDataFrame(fragmentRows, fragmentSchema()), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
         writePartitioned(spark.createDataFrame(countRows, requestCountSchema()), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
@@ -371,6 +416,7 @@ public class BusTransferPotentialJob {
                 fragmentRows.size(),
                 countRows.size()
         );
+        return new ProcessResult(processedBucketKeys);
     }
 
     private static Map<String, StateNode> findBestJourneys(
@@ -604,7 +650,7 @@ public class BusTransferPotentialJob {
         dataset.repartition(Math.max(1, partitions), col("serviceDate"))
                 .write()
                 .mode("overwrite")
-                .partitionBy("serviceDate")
+                .partitionBy("serviceDate", "departureBucketMinute")
                 .parquet(outputDir.toAbsolutePath().toString());
     }
 
@@ -622,19 +668,23 @@ public class BusTransferPotentialJob {
         return MAPPER.readValue(stateFile.toFile(), State.class);
     }
 
-    private static void updateState(Path stateFile, List<LocalDate> serviceDates) throws Exception {
-        if (serviceDates.isEmpty()) {
+    private static void updateState(Path stateFile, List<String> processedBucketKeys) throws Exception {
+        if (processedBucketKeys.isEmpty()) {
             return;
         }
         State state = loadState(stateFile);
-        for (LocalDate serviceDate : serviceDates) {
-            String text = serviceDate.toString();
-            if (!state.processedServiceDates.contains(text)) {
-                state.processedServiceDates.add(text);
+        for (String bucketKey : processedBucketKeys) {
+            if (!state.processedBucketKeys.contains(bucketKey)) {
+                state.processedBucketKeys.add(bucketKey);
             }
-            state.lastProcessedServiceDate = text;
+            String serviceDate = bucketKey.split("\\|", 2)[0];
+            if (!state.processedServiceDates.contains(serviceDate)) {
+                state.processedServiceDates.add(serviceDate);
+            }
+            state.lastProcessedServiceDate = serviceDate;
         }
         state.processedServiceDates.sort(Comparator.naturalOrder());
+        state.processedBucketKeys.sort(Comparator.naturalOrder());
         state.updatedAt = Instant.now().atOffset(ZoneOffset.UTC).toString();
 
         Path tempFile = Files.createTempFile(stateFile.getParent(), stateFile.getFileName().toString(), ".tmp");
@@ -722,6 +772,19 @@ public class BusTransferPotentialJob {
         public String updatedAt;
         public String lastProcessedServiceDate;
         public List<String> processedServiceDates = new ArrayList<>();
+        public List<String> processedBucketKeys = new ArrayList<>();
+    }
+
+    private static final class ProcessResult {
+        private final List<String> processedBucketKeys;
+
+        private ProcessResult(List<String> processedBucketKeys) {
+            this.processedBucketKeys = processedBucketKeys;
+        }
+
+        private static ProcessResult empty() {
+            return new ProcessResult(List.of());
+        }
     }
 
     private static final class Event {

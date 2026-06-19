@@ -110,6 +110,8 @@ transfer-potential/summary-od-route-pattern-by-weekday-bucket
 
 The request grid is every route stop to every other route stop for every 10-minute bucket that has observed movement on the service date. Storing one explicit unreachable row for every OD pair and time bucket would create hundreds of millions of rows per day, so unreachable demand is represented exactly in `request-grid-counts` as `possibleRequestCount - reachableRequestCount`; detailed `journeys` and `journey-fragments` are stored for reachable shortest journeys. Most frequent transfer variants are represented by the `*route-pattern*` summaries: select the highest `sampleCount` for the requested OD scope, then use the average wait/ride/journey fields for that pattern.
 
+The job stores progress per `serviceDate|departureBucketMinute` and writes `journeys`, `journey-fragments`, and `request-grid-counts` partitioned by `serviceDate/departureBucketMinute`. This is deliberate: a full service day is too large to treat as one all-or-nothing write. Defaults are conservative (`BUS_TRANSFER_MAX_BUCKETS_PER_RUN=1`, `BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP=1`) so each nightly run creates visible durable progress without blocking the server. Raise those values only after measuring runtime and memory on production data.
+
 This is an additive layer. Existing `segment-trips`, overtake, dwell, speed-map, stop-last-pass, and dashboard calculations must not depend on transfer-potential outputs.
 
 ## Operational Rule
