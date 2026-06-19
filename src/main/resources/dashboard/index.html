@@ -168,6 +168,7 @@
           <a class="nav-link" href="./stop-last-pass">Stop Last Pass</a>
           <a class="nav-link" href="./overtakes">Overtakes</a>
           <a class="nav-link" href="./rubberiness">Rubberiness</a>
+          <a class="nav-link" href="./speed-map">Speed Map</a>
         </div>
       </div>
       <p class="subtitle">Cached metrics built from collected points, parquet analytics, and dashboard sidecar jobs.</p>
@@ -205,6 +206,18 @@
       <article class="card">
         <p class="label">Dwell > 1 Min</p>
         <p class="value" id="dwellEventsOver60Total">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Transfer Requests</p>
+        <p class="value" id="transferPotentialRequestsTotal">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Transfer Journeys</p>
+        <p class="value" id="transferPotentialJourneysTotal">...</p>
+      </article>
+      <article class="card">
+        <p class="label">Transfer Fragments</p>
+        <p class="value" id="transferPotentialFragmentsTotal">...</p>
       </article>
     </section>
 
@@ -275,6 +288,39 @@
           </div>
         </div>
         <div class="chart-box" id="dwellEventsChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Transfer Potential Requests</h2>
+            <p class="chart-meta">All stop-to-stop 10-minute request grid size</p>
+          </div>
+        </div>
+        <div class="chart-box" id="transferPotentialRequestsChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Transfer Potential Journeys</h2>
+            <p class="chart-meta">Reachable shortest journeys stored for the request grid</p>
+          </div>
+        </div>
+        <div class="chart-box" id="transferPotentialJourneysChart">
+          <div class="empty">Loading data...</div>
+        </div>
+      </article>
+      <article class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <h2 class="chart-title">Transfer Potential Fragments</h2>
+            <p class="chart-meta">Atomic ride fragments used by stored transfer journeys</p>
+          </div>
+        </div>
+        <div class="chart-box" id="transferPotentialFragmentsChart">
           <div class="empty">Loading data...</div>
         </div>
       </article>
@@ -396,6 +442,9 @@
       setText('physicalOvertakesTotal', fmtNumber.format(derivedTotals.physicalOvertakes || 0));
       setText('dwellEventsTotal', fmtNumber.format(derivedTotals.dwellEvents || 0));
       setText('dwellEventsOver60Total', fmtNumber.format(derivedTotals.dwellEventsOver60 || 0));
+      setText('transferPotentialRequestsTotal', fmtNumber.format(derivedTotals.transferPotentialRequests || 0));
+      setText('transferPotentialJourneysTotal', fmtNumber.format(derivedTotals.transferPotentialJourneys || 0));
+      setText('transferPotentialFragmentsTotal', fmtNumber.format(derivedTotals.transferPotentialFragments || 0));
 
       if (data.status === 'empty') {
         setText('rangeMeta', data.message || 'Cache is empty.');
@@ -416,6 +465,9 @@
       renderChart('physicalOvertakesChart', derivedSeries.physicalOvertakes || [], 'physical overtakes');
       renderChart('dwellEventsChart', derivedSeries.dwellEvents || [], 'dwell events');
       renderChart('dwellEventsOver60Chart', derivedSeries.dwellEventsOver60 || [], 'dwell events > 1 min');
+      renderChart('transferPotentialRequestsChart', derivedSeries.transferPotentialRequests || [], 'transfer requests');
+      renderChart('transferPotentialJourneysChart', derivedSeries.transferPotentialJourneys || [], 'transfer journeys');
+      renderChart('transferPotentialFragmentsChart', derivedSeries.transferPotentialFragments || [], 'transfer fragments');
     }
 
     load().catch(error => {

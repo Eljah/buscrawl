@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Buscrawl transfer potential aggregation during the quiet night window
+
+[Timer]
+OnCalendar=*-*-* 00:10:00
+OnCalendar=*-*-* 01:10:00
+OnCalendar=*-*-* 02:10:00
+OnCalendar=*-*-* 03:10:00
+AccuracySec=5min
+Persistent=false
+Unit=buscrawl-transfer-potential-nightly.service
+
+[Install]
+WantedBy=timers.target

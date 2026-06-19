@@ -78,6 +78,40 @@ Speed heatmap refresh is disabled by default because it can be much heavier:
 BUS_REFRESH_SPEED_CACHE=true bin/run-derived-ui-cache.sh
 ```
 
+## Nightly Transfer Potential
+
+Potential transfer journeys are intentionally outside the critical 5-minute catchup chain. They are derived from already persisted `traffic-behavior/segment-trips` facts and write only to a separate parquet tree:
+
+```text
+/home/eljah/data/buscrawl/transfer-potential
+```
+
+The job is scheduled by `buscrawl-transfer-potential-nightly.timer` and guarded by `bin/run-transfer-potential-nightly.sh`, which exits unless the local city time is in the quiet `00:00-04:00` window. This prevents all-pairs routing work from competing with daytime raw ingestion or critical derived catchup.
+
+Outputs:
+
+```text
+transfer-potential/journeys
+transfer-potential/journey-fragments
+transfer-potential/request-grid-counts
+transfer-potential/daily-od-summary
+transfer-potential/daily-od-bucket-summary
+transfer-potential/summary-od-all-days
+transfer-potential/summary-od-by-weekday
+transfer-potential/summary-od-by-bucket
+transfer-potential/summary-od-by-weekday-bucket
+transfer-potential/daily-od-route-pattern-summary
+transfer-potential/daily-od-bucket-route-pattern-summary
+transfer-potential/summary-od-route-pattern-all-days
+transfer-potential/summary-od-route-pattern-by-weekday
+transfer-potential/summary-od-route-pattern-by-bucket
+transfer-potential/summary-od-route-pattern-by-weekday-bucket
+```
+
+The request grid is every route stop to every other route stop for every 10-minute bucket that has observed movement on the service date. Storing one explicit unreachable row for every OD pair and time bucket would create hundreds of millions of rows per day, so unreachable demand is represented exactly in `request-grid-counts` as `possibleRequestCount - reachableRequestCount`; detailed `journeys` and `journey-fragments` are stored for reachable shortest journeys. Most frequent transfer variants are represented by the `*route-pattern*` summaries: select the highest `sampleCount` for the requested OD scope, then use the average wait/ride/journey fields for that pattern.
+
+This is an additive layer. Existing `segment-trips`, overtake, dwell, speed-map, stop-last-pass, and dashboard calculations must not depend on transfer-potential outputs.
+
 ## Operational Rule
 
 Backlog health should be judged by the critical chain, not by slow UI caches:

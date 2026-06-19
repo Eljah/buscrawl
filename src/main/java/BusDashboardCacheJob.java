@@ -1,6 +1,7 @@
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.RelationalGroupedDataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
@@ -69,6 +70,10 @@ public class BusDashboardCacheJob {
                 "BUS_TRAFFIC_BEHAVIOR_DIR",
                 "./var/bus/traffic-behavior"
         ));
+        Path transferPotentialDir = Path.of(System.getenv().getOrDefault(
+                "BUS_TRANSFER_POTENTIAL_DIR",
+                trafficBehaviorDir.resolveSibling("transfer-potential").toString()
+        ));
         String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
 
         Files.createDirectories(statsCacheFile.getParent());
@@ -129,7 +134,7 @@ public class BusDashboardCacheJob {
                     mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
                     mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
                 }
-                derivedStats = computeDerivedStats(spark, trafficBehaviorDir, statsStart, now);
+                derivedStats = computeDerivedStats(spark, trafficBehaviorDir, transferPotentialDir, statsStart, now);
             } finally {
                 spark.stop();
             }
@@ -162,9 +167,9 @@ public class BusDashboardCacheJob {
                 .collectAsList();
 
         for (Row row : rows) {
-            Timestamp bucketTime = row.getTimestamp(0);
+            Instant bucketTime = rowInstant(row, 0);
             long points = row.getLong(1);
-            statsBuckets.merge(bucketTime.toInstant(), points, Long::sum);
+            statsBuckets.merge(bucketTime, points, Long::sum);
         }
     }
 
@@ -188,8 +193,8 @@ public class BusDashboardCacheJob {
         previousDayMap.forEach((routeNumber, instant) -> routeCache.previousDay.merge(routeNumber, instant, BusDashboardCacheJob::maxInstant));
     }
 
-    private static DerivedStats computeDerivedStats(SparkSession spark, Path trafficBehaviorDir, Instant rangeStart, Instant rangeEnd) {
-        if (!Files.exists(trafficBehaviorDir)) {
+    private static DerivedStats computeDerivedStats(SparkSession spark, Path trafficBehaviorDir, Path transferPotentialDir, Instant rangeStart, Instant rangeEnd) {
+        if (!Files.exists(trafficBehaviorDir) && !Files.exists(transferPotentialDir)) {
             return DerivedStats.empty();
         }
 
@@ -234,6 +239,31 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 "dwellTimeSeconds > 60"
         ));
+        series.put("transferPotentialRequests", collectDerivedSeries(
+                spark,
+                transferPotentialDir.resolve("request-grid-counts"),
+                "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
+                null,
+                "possibleRequestCount"
+        ));
+        series.put("transferPotentialJourneys", collectDerivedSeries(
+                spark,
+                transferPotentialDir.resolve("journeys"),
+                "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
+                null
+        ));
+        series.put("transferPotentialFragments", collectDerivedSeries(
+                spark,
+                transferPotentialDir.resolve("journey-fragments"),
+                "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
+                null
+        ));
 
         Map<String, Long> totals = new LinkedHashMap<>();
         for (Map.Entry<String, List<Map<String, Object>>> entry : series.entrySet()) {
@@ -258,6 +288,18 @@ public class BusDashboardCacheJob {
             Instant rangeEnd,
             String filterExpression
     ) {
+        return collectDerivedSeries(spark, parquetDir, timestampColumn, rangeStart, rangeEnd, filterExpression, null);
+    }
+
+    private static List<Map<String, Object>> collectDerivedSeries(
+            SparkSession spark,
+            Path parquetDir,
+            String timestampColumn,
+            Instant rangeStart,
+            Instant rangeEnd,
+            String filterExpression,
+            String sumColumn
+    ) {
         if (!hasReadableParquetFiles(parquetDir)) {
             return List.of();
         }
@@ -271,18 +313,20 @@ public class BusDashboardCacheJob {
         if (filterExpression != null && !filterExpression.isBlank()) {
             filtered = filtered.filter(expr(filterExpression));
         }
-        List<Row> rows = filtered
+        RelationalGroupedDataset grouped = filtered
                 .withColumn("bucket_time", window(col(timestampColumn), "5 minutes").getField("start"))
-                .groupBy("bucket_time")
-                .count()
+                .groupBy("bucket_time");
+        List<Row> rows = (sumColumn == null || sumColumn.isBlank()
+                ? grouped.count()
+                : grouped.sum(sumColumn))
                 .sort("bucket_time")
                 .collectAsList();
 
         TreeMap<Instant, Long> bucketCounts = new TreeMap<>();
         for (Row row : rows) {
-            Timestamp bucketTime = row.getTimestamp(0);
+            Instant bucketTime = rowInstant(row, 0);
             long points = row.getLong(1);
-            bucketCounts.put(bucketTime.toInstant(), points);
+            bucketCounts.put(bucketTime, points);
         }
 
         List<Map<String, Object>> result = new ArrayList<>();
@@ -409,13 +453,33 @@ public class BusDashboardCacheJob {
         for (Row row : rows) {
             String internalRouteId = row.getString(0);
             String storedRouteNumber = row.getString(1);
-            Timestamp lastMovement = row.getTimestamp(2);
+            Instant lastMovement = rowInstant(row, 2);
             String routeNumber = routeMapper.getDisplayRouteNumber(internalRouteId, storedRouteNumber);
             if (routeNumber != null && lastMovement != null) {
-                result.merge(routeNumber, lastMovement.toInstant(), BusDashboardCacheJob::maxInstant);
+                result.merge(routeNumber, lastMovement, BusDashboardCacheJob::maxInstant);
             }
         }
         return result;
+    }
+
+    private static Instant rowInstant(Row row, int index) {
+        if (row.isNullAt(index)) {
+            return null;
+        }
+        Object value = row.get(index);
+        if (value instanceof Timestamp) {
+            return ((Timestamp) value).toInstant();
+        }
+        if (value instanceof LocalDateTime) {
+            return ((LocalDateTime) value).toInstant(ZoneOffset.UTC);
+        }
+        if (value instanceof Instant) {
+            return (Instant) value;
+        }
+        if (value instanceof String) {
+            return Instant.parse((String) value);
+        }
+        throw new IllegalArgumentException("Unsupported timestamp value at column " + index + ": " + value.getClass().getName());
     }
 
     private static Map<Instant, Long> loadStatsBuckets(Path statsCacheFile, Instant statsStart) throws IOException {

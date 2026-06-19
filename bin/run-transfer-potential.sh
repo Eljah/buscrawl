@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+
+cd /home/eljah/apps/buscrawl
+
+export BUS_TRAFFIC_BEHAVIOR_DIR=${BUS_TRAFFIC_BEHAVIOR_DIR:-/home/eljah/data/buscrawl/traffic-behavior}
+export BUS_SEGMENT_TRIPS_DIR=${BUS_SEGMENT_TRIPS_DIR:-/home/eljah/data/buscrawl/traffic-behavior/segment-trips}
+export BUS_TRANSFER_POTENTIAL_DIR=${BUS_TRANSFER_POTENTIAL_DIR:-/home/eljah/data/buscrawl/transfer-potential}
+export BUS_TRANSFER_POTENTIAL_STATE_FILE=${BUS_TRANSFER_POTENTIAL_STATE_FILE:-/home/eljah/data/buscrawl/transfer-potential/aggregation-state.json}
+export BUS_TRANSFER_POTENTIAL_SPARK_LOCAL_DIR=${BUS_TRANSFER_POTENTIAL_SPARK_LOCAL_DIR:-/home/eljah/data/buscrawl/transfer-potential-spark-temp}
+export BUS_TRANSFER_POTENTIAL_SPARK_MASTER=${BUS_TRANSFER_POTENTIAL_SPARK_MASTER:-local[2]}
+export BUS_TRANSFER_POTENTIAL_DRIVER_MEMORY=${BUS_TRANSFER_POTENTIAL_DRIVER_MEMORY:-8g}
+export BUS_TRANSFER_POTENTIAL_EXECUTOR_MEMORY=${BUS_TRANSFER_POTENTIAL_EXECUTOR_MEMORY:-8g}
+export BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS=${BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS:-24}
+export BUS_TRANSFER_BUCKET_MINUTES=${BUS_TRANSFER_BUCKET_MINUTES:-10}
+export BUS_TRANSFER_MAX_RIDES=${BUS_TRANSFER_MAX_RIDES:-10}
+export BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP=${BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP:-64}
+export BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY=${BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY:-5000000}
+export BUS_CITY_TIMEZONE=${BUS_CITY_TIMEZONE:-Europe/Moscow}
+export SPARK_LOCAL_IP=127.0.0.1
+export SPARK_LOCAL_HOSTNAME=localhost
+export JAVA_TOOL_OPTIONS='--add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
+
+exec /usr/bin/java \
+  -Dspark.driver.host=127.0.0.1 \
+  -Dspark.driver.bindAddress=127.0.0.1 \
+  -cp "target/classes:target/dependency/*" \
+  BusTransferPotentialJob
