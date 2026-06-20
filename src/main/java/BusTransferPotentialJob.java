@@ -79,13 +79,15 @@ public class BusTransferPotentialJob {
         int maxRides = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_RIDES", "10"));
         int maxCandidateEventsPerStop = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_CANDIDATE_EVENTS_PER_STOP", "1"));
         int outputPartitions = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS", "24"));
-        int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "1"));
+        int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "100000"));
+        String stopBeforeLocalTimeText = System.getenv().getOrDefault("BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME", "03:55");
         long maxDetailedJourneysPerDay = Long.parseLong(System.getenv().getOrDefault(
                 "BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY",
                 "5000000"
         ));
         String targetDateText = System.getenv().getOrDefault("BUS_TRANSFER_TARGET_DATE", "").trim();
         boolean backfill = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TRANSFER_BACKFILL", "false"));
+        Instant stopDeadline = computeStopDeadline(cityZone, stopBeforeLocalTimeText);
 
         Files.createDirectories(outputRoot);
         Files.createDirectories(stateFile.getParent());
@@ -124,6 +126,10 @@ public class BusTransferPotentialJob {
             List<String> processedBucketKeys = new ArrayList<>();
             int remainingBuckets = Math.max(1, maxBucketsPerRun);
             for (LocalDate serviceDate : serviceDates) {
+                if (Instant.now().isAfter(stopDeadline)) {
+                    System.out.println("BusTransferPotentialJob: stopping before local deadline " + stopBeforeLocalTimeText);
+                    break;
+                }
                 ProcessResult result = processServiceDate(
                         spark,
                         allSegmentTrips,
@@ -137,7 +143,8 @@ public class BusTransferPotentialJob {
                         maxDetailedJourneysPerDay,
                         outputPartitions,
                         state.processedBucketKeys,
-                        remainingBuckets
+                        remainingBuckets,
+                        stopDeadline
                 );
                 processedBucketKeys.addAll(result.processedBucketKeys);
                 remainingBuckets -= result.processedBucketKeys.size();
@@ -146,7 +153,7 @@ public class BusTransferPotentialJob {
                 }
             }
             if (processedBucketKeys.isEmpty()) {
-                System.out.println("BusTransferPotentialJob: no unprocessed 10-minute buckets found");
+                System.out.println("BusTransferPotentialJob: no unprocessed 10-minute buckets completed in this run");
                 return;
             }
             rebuildSummaries(spark, outputRoot, outputPartitions);
@@ -201,7 +208,8 @@ public class BusTransferPotentialJob {
             long maxDetailedJourneysPerDay,
             int outputPartitions,
             Collection<String> alreadyProcessedBucketKeys,
-            int maxBucketsToProcess
+            int maxBucketsToProcess,
+            Instant stopDeadline
     ) {
         String serviceDateText = serviceDate.toString();
         Dataset<Row> dayTrips = allSegmentTrips
@@ -276,6 +284,10 @@ public class BusTransferPotentialJob {
         long possiblePerOrigin = Math.max(0, orderedStops.size() - 1L);
 
         for (int bucketSecond = firstBucket; bucketSecond <= lastBucket; bucketSecond += bucketMinutes * 60) {
+            if (Instant.now().isAfter(stopDeadline)) {
+                System.out.println("BusTransferPotentialJob: reached stop deadline before next bucket");
+                break;
+            }
             int bucketMinute = bucketSecond / 60;
             String bucketKey = serviceDateText + "|" + bucketMinute;
             if (processedBucketKeySet.contains(bucketKey)) {
@@ -621,6 +633,12 @@ public class BusTransferPotentialJob {
         return topology.buildStops().stream()
                 .map(stop -> String.valueOf(stop.get("stopId")))
                 .collect(Collectors.toCollection(TreeSet::new));
+    }
+
+    private static Instant computeStopDeadline(ZoneId cityZone, String stopBeforeLocalTimeText) {
+        LocalTime stopTime = LocalTime.parse(stopBeforeLocalTimeText);
+        LocalDate today = LocalDate.now(cityZone);
+        return today.atTime(stopTime).atZone(cityZone).toInstant();
     }
 
     private static int floorToBucket(int secondOfDay, int bucketMinutes) {
