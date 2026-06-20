@@ -239,29 +239,23 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 "dwellTimeSeconds > 60"
         ));
-        series.put("transferPotentialRequests", collectDerivedSeries(
+        series.put("transferPotentialRequests", collectLatestDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("request-grid-counts"),
                 "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
                 null,
                 "possibleRequestCount"
         ));
-        series.put("transferPotentialJourneys", collectDerivedSeries(
+        series.put("transferPotentialJourneys", collectLatestDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("journeys"),
                 "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
                 null
         ));
-        series.put("transferPotentialFragments", collectDerivedSeries(
+        series.put("transferPotentialFragments", collectLatestDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("journey-fragments"),
                 "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
                 null
         ));
 
@@ -289,6 +283,50 @@ public class BusDashboardCacheJob {
             String filterExpression
     ) {
         return collectDerivedSeries(spark, parquetDir, timestampColumn, rangeStart, rangeEnd, filterExpression, null);
+    }
+
+    private static List<Map<String, Object>> collectLatestDerivedSeries(
+            SparkSession spark,
+            Path parquetDir,
+            String timestampColumn,
+            String filterExpression
+    ) {
+        return collectLatestDerivedSeries(spark, parquetDir, timestampColumn, filterExpression, null);
+    }
+
+    private static List<Map<String, Object>> collectLatestDerivedSeries(
+            SparkSession spark,
+            Path parquetDir,
+            String timestampColumn,
+            String filterExpression,
+            String sumColumn
+    ) {
+        if (!hasReadableParquetFiles(parquetDir)) {
+            return List.of();
+        }
+        Dataset<Row> dataset = spark.read()
+                .parquet(parquetDir.toAbsolutePath().toString())
+                .filter(col(timestampColumn).isNotNull());
+        if (filterExpression != null && !filterExpression.isBlank()) {
+            dataset = dataset.filter(expr(filterExpression));
+        }
+        List<Row> maxRows = dataset.agg(max(timestampColumn).alias("latest_time")).collectAsList();
+        if (maxRows.isEmpty() || maxRows.get(0).isNullAt(0)) {
+            return List.of();
+        }
+        Instant latestTime = rowInstant(maxRows.get(0), 0);
+        if (latestTime == null) {
+            return List.of();
+        }
+        return collectDerivedSeries(
+                spark,
+                parquetDir,
+                timestampColumn,
+                latestTime.minus(STATS_WINDOW),
+                latestTime,
+                filterExpression,
+                sumColumn
+        );
     }
 
     private static List<Map<String, Object>> collectDerivedSeries(
