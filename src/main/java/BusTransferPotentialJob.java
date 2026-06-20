@@ -134,6 +134,7 @@ public class BusTransferPotentialJob {
                         spark,
                         allSegmentTrips,
                         outputRoot,
+                        stateFile,
                         serviceDate,
                         cityZone,
                         topologyStops,
@@ -199,6 +200,7 @@ public class BusTransferPotentialJob {
             SparkSession spark,
             Dataset<Row> allSegmentTrips,
             Path outputRoot,
+            Path stateFile,
             LocalDate serviceDate,
             ZoneId cityZone,
             Set<String> topologyStops,
@@ -210,7 +212,7 @@ public class BusTransferPotentialJob {
             Collection<String> alreadyProcessedBucketKeys,
             int maxBucketsToProcess,
             Instant stopDeadline
-    ) {
+    ) throws Exception {
         String serviceDateText = serviceDate.toString();
         Dataset<Row> dayTrips = allSegmentTrips
                 .filter(expr("CAST(serviceDate AS STRING) = '" + serviceDateText + "'"))
@@ -275,9 +277,6 @@ public class BusTransferPotentialJob {
         List<String> orderedStops = new ArrayList<>(stopIds);
         int firstBucket = floorToBucket(minDepartureSecond, bucketMinutes);
         int lastBucket = floorToBucket(maxDepartureSecond, bucketMinutes);
-        List<Row> journeyRows = new ArrayList<>();
-        List<Row> fragmentRows = new ArrayList<>();
-        List<Row> countRows = new ArrayList<>();
         List<String> processedBucketKeys = new ArrayList<>();
         Set<String> processedBucketKeySet = new HashSet<>(alreadyProcessedBucketKeys);
         long detailedJourneyCount = 0L;
@@ -308,6 +307,9 @@ public class BusTransferPotentialJob {
             long possibleRequests = possiblePerOrigin * orderedStops.size();
             long reachableRequests = 0L;
             long fragmentCount = 0L;
+            List<Row> journeyRows = new ArrayList<>();
+            List<Row> fragmentRows = new ArrayList<>();
+            List<Row> countRows = new ArrayList<>();
 
             for (String originStopId : orderedStops) {
                 Map<String, StateNode> bestByDestination = findBestJourneys(
@@ -402,9 +404,13 @@ public class BusTransferPotentialJob {
                     detailedJourneyCount >= maxDetailedJourneysPerDay
             ));
             processedBucketKeys.add(bucketKey);
+            writePartitioned(spark.createDataFrame(journeyRows, journeySchema()), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
+            writePartitioned(spark.createDataFrame(fragmentRows, fragmentSchema()), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
+            writePartitioned(spark.createDataFrame(countRows, requestCountSchema()), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
+            updateState(stateFile, List.of(bucketKey));
             System.out.printf(
                     Locale.ROOT,
-                    "BusTransferPotentialJob: finished %s bucketMinute=%d reachable=%d detailed=%d fragments=%d truncated=%s%n",
+                    "BusTransferPotentialJob: finished and wrote %s bucketMinute=%d reachable=%d detailed=%d fragments=%d truncated=%s%n",
                     serviceDateText,
                     bucketMinute,
                     reachableRequests,
@@ -417,16 +423,11 @@ public class BusTransferPotentialJob {
         if (processedBucketKeys.isEmpty()) {
             return ProcessResult.empty();
         }
-        writePartitioned(spark.createDataFrame(journeyRows, journeySchema()), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
-        writePartitioned(spark.createDataFrame(fragmentRows, fragmentSchema()), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
-        writePartitioned(spark.createDataFrame(countRows, requestCountSchema()), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
         System.out.printf(
                 Locale.ROOT,
-                "BusTransferPotentialJob: %s wrote %d detailed journeys, %d fragments, %d request buckets%n",
+                "BusTransferPotentialJob: %s completed %d request buckets%n",
                 serviceDateText,
-                journeyRows.size(),
-                fragmentRows.size(),
-                countRows.size()
+                processedBucketKeys.size()
         );
         return new ProcessResult(processedBucketKeys);
     }
