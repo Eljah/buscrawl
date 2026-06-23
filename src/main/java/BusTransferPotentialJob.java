@@ -100,7 +100,7 @@ public class BusTransferPotentialJob {
         ));
         int outputPartitions = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS", "24"));
         int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "100000"));
-        String stopBeforeLocalTimeText = System.getenv().getOrDefault("BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME", "03:55");
+        String stopBeforeLocalTimeText = System.getenv().getOrDefault("BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME", "").trim();
         long maxDetailedJourneysPerDay = Long.parseLong(System.getenv().getOrDefault(
                 "BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY",
                 "5000000"
@@ -993,6 +993,9 @@ public class BusTransferPotentialJob {
     }
 
     private static Instant computeStopDeadline(ZoneId cityZone, String stopBeforeLocalTimeText) {
+        if (stopBeforeLocalTimeText == null || stopBeforeLocalTimeText.isBlank()) {
+            return Instant.MAX;
+        }
         LocalTime stopTime = LocalTime.parse(stopBeforeLocalTimeText);
         LocalDate today = LocalDate.now(cityZone);
         return today.atTime(stopTime).atZone(cityZone).toInstant();

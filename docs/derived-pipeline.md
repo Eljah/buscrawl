@@ -86,7 +86,7 @@ Potential transfer journeys are intentionally outside the critical 5-minute catc
 /home/eljah/data/buscrawl/transfer-potential
 ```
 
-The job is scheduled by `buscrawl-transfer-potential-nightly.timer` and guarded by `bin/run-transfer-potential-nightly.sh`, which exits unless the local city time is in the quiet `00:00-04:00` window. This prevents all-pairs routing work from competing with daytime raw ingestion or critical derived catchup.
+The job is scheduled by `buscrawl-transfer-potential-nightly.timer` and guarded by `bin/run-transfer-potential-nightly.sh`, which exits unless the local city time is in the quiet `00:00-04:00` window. The window limits only new starts: a transfer run that started during the window is allowed to finish and persist its parquet/state after 04:00. This prevents repeated daytime starts while avoiding partially processed service days.
 
 Outputs:
 
