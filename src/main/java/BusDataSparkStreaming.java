@@ -33,6 +33,10 @@ public class BusDataSparkStreaming {
                 "BUS_RAW_SPOOL_MAX_FILES_PER_TRIGGER",
                 "64"
         ));
+        int outputFilesPerBatch = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_PARQUET_OUTPUT_FILES_PER_BATCH",
+                "1"
+        ));
 
         try {
             Files.createDirectories(localDir);
@@ -96,7 +100,16 @@ public class BusDataSparkStreaming {
             busData.writeStream()
                     .foreachBatch((dataset, batchId) -> {
                         System.out.printf("Batch #%d received%n", batchId);
-                        dataset.write()
+                        dataset.dropDuplicates(
+                                        "internalRouteId",
+                                        "realRouteNumber",
+                                        "plate",
+                                        "eventTime",
+                                        "latitude",
+                                        "longitude"
+                                )
+                                .coalesce(Math.max(1, outputFilesPerBatch))
+                                .write()
                                 .mode("append")
                                 .parquet(outputDir.toAbsolutePath().toString());
                     })

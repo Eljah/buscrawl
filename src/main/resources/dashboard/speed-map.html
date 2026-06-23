@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Speed Map</title>
+  <style>
+    :root { --bg:#edf1e8; --panel:rgba(255,252,244,.96); --ink:#1c2a22; --muted:#637066; --shadow:0 16px 42px rgba(28,42,34,.11); --slow:#d2362f; --fast:#26a269; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:radial-gradient(circle at top left,#ffe0b8 0,transparent 30%), linear-gradient(180deg,#eef5e6 0%,var(--bg) 100%); }
+    .wrap { max-width:1480px; margin:0 auto; padding:28px 18px 36px; }
+    .topline,.control-row,.map-meta,.item-title { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+    .hero { display:grid; gap:12px; margin-bottom:18px; }
+    h1 { margin:0; font-size:clamp(28px,4.8vw,52px); line-height:.95; letter-spacing:-.03em; }
+    .links { display:flex; gap:14px; flex-wrap:wrap; }
+    .links a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(28,42,34,.25); font-size:15px; }
+    .subtitle,.sidebar-meta,.item-note,.map-meta,.control-row { color:var(--muted); font-size:14px; line-height:1.45; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:16px; align-items:start; }
+    .card { background:var(--panel); border:1px solid rgba(28,42,34,.08); border-radius:22px; box-shadow:var(--shadow); }
+    .map-card,.sidebar { padding:16px; }
+    .controls { display:grid; gap:12px; margin-bottom:12px; }
+    .radio-group { display:flex; gap:10px; flex-wrap:wrap; }
+    .radio-group label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
+    select,input[type="text"] { border:1px solid rgba(28,42,34,.16); border-radius:12px; background:rgba(255,255,255,.88); padding:9px 12px; font:inherit; color:var(--ink); }
+    .map-shell { position:relative; height:min(78vh,920px); min-height:520px; overflow:hidden; border-radius:18px; background:#6d7277; border:1px solid rgba(28,42,34,.08); cursor:grab; user-select:none; }
+    .map-shell.dragging { cursor:grabbing; }
+    .map-zoom { position:absolute; right:14px; top:14px; z-index:5; display:grid; gap:8px; }
+    .map-zoom button { width:42px; height:42px; border:1px solid rgba(28,42,34,.16); border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(28,42,34,.12); }
+    .tile-layer,.heatmap-tiles,.overlay-layer { position:absolute; inset:0; }
+    .tile-layer img,.heatmap-tiles img { position:absolute; width:256px; height:256px; }
+    .heatmap-tiles { z-index:3; pointer-events:none; }
+    .overlay-layer { overflow:visible; z-index:4; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; color:rgba(255,255,255,.9); text-align:center; padding:24px; background:rgba(34,39,44,.20); backdrop-filter:blur(2px); }
+    .list { display:grid; gap:8px; max-height:calc(min(78vh,920px) - 140px); overflow:auto; padding-right:4px; }
+    .item { border:1px solid rgba(28,42,34,.08); border-radius:14px; background:rgba(255,255,255,.58); padding:12px 13px; cursor:pointer; }
+    .item.active { border-color:rgba(38,162,105,.65); box-shadow:0 0 0 2px rgba(38,162,105,.16); }
+    .item-name { font-size:18px; }
+    .item-time { color:var(--muted); font-size:14px; white-space:nowrap; }
+    .item-note { margin-top:6px; font-size:13px; }
+    .legend { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:13px; color:var(--muted); }
+    .legend-ramp { width:170px; height:10px; border-radius:999px; background:linear-gradient(90deg,var(--slow),#f4c542,var(--fast)); border:1px solid rgba(28,42,34,.12); }
+    @media (max-width:1120px) { .layout { grid-template-columns:1fr; } .list { max-height:none; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <div class="topline">
+      <h1>Speed Map</h1>
+      <div class="links">
+        <a href="./">Dashboard</a>
+        <a href="./overtakes">Overtakes</a>
+        <a href="./rubberiness">Rubberiness</a>
+        <a href="./stop-last-pass">Stop Last Pass</a>
+      </div>
+    </div>
+    <div class="subtitle">Speed analytics built from stop-to-stop segment trips. Red means slower movement, green means faster movement. Point heatmap is intentionally not tied to route identity.</div>
+  </section>
+
+  <section class="layout">
+    <article class="card map-card">
+      <div class="controls">
+        <div class="control-row">
+          <strong>Mode</strong>
+          <div class="radio-group" id="modeGroup">
+            <label><input type="radio" name="mode" value="point" checked> Spatial Bucket Heatmap</label>
+            <label><input type="radio" name="mode" value="physical"> Physical Segment</label>
+            <label><input type="radio" name="mode" value="routeSegment"> Route + Segment</label>
+            <label><input type="radio" name="mode" value="route"> Route</label>
+          </div>
+        </div>
+        <div class="control-row">
+          <strong>Period</strong>
+          <div class="radio-group" id="periodGroup">
+            <label><input type="radio" name="periodMode" value="previous" checked> Previous Day</label>
+            <label><input type="radio" name="periodMode" value="all"> All Days</label>
+            <label><input type="radio" name="periodMode" value="weekday"> Weekday</label>
+          </div>
+          <select id="weekdaySelect"></select>
+        </div>
+        <div class="control-row">
+          <strong>Sort</strong>
+          <select id="sortField">
+            <option value="speed">Average Speed</option>
+            <option value="samples">Samples</option>
+            <option value="latest">Latest Trip</option>
+          </select>
+          <select id="sortDir">
+            <option value="asc">Ascending</option>
+            <option value="desc">Descending</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <strong>Filter</strong>
+          <input id="filterInput" type="text" placeholder="Route, stop, segment">
+        </div>
+      </div>
+      <div class="map-meta">
+        <div id="updatedAt">Updated: ...</div>
+        <div id="modeMeta">Mode: ...</div>
+        <div id="countMeta">Items: ...</div>
+      </div>
+      <div class="legend"><span>Slow</span><span class="legend-ramp"></span><span>Fast</span></div>
+      <div class="map-shell" id="map">
+        <div class="map-zoom">
+          <button type="button" id="zoomIn">+</button>
+          <button type="button" id="zoomOut">-</button>
+        </div>
+        <div class="tile-layer" id="tiles"></div>
+        <div class="heatmap-tiles" id="heatmapTiles"></div>
+        <svg class="overlay-layer" id="overlay"></svg>
+        <div class="empty" id="emptyState">Loading...</div>
+      </div>
+    </article>
+    <aside class="card sidebar">
+      <h2 id="sidebarTitle">Speed Items</h2>
+      <div class="sidebar-meta" id="sidebarMeta">Click a map line or a row to focus it.</div>
+      <div class="list" id="list"></div>
+    </aside>
+  </section>
+</div>
+
+<script>
+const dateTimeFormatter = new Intl.DateTimeFormat('ru-RU', { timeZone:'Europe/Moscow', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+const mapEl = document.getElementById('map');
+const tilesEl = document.getElementById('tiles');
+const heatmapTilesEl = document.getElementById('heatmapTiles');
+const overlayEl = document.getElementById('overlay');
+const emptyEl = document.getElementById('emptyState');
+const listEl = document.getElementById('list');
+const filterInput = document.getElementById('filterInput');
+const weekdaySelect = document.getElementById('weekdaySelect');
+const sortFieldSelect = document.getElementById('sortField');
+const sortDirSelect = document.getElementById('sortDir');
+const state = { config:null, payload:null, centerLat:55.79, centerLon:49.12, zoom:12, mode:'point', periodMode:'previous', weekday:'1', sortField:'speed', sortDir:'asc', filterText:'', selectedKey:'', dragging:false, dragStartX:0, dragStartY:0, dragStartCenterX:0, dragStartCenterY:0 };
+
+function formatDate(v){ return v ? `${dateTimeFormatter.format(new Date(v))} MSK` : 'no data'; }
+function lonToWorldX(lon,z){ return ((lon + 180) / 360) * 256 * Math.pow(2, z); }
+function latToWorldY(lat,z){ const sin = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * 256 * Math.pow(2, z); }
+function worldToLon(x,z){ return x / (256 * Math.pow(2, z)) * 360 - 180; }
+function worldToLat(y,z){ const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
+function project(lat,lon,z){ return {x:lonToWorldX(lon,z), y:latToWorldY(lat,z)}; }
+function tileUrl(z,x,y){ return state.config.tileUrlTemplate.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y)); }
+function getViewportOrigin(){ const c=project(state.centerLat,state.centerLon,state.zoom); return { left:c.x-mapEl.clientWidth/2, top:c.y-mapEl.clientHeight/2 }; }
+function normalize(v){ return String(v || '').trim().toLowerCase(); }
+function escapeHtml(v){ return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'); }
+function escapeAttr(v){ return escapeHtml(v).replaceAll("'", '&#39;'); }
+function speedColor(speed){ const n=Math.max(0,Math.min(1,Number(speed||0)/40)); const r=Math.round(210*(1-n)+38*n); const g=Math.round(54*(1-n)+162*n); const b=Math.round(47*(1-n)+105*n); return `rgb(${r},${g},${b})`; }
+function sampleCount(item){ return Number(item.sampleCount || item.totalSamples || 0); }
+function itemKey(item){ if(state.mode==='point') return `${item.pointLatitude}|${item.pointLongitude}`; if(state.mode==='physical') return item.physicalSegmentId; if(state.mode==='routeSegment') return item.segmentId; return item.routeNumber; }
+function itemMetric(item){ if(state.sortField==='samples') return sampleCount(item); if(state.sortField==='latest') return Date.parse(item.latestTripAt || 0) || 0; return Number(item.avgSpeedKmh || 0); }
+function itemText(item){ return [item.routeNumber,item.segmentId,item.physicalSegmentId,item.startStopName,item.endStopName,item.pointLatitude,item.pointLongitude].filter(Boolean).join(' ').toLowerCase(); }
+function section(){ const p=state.payload || {}; if(state.mode==='point') return p.pointData || {}; if(state.mode==='physical') return p.physicalSegmentData || {}; if(state.mode==='routeSegment') return p.routeSegmentData || {}; return p.routeData || {}; }
+function dataset(){ const s=section(); if(state.periodMode==='previous') return s.previousDay || []; if(state.periodMode==='all') return s.allDays || []; return (s.weekday || {})[state.weekday] || []; }
+function filteredItems(){
+  const q=normalize(state.filterText);
+  const dir=state.sortDir==='asc' ? 1 : -1;
+  return dataset().filter(item => !q || itemText(item).includes(q)).sort((a,b)=>(itemMetric(a)-itemMetric(b))*dir).slice(0, 20000);
+}
+function renderTiles(){
+  if(!state.config) return;
+  const z=state.zoom; const origin=getViewportOrigin();
+  const startX=Math.floor(origin.left/256); const endX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const startY=Math.floor(origin.top/256); const endY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  const parts=[];
+  for(let x=startX;x<=endX;x++) for(let y=startY;y<=endY;y++) parts.push(`<img src="${tileUrl(z,x,y)}" style="left:${x*256-origin.left}px;top:${y*256-origin.top}px">`);
+  tilesEl.innerHTML=parts.join('');
+}
+function heatmapTileUrl(z,x,y){
+  const period = state.periodMode === 'weekday' ? `weekday/${state.weekday}` : state.periodMode;
+  return `./tiles/speed/point-heatmap/${period}/${z}/${x}/${y}.png?v=${encodeURIComponent(state.payload?.updatedAt || '')}`;
+}
+function renderHeatmapTiles(){
+  if(!state.config || state.mode!=='point'){ heatmapTilesEl.innerHTML=''; return; }
+  const z=state.zoom; const origin=getViewportOrigin();
+  const startX=Math.floor(origin.left/256); const endX=Math.floor((origin.left+mapEl.clientWidth)/256);
+  const startY=Math.floor(origin.top/256); const endY=Math.floor((origin.top+mapEl.clientHeight)/256);
+  const parts=[];
+  for(let x=startX;x<=endX;x++) for(let y=startY;y<=endY;y++) parts.push(`<img src="${heatmapTileUrl(z,x,y)}" style="left:${x*256-origin.left}px;top:${y*256-origin.top}px">`);
+  heatmapTilesEl.innerHTML=parts.join('');
+}
+function segmentPath(item, origin){
+  const a=project(Number(item.startStopLatitude),Number(item.startStopLongitude),state.zoom);
+  const b=project(Number(item.endStopLatitude),Number(item.endStopLongitude),state.zoom);
+  return `M ${(a.x-origin.left).toFixed(2)} ${(a.y-origin.top).toFixed(2)} L ${(b.x-origin.left).toFixed(2)} ${(b.y-origin.top).toFixed(2)}`;
+}
+function routeShape(routeNumber, origin){
+  const route=(state.payload.routeShapes||[]).find(r=>r.routeNumber===routeNumber);
+  if(!route) return '';
+  return (route.paths||[]).map(path => {
+    let started=false;
+    return path.map(p => { const pp=project(Number(p.latitude),Number(p.longitude),state.zoom); const cmd=started?'L':'M'; started=true; return `${cmd} ${(pp.x-origin.left).toFixed(2)} ${(pp.y-origin.top).toFixed(2)}`; }).join(' ');
+  }).join(' ');
+}
+function renderOverlay(){
+  const origin=getViewportOrigin(); const items=filteredItems();
+  if(state.mode==='point'){ overlayEl.innerHTML=''; return; }
+  const maxSamples=Math.max(...items.map(sampleCount),1);
+  const parts=[];
+  for(const item of items){
+    const key=itemKey(item); const active=key===state.selectedKey; const color=speedColor(item.avgSpeedKmh);
+    const width=active?7:Math.max(2.2, 2 + sampleCount(item)/maxSamples*5);
+    const d=state.mode==='route' ? routeShape(item.routeNumber, origin) : segmentPath(item, origin);
+    if(!d) continue;
+    parts.push(`<path data-key="${escapeAttr(key)}" d="${d}" fill="none" stroke="${color}" stroke-width="${width.toFixed(1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${active?0.95:0.72}" style="pointer-events:stroke;cursor:pointer"><title>${escapeAttr(label(item))}</title></path>`);
+  }
+  overlayEl.setAttribute('viewBox',`0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+  overlayEl.innerHTML=parts.join('');
+  overlayEl.querySelectorAll('[data-key]').forEach(el=>el.addEventListener('click',()=>{ state.selectedKey=el.dataset.key; renderAll(); }));
+}
+function label(item){ if(state.mode==='point') return `${item.pointLatitude}, ${item.pointLongitude}`; if(state.mode==='route') return `route ${item.routeNumber}`; return `${item.routeNumber ? `route ${item.routeNumber}: ` : ''}${item.startStopName} -> ${item.endStopName}`; }
+function note(item){
+  const samples = state.periodMode === 'previous' ? `${sampleCount(item)} samples` : `${sampleCount(item)} samples; ${item.sampleDays || 0} days`;
+  return `${Number(item.avgSpeedKmh||0).toFixed(1)} km/h avg; min ${Number(item.minSpeedKmh||0).toFixed(1)}; max ${Number(item.maxSpeedKmh||0).toFixed(1)}; ${samples}; latest ${formatDate(item.latestTripAt)}`;
+}
+function renderList(){
+  const items=filteredItems();
+  document.getElementById('countMeta').textContent=`Items: ${items.length}`;
+  document.getElementById('modeMeta').textContent=`Mode: ${state.mode}; period: ${state.periodMode}`;
+  listEl.innerHTML=items.map(item => {
+    const key=itemKey(item); const active=key===state.selectedKey;
+    return `<div class="item ${active?'active':''}" data-key="${escapeAttr(key)}"><div class="item-title"><span class="item-name">${escapeHtml(label(item))}</span><span class="item-time">${Number(item.avgSpeedKmh||0).toFixed(1)} km/h</span></div><div class="item-note">${escapeHtml(note(item))}</div></div>`;
+  }).join('') || '<div class="item">No speed data for this selection.</div>';
+  listEl.querySelectorAll('[data-key]').forEach(el=>el.addEventListener('click',()=>{ state.selectedKey=el.dataset.key; renderAll(); }));
+}
+function renderAll(){ renderTiles(); renderHeatmapTiles(); renderOverlay(); renderList(); emptyEl.style.display = state.payload ? 'none' : 'grid'; }
+function zoom(delta){ const next=Math.max(state.config.minZoom,Math.min(state.config.maxZoom,state.zoom+delta)); if(next!==state.zoom){ state.zoom=next; renderAll(); } }
+function initControls(){
+  for(const weekday of state.payload.weekdays || []) weekdaySelect.insertAdjacentHTML('beforeend',`<option value="${weekday.weekdayIso}">${weekday.label}</option>`);
+  weekdaySelect.value=state.weekday;
+  document.querySelectorAll('input[name="mode"]').forEach(input=>input.addEventListener('change',()=>{ state.mode=input.value; state.selectedKey=''; renderAll(); }));
+  document.querySelectorAll('input[name="periodMode"]').forEach(input=>input.addEventListener('change',()=>{ state.periodMode=input.value; state.selectedKey=''; renderAll(); }));
+  weekdaySelect.addEventListener('change',()=>{ state.weekday=weekdaySelect.value; renderAll(); });
+  sortFieldSelect.addEventListener('change',()=>{ state.sortField=sortFieldSelect.value; renderAll(); });
+  sortDirSelect.addEventListener('change',()=>{ state.sortDir=sortDirSelect.value; renderAll(); });
+  filterInput.addEventListener('input',()=>{ state.filterText=filterInput.value; renderAll(); });
+  document.getElementById('zoomIn').addEventListener('click',()=>zoom(1));
+  document.getElementById('zoomOut').addEventListener('click',()=>zoom(-1));
+  mapEl.addEventListener('mousedown', e=>{ state.dragging=true; state.dragStartX=e.clientX; state.dragStartY=e.clientY; const c=project(state.centerLat,state.centerLon,state.zoom); state.dragStartCenterX=c.x; state.dragStartCenterY=c.y; mapEl.classList.add('dragging'); });
+  window.addEventListener('mousemove', e=>{ if(!state.dragging) return; const dx=state.dragStartX-e.clientX, dy=state.dragStartY-e.clientY; state.centerLon=worldToLon(state.dragStartCenterX+dx,state.zoom); state.centerLat=worldToLat(state.dragStartCenterY+dy,state.zoom); renderAll(); });
+  window.addEventListener('mouseup',()=>{ state.dragging=false; mapEl.classList.remove('dragging'); });
+  window.addEventListener('resize', renderAll);
+}
+async function load(){
+  const [configResponse, payloadResponse] = await Promise.all([fetch('./api/map-config',{cache:'no-store'}), fetch('./api/speed-map',{cache:'no-store'})]);
+  state.config=await configResponse.json();
+  state.payload=await payloadResponse.json();
+  document.getElementById('updatedAt').textContent=`Updated: ${formatDate(state.payload.updatedAt)}`;
+  initControls();
+  renderAll();
+}
+load().catch(error=>{ emptyEl.textContent=`Failed to load speed map: ${error}`; });
+</script>
+</body>
+</html>

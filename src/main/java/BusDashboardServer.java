@@ -38,6 +38,8 @@ public class BusDashboardServer {
     private final AtomicReference<byte[]> cachedStopLastPassJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedOvertakeJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRubberinessJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedSpeedMapJson = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedAccessibilityMapJson = new AtomicReference<>();
     private final AtomicReference<Map<String, Object>> cachedRubberinessPayload = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedMapConfigJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedIndexHtml = new AtomicReference<>();
@@ -46,12 +48,16 @@ public class BusDashboardServer {
     private final AtomicReference<byte[]> cachedStopLastPassHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedOvertakeHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRubberinessHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedSpeedMapHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedAccessibilityMapHtml = new AtomicReference<>();
     private final Path statsCacheFile;
     private final Path routeMovementCacheFile;
     private final Path traceCacheFile;
     private final Path stopLastPassCacheFile;
     private final Path overtakeCacheFile;
     private final Path rubberinessCacheFile;
+    private final Path speedMapCacheFile;
+    private final Path accessibilityMapCacheFile;
     private final Path mapConfigFile;
     private final Path tileRoot;
     private final Path trafficBehaviorDir;
@@ -64,6 +70,8 @@ public class BusDashboardServer {
             Path stopLastPassCacheFile,
             Path overtakeCacheFile,
             Path rubberinessCacheFile,
+            Path speedMapCacheFile,
+            Path accessibilityMapCacheFile,
             Path mapConfigFile,
             Path tileRoot,
             Path trafficBehaviorDir,
@@ -75,6 +83,8 @@ public class BusDashboardServer {
         this.stopLastPassCacheFile = stopLastPassCacheFile;
         this.overtakeCacheFile = overtakeCacheFile;
         this.rubberinessCacheFile = rubberinessCacheFile;
+        this.speedMapCacheFile = speedMapCacheFile;
+        this.accessibilityMapCacheFile = accessibilityMapCacheFile;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
         this.trafficBehaviorDir = trafficBehaviorDir;
@@ -106,6 +116,14 @@ public class BusDashboardServer {
                 "BUS_DASHBOARD_RUBBERINESS_CACHE_FILE",
                 statsCacheFile.resolveSibling("rubberiness.json").toString()
         ));
+        Path speedMapCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_SPEED_MAP_CACHE_FILE",
+                statsCacheFile.resolveSibling("speed-map.json").toString()
+        ));
+        Path accessibilityMapCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_ACCESSIBILITY_MAP_CACHE_FILE",
+                statsCacheFile.resolveSibling("accessibility-map.json").toString()
+        ));
         Path mapConfigFile = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_MAP_CONFIG_FILE",
                 statsCacheFile.resolveSibling("map-config.json").toString()
@@ -127,6 +145,8 @@ public class BusDashboardServer {
                 stopLastPassCacheFile,
                 overtakeCacheFile,
                 rubberinessCacheFile,
+                speedMapCacheFile,
+                accessibilityMapCacheFile,
                 mapConfigFile,
                 tileRoot,
                 trafficBehaviorDir,
@@ -142,6 +162,8 @@ public class BusDashboardServer {
         cachedStopLastPassHtml.set(loadResourceBytes("dashboard/stop-last-pass.html"));
         cachedOvertakeHtml.set(loadResourceBytes("dashboard/overtakes.html"));
         cachedRubberinessHtml.set(loadResourceBytes("dashboard/rubberiness.html"));
+        cachedSpeedMapHtml.set(loadResourceBytes("dashboard/speed-map.html"));
+        cachedAccessibilityMapHtml.set(loadResourceBytes("dashboard/accessibility-map.html"));
         refreshCache();
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -157,12 +179,16 @@ public class BusDashboardServer {
         server.createContext("/api/overtake-details", this::handleOvertakeDetailsRequest);
         server.createContext("/api/rubberiness", this::handleRubberinessRequest);
         server.createContext("/api/rubberiness-details", this::handleRubberinessDetailsRequest);
+        server.createContext("/api/speed-map", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedSpeedMapJson.get()));
+        server.createContext("/api/accessibility-map", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedAccessibilityMapJson.get()));
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
         server.createContext("/stop-last-pass", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedStopLastPassHtml.get()));
         server.createContext("/overtakes", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedOvertakeHtml.get()));
         server.createContext("/rubberiness", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRubberinessHtml.get()));
+        server.createContext("/speed-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedSpeedMapHtml.get()));
+        server.createContext("/accessibility-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedAccessibilityMapHtml.get()));
         server.createContext("/tiles", this::handleTileRequest);
         server.createContext("/", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedIndexHtml.get()));
         server.setExecutor(Executors.newCachedThreadPool());
@@ -201,6 +227,12 @@ public class BusDashboardServer {
         cachedRubberinessJson.set(rubberinessJson);
         cachedRubberinessPayload.set(MAPPER.readValue(rubberinessJson, new TypeReference<>() {
         }));
+        cachedSpeedMapJson.set(loadJsonCache(speedMapCacheFile, emptySpeedMapPayload(
+                "Speed map cache file not found: " + speedMapCacheFile
+        )));
+        cachedAccessibilityMapJson.set(loadJsonCache(accessibilityMapCacheFile, emptyAccessibilityMapPayload(
+                "Accessibility map cache file not found: " + accessibilityMapCacheFile
+        )));
         cachedMapConfigJson.set(loadJsonCache(mapConfigFile, emptyMapConfigPayload(
                 "Map config file not found: " + mapConfigFile
         )));
@@ -247,6 +279,32 @@ public class BusDashboardServer {
         payload.put("maxPointsPerBus", 100);
         payload.put("busCount", 0);
         payload.put("buses", List.of());
+        return payload;
+    }
+
+    private static Map<String, Object> emptySpeedMapPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("pointData", Map.of("previousDay", List.of(), "allDays", List.of(), "weekday", Map.of()));
+        payload.put("physicalSegmentData", Map.of("previousDay", List.of(), "allDays", List.of(), "weekday", Map.of()));
+        payload.put("routeSegmentData", Map.of("previousDay", List.of(), "allDays", List.of(), "weekday", Map.of()));
+        payload.put("routeData", Map.of("previousDay", List.of(), "allDays", List.of(), "weekday", Map.of()));
+        return payload;
+    }
+
+    private static Map<String, Object> emptyAccessibilityMapPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("message", message);
+        payload.put("originStopName", null);
+        payload.put("serviceDate", null);
+        payload.put("departureTime", null);
+        payload.put("reachableStops", 0);
+        payload.put("roadWays", 0);
+        payload.put("segments", List.of());
         return payload;
     }
 

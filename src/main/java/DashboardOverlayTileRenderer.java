@@ -142,6 +142,32 @@ public final class DashboardOverlayTileRenderer {
         renderRubberinessHeatmapScope(variantRoot.resolve("over60"), config, payload.get("longHeatmapData"));
     }
 
+    public static void renderSpeedPointHeatmapTiles(Path cacheFile, Path mapConfigFile, Path tilesRoot) throws IOException {
+        if (!Files.exists(cacheFile) || !Files.exists(mapConfigFile)) {
+            return;
+        }
+
+        Map<String, Object> payload = MAPPER.readValue(cacheFile.toFile(), MAP_TYPE);
+        MapConfig config = loadMapConfig(mapConfigFile);
+        Path variantRoot = tilesRoot.resolve("speed").resolve("point-heatmap");
+        if (!"ok".equals(String.valueOf(payload.get("status")))) {
+            clearDirectory(variantRoot);
+            return;
+        }
+
+        renderSpeedHeatmapScope(variantRoot, config, payload.get("physicalSegmentData"));
+    }
+
+    public static void renderSpeedCoordinateHeatmapTiles(Map<String, Object> heatmapSection, Path mapConfigFile, Path tilesRoot) throws IOException {
+        if (!Files.exists(mapConfigFile)) {
+            return;
+        }
+
+        MapConfig config = loadMapConfig(mapConfigFile);
+        Path variantRoot = tilesRoot.resolve("speed").resolve("point-heatmap");
+        renderSpeedHeatmapScope(variantRoot, config, heatmapSection);
+    }
+
     @SuppressWarnings("unchecked")
     private static void renderPointHeatmapScope(Path scopeRoot, MapConfig config, Object sectionObject) throws IOException {
         if (!(sectionObject instanceof Map<?, ?>)) {
@@ -186,6 +212,24 @@ public final class DashboardOverlayTileRenderer {
             for (Map.Entry<String, List<Map<String, Object>>> policyEntry : byPolicy.entrySet()) {
                 renderRubberinessHeatmapVariant(scopeRoot.resolve(policyEntry.getKey()).resolve(entry.getKey()), config, policyEntry.getValue());
             }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void renderSpeedHeatmapScope(Path scopeRoot, MapConfig config, Object sectionObject) throws IOException {
+        if (!(sectionObject instanceof Map<?, ?>)) {
+            clearDirectory(scopeRoot);
+            return;
+        }
+
+        Map<String, Object> section = (Map<String, Object>) sectionObject;
+        Map<String, List<Map<String, Object>>> variants = new LinkedHashMap<>();
+        variants.put("previous", castList(section.get("previousDay")));
+        variants.put("all", castList(section.get("allDays")));
+        variants.putAll(extractWeekdayVariants("weekday", section.get("weekday")));
+
+        for (Map.Entry<String, List<Map<String, Object>>> entry : variants.entrySet()) {
+            renderSpeedHeatmapVariant(scopeRoot.resolve(entry.getKey()), config, entry.getValue());
         }
     }
 
@@ -251,6 +295,57 @@ public final class DashboardOverlayTileRenderer {
                     try {
                         graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
                         drawRubberinessPoint(graphics, zoom, tileX, tileY, point);
+                    } finally {
+                        graphics.dispose();
+                    }
+                }
+
+                for (Map.Entry<String, BufferedImage> entry : images.entrySet()) {
+                    String[] parts = entry.getKey().split("/");
+                    Path xDir = tempRoot.resolve(String.valueOf(zoom)).resolve(parts[0]);
+                    Files.createDirectories(xDir);
+                    ImageIO.write(entry.getValue(), "PNG", xDir.resolve(parts[1] + ".png").toFile());
+                }
+            }
+
+            clearDirectory(outputDir);
+            Files.createDirectories(outputDir.getParent());
+            Files.move(tempRoot, outputDir, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            clearDirectory(tempRoot);
+            throw e;
+        }
+    }
+
+    private static void renderSpeedHeatmapVariant(Path outputDir, MapConfig config, List<Map<String, Object>> buckets) throws IOException {
+        Files.createDirectories(outputDir.getParent());
+        Path tempRoot = Files.createTempDirectory(outputDir.getParent(), outputDir.getFileName().toString() + "-tmp-");
+        try {
+            for (int zoom = config.minZoom; zoom <= config.maxZoom; zoom++) {
+                Map<String, BufferedImage> images = new HashMap<>();
+                for (Map<String, Object> bucket : buckets) {
+                    Integer bucketZoom = integerValue(bucket.get("zoom"));
+                    Integer bucketSize = integerValue(bucket.get("bucketSizePx"));
+                    Integer bucketX = integerValue(bucket.get("bucketX"));
+                    Integer bucketY = integerValue(bucket.get("bucketY"));
+                    Double speed = doubleValue(bucket.get("avgSpeedKmh"));
+                    if (bucketZoom == null || bucketSize == null || bucketX == null || bucketY == null || speed == null || bucketZoom != zoom) {
+                        continue;
+                    }
+
+                    Color color = speedColor(speed);
+                    long samples = Math.max(1L, longValue(bucket.getOrDefault("totalSamples", bucket.getOrDefault("sampleCount", 1))));
+                    int alpha = speedBucketAlpha(samples);
+                    int bucketWorldX = bucketX * bucketSize + bucketSize / 2;
+                    int bucketWorldY = bucketY * bucketSize + bucketSize / 2;
+                    int tileX = Math.floorDiv(bucketWorldX, TILE_SIZE);
+                    int tileY = Math.floorDiv(bucketWorldY, TILE_SIZE);
+                    String key = tileX + "/" + tileY;
+                    BufferedImage image = images.computeIfAbsent(key, ignored -> new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB));
+                    Graphics2D graphics = image.createGraphics();
+                    try {
+                        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                        drawSpeedBucket(graphics, tileX, tileY, bucketWorldX, bucketWorldY, bucketSize, color, alpha, zoom);
                     } finally {
                         graphics.dispose();
                     }
@@ -466,6 +561,31 @@ public final class DashboardOverlayTileRenderer {
         }
     }
 
+    private static void drawSpeedBucket(Graphics2D graphics, int tileX, int tileY, int worldX, int worldY, int bucketSize, Color color, int alpha, int zoom) {
+        int localX = worldX - tileX * TILE_SIZE;
+        int localY = worldY - tileY * TILE_SIZE;
+        int radius = speedBucketRadius(bucketSize, zoom);
+        graphics.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), alpha));
+        graphics.fillOval(localX - radius, localY - radius, radius * 2, radius * 2);
+    }
+
+    private static int speedBucketRadius(int bucketSize, int zoom) {
+        int baseRadius = Math.max(bucketSize + 2, zoom <= 12 ? 10 : 8);
+        return (int) Math.round(baseRadius * Math.sqrt(2.0));
+    }
+
+    private static int speedBucketAlpha(long samples) {
+        return (int) Math.max(22, Math.min(96, Math.round(18.0 + Math.log1p(samples) * 8.0)));
+    }
+
+    private static Color speedColor(double speedKmh) {
+        double normalized = Math.max(0.0, Math.min(1.0, speedKmh / 40.0));
+        int red = (int) Math.round(210.0 * (1.0 - normalized) + 38.0 * normalized);
+        int green = (int) Math.round(54.0 * (1.0 - normalized) + 162.0 * normalized);
+        int blue = (int) Math.round(47.0 * (1.0 - normalized) + 105.0 * normalized);
+        return new Color(red, green, blue);
+    }
+
     private static Map<String, List<Map<String, Object>>> extractWeekdayVariants(String prefix, Object source) {
         Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
         if (!(source instanceof Map<?, ?>)) {
@@ -587,6 +707,20 @@ public final class DashboardOverlayTileRenderer {
             return Long.parseLong(String.valueOf(value));
         } catch (NumberFormatException e) {
             return 0L;
+        }
+    }
+
+    private static Integer integerValue(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
+        }
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

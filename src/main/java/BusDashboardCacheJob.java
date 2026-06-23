@@ -199,7 +199,7 @@ public class BusDashboardCacheJob {
         }
 
         Map<String, List<Map<String, Object>>> series = new LinkedHashMap<>();
-        series.put("segmentTrips", collectDerivedSeries(
+        putDerivedSeries(series, "segmentTrips", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("segment-trips"),
                 "endEnteredStopAt",
@@ -207,7 +207,7 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 null
         ));
-        series.put("overtakes", collectDerivedSeries(
+        putDerivedSeries(series, "overtakes", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("overtake-events"),
                 "overtakeAt",
@@ -215,7 +215,7 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 null
         ));
-        series.put("physicalOvertakes", collectDerivedSeries(
+        putDerivedSeries(series, "physicalOvertakes", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("physical-overtake-events"),
                 "overtakeAt",
@@ -223,7 +223,7 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 null
         ));
-        series.put("dwellEvents", collectDerivedSeries(
+        putDerivedSeries(series, "dwellEvents", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("dwell-events"),
                 "enteredStopAt",
@@ -231,7 +231,7 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 null
         ));
-        series.put("dwellEventsOver60", collectDerivedSeries(
+        putDerivedSeries(series, "dwellEventsOver60", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("dwell-events"),
                 "enteredStopAt",
@@ -239,23 +239,29 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 "dwellTimeSeconds > 60"
         ));
-        series.put("transferPotentialRequests", collectLatestDerivedSeries(
+        putDerivedSeries(series, "transferPotentialRequests", () -> collectDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("request-grid-counts"),
                 "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
                 null,
                 "possibleRequestCount"
         ));
-        series.put("transferPotentialJourneys", collectLatestDerivedSeries(
+        putDerivedSeries(series, "transferPotentialJourneys", () -> collectDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("journeys"),
                 "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
                 null
         ));
-        series.put("transferPotentialFragments", collectLatestDerivedSeries(
+        putDerivedSeries(series, "transferPotentialFragments", () -> collectDerivedSeries(
                 spark,
                 transferPotentialDir.resolve("journey-fragments"),
                 "requestedDepartureAt",
+                rangeStart,
+                rangeEnd,
                 null
         ));
 
@@ -272,6 +278,28 @@ public class BusDashboardCacheJob {
         }
 
         return new DerivedStats(series, totals);
+    }
+
+    private static void putDerivedSeries(
+            Map<String, List<Map<String, Object>>> series,
+            String name,
+            DerivedSeriesSupplier supplier
+    ) {
+        try {
+            series.put(name, supplier.get());
+        } catch (Exception e) {
+            System.err.printf(
+                    "BusDashboardCacheJob: failed to collect derived series %s: %s%n",
+                    name,
+                    e.toString()
+            );
+            series.put(name, List.of());
+        }
+    }
+
+    @FunctionalInterface
+    private interface DerivedSeriesSupplier {
+        List<Map<String, Object>> get() throws Exception;
     }
 
     private static List<Map<String, Object>> collectDerivedSeries(

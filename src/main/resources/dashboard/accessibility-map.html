@@ -1,0 +1,208 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscrawl Accessibility Map</title>
+  <style>
+    :root { --bg:#eef1e5; --panel:rgba(255,253,246,.95); --ink:#19231d; --muted:#657267; --shadow:0 18px 46px rgba(25,35,29,.14); }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:radial-gradient(circle at 18% 0,#ffd8a8 0,transparent 28%),linear-gradient(180deg,#f2f5eb,var(--bg)); }
+    .wrap { max-width:1500px; margin:0 auto; padding:26px 18px 34px; }
+    .topline,.meta-row { display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap; align-items:center; }
+    h1 { margin:0; font-size:clamp(30px,5vw,58px); line-height:.95; letter-spacing:-.04em; }
+    .links { display:flex; gap:14px; flex-wrap:wrap; }
+    .links a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(25,35,29,.24); }
+    .subtitle,.meta-row,.legend { color:var(--muted); font-size:14px; line-height:1.45; }
+    .hero { display:grid; gap:12px; margin-bottom:16px; }
+    .card { background:var(--panel); border:1px solid rgba(25,35,29,.08); border-radius:24px; box-shadow:var(--shadow); padding:16px; }
+    .map-shell { position:relative; height:min(80vh,920px); min-height:560px; overflow:hidden; border-radius:18px; background:#68706b; cursor:grab; user-select:none; border:1px solid rgba(25,35,29,.08); }
+    .map-shell.dragging { cursor:grabbing; }
+    .tile-layer,.origin-layer { position:absolute; inset:0; }
+    .tile-layer img { position:absolute; width:256px; height:256px; }
+    #tiles { z-index:1; }
+    #accessibilityTiles { z-index:2; pointer-events:none; }
+    .origin-layer { z-index:4; pointer-events:none; }
+    .origin-dot { position:absolute; width:18px; height:18px; margin:-9px 0 0 -9px; border-radius:999px; background:#111; border:3px solid #fff; box-shadow:0 8px 20px rgba(0,0,0,.35); }
+    .origin-dot::after { content:""; position:absolute; inset:-8px; border-radius:999px; border:2px solid rgba(17,17,17,.35); }
+    .map-zoom { position:absolute; right:14px; top:14px; z-index:5; display:grid; gap:8px; }
+    .map-zoom button { width:42px; height:42px; border:1px solid rgba(25,35,29,.16); border-radius:12px; background:rgba(255,255,255,.93); color:var(--ink); font:inherit; font-size:24px; cursor:pointer; box-shadow:0 10px 24px rgba(25,35,29,.12); }
+    .legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; }
+    .ramp { width:min(460px,100%); height:14px; border-radius:999px; background:linear-gradient(90deg,#18864b,#d5c83d,#d95c2b,#7d2134); border:1px solid rgba(25,35,29,.15); }
+    .scale-wrap { width:min(460px,100%); display:grid; gap:4px; }
+    .scale-labels { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; color:var(--muted); font-size:12px; line-height:1.25; }
+    .scale-labels span:nth-child(1) { text-align:left; }
+    .scale-labels span:nth-child(2),.scale-labels span:nth-child(3) { text-align:center; }
+    .scale-labels span:nth-child(4) { text-align:right; }
+    .mode-row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:10px 0 2px; color:var(--muted); font-size:14px; }
+    .mode-row label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:22px; color:#fff; background:rgba(30,36,32,.25); z-index:6; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <div class="topline">
+      <h1>Accessibility From Tasma</h1>
+      <div class="links">
+        <a href="./">Dashboard</a>
+        <a href="./speed-map">Speed Map</a>
+        <a href="./stop-last-pass">Stop Last Pass</a>
+      </div>
+    </div>
+    <div class="subtitle">Road segments are colored by public transport accessibility from both PO Tasma stops. The overlay is rendered as transparent PNG tiles over the base map.</div>
+  </section>
+
+  <section class="card">
+    <div class="meta-row">
+      <div id="mainMeta">Loading...</div>
+      <div id="countMeta"></div>
+    </div>
+    <div class="legend">
+      <span>faster</span>
+      <span class="scale-wrap"><span class="ramp"></span><span class="scale-labels" id="scaleLabels"></span></span>
+      <span>slower</span>
+      <span id="rangeMeta"></span>
+    </div>
+    <div class="mode-row" id="modeRow">
+      <label><input type="radio" name="accessMode" value="total" checked> total time balanced</label>
+      <label><input type="radio" name="accessMode" value="totalFull"> total time full range</label>
+      <label><input type="radio" name="accessMode" value="totalLog"> total time log scale</label>
+      <label><input type="radio" name="accessMode" value="walk"> walk part of best total route</label>
+      <label><input type="radio" name="accessMode" value="stopTransport"> transport to nearest stop cluster</label>
+    </div>
+    <div class="map-shell" id="map">
+      <div class="map-zoom"><button id="zoomIn" type="button">+</button><button id="zoomOut" type="button">-</button></div>
+      <div class="tile-layer" id="tiles"></div>
+      <div class="tile-layer" id="accessibilityTiles"></div>
+      <div class="origin-layer" id="originLayer"></div>
+      <div class="empty" id="emptyState">Loading...</div>
+    </div>
+  </section>
+</div>
+
+<script>
+const mapEl=document.getElementById('map');
+const tilesEl=document.getElementById('tiles');
+const overlayEl=document.getElementById('accessibilityTiles');
+const emptyEl=document.getElementById('emptyState');
+const originLayer=document.getElementById('originLayer');
+const state={payload:null,config:null,centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
+const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+
+function lonToWorldX(lon,z){return ((lon+180)/360)*256*Math.pow(2,z);}
+function latToWorldY(lat,z){const s=Math.sin(lat*Math.PI/180);return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*256*Math.pow(2,z);}
+function worldToLon(x,z){return x/(256*Math.pow(2,z))*360-180;}
+function worldToLat(y,z){const n=Math.PI-2*Math.PI*y/(256*Math.pow(2,z));return 180/Math.PI*Math.atan(0.5*(Math.exp(n)-Math.exp(-n)));}
+function project(lat,lon,z){return {x:lonToWorldX(lon,z),y:latToWorldY(lat,z)};}
+function origin(){const c=project(state.centerLat,state.centerLon,state.zoom);return {left:c.x-mapEl.clientWidth/2,top:c.y-mapEl.clientHeight/2};}
+function applyTemplate(t,z,x,y){return t.replace('{z}',z).replace('{x}',x).replace('{y}',y);}
+function baseTileUrl(z,x,y){return applyTemplate(state.config.tileUrlTemplate,z,x,y);}
+function overlayTileUrl(z,x,y){
+  const suffix=state.payload.updatedAt?`?v=${encodeURIComponent(state.payload.updatedAt)}-${state.overlayMode}`:'';
+  let template=state.payload.tileOverlayTemplate;
+  if(state.overlayMode==='totalFull'&&state.payload.totalFullTileOverlayTemplate)template=state.payload.totalFullTileOverlayTemplate;
+  if(state.overlayMode==='totalLog'&&state.payload.totalLogTileOverlayTemplate)template=state.payload.totalLogTileOverlayTemplate;
+  if(state.overlayMode==='walk'&&state.payload.walkTileOverlayTemplate)template=state.payload.walkTileOverlayTemplate;
+  if(state.overlayMode==='stopTransport'&&state.payload.stopTransportTileOverlayTemplate)template=state.payload.stopTransportTileOverlayTemplate;
+  return applyTemplate(template,z,x,y)+suffix;
+}
+function updateRangeMeta(){
+  const p=state.payload;if(!p)return;
+  const range=document.getElementById('rangeMeta');
+  const labels=document.getElementById('scaleLabels');
+  if(state.overlayMode==='walk'){
+    const max=Number(p.walkColorMaxMinutes||0).toFixed(1);
+    range.textContent=`0-${max} min walking inside the best transport+walk route; speed ${Number(p.walkSpeedMps||0).toFixed(1)} m/s`;
+    labels.innerHTML=scaleLabels(0,Number(p.walkColorMaxMinutes||0),'walk');
+  }else{
+    if(state.overlayMode==='totalFull'){
+      const min=Number(p.totalFullColorMinMinutes||0).toFixed(1);
+      const max=Number(p.totalFullColorMaxMinutes||0).toFixed(1);
+      range.textContent=`${min}-${max} min; transport + walk; full data range, no clipping`;
+      labels.innerHTML=scaleLabels(Number(p.totalFullColorMinMinutes||0),Number(p.totalFullColorMaxMinutes||0),'total');
+      return;
+    }
+    if(state.overlayMode==='totalLog'){
+      const min=Number(p.totalLogColorMinMinutes||0).toFixed(1);
+      const max=Number(p.totalLogColorMaxMinutes||0).toFixed(1);
+      range.textContent=`${min}-${max} min; transport + walk; logarithmic color scale`;
+      labels.innerHTML=logScaleLabels(Number(p.totalLogColorMinMinutes||0),Number(p.totalLogColorMaxMinutes||0),'min');
+      return;
+    }
+    if(state.overlayMode==='stopTransport'){
+      const min=Number(p.stopTransportColorMinMinutes||0).toFixed(1);
+      const max=Number(p.stopTransportColorMaxMinutes||0).toFixed(1);
+      range.textContent=`${min}-${max}+ min; best transport time inside nearest same-name stop cluster; cluster radius ${Math.round(p.stopClusterRadiusMeters||0)} m`;
+      labels.innerHTML=scaleLabels(Number(p.stopTransportColorMinMinutes||0),Number(p.stopTransportColorMaxMinutes||0),'transport');
+      return;
+    }
+    const min=Number(p.totalColorMinMinutes||0).toFixed(1);
+    const max=Number(p.totalColorMaxMinutes||0).toFixed(1);
+    range.textContent=`${min}-${max}+ min; transport + walk; z${p.tileMinZoom}-${p.tileMaxZoom}`;
+    labels.innerHTML=scaleLabels(Number(p.totalColorMinMinutes||0),Number(p.totalColorMaxMinutes||0),'total');
+  }
+}
+function logScaleLabels(min,max,unit){
+  if(!Number.isFinite(max)||max<=min)max=min+1;
+  const range=max-min;
+  const points=[0,0.34,0.68,1].map(t=>min+Math.expm1(Math.log1p(range)*t));
+  return points.map((v,i)=>`<span>${i===3?'>=':''}${fmtScale(v)} ${unit}</span>`).join('');
+}
+function scaleLabels(min,max,mode){
+  if(!Number.isFinite(max)||max<=min)max=min+1;
+  const unit=mode==='walk'?'walk min':(mode==='transport'?'transport min':'min');
+  const points=[0,0.34,0.68,1].map(t=>min+(max-min)*t);
+  return points.map((v,i)=>`<span>${i===3?'>=':''}${fmtScale(v)} ${unit}</span>`).join('');
+}
+function fmtScale(v){
+  if(v>=100)return String(Math.round(v));
+  if(v>=10)return String(Math.round(v));
+  return v.toFixed(1);
+}
+function renderTileLayer(target,templateFn){
+  const z=state.zoom,o=origin();
+  const sx=Math.floor(o.left/256),ex=Math.floor((o.left+mapEl.clientWidth)/256);
+  const sy=Math.floor(o.top/256),ey=Math.floor((o.top+mapEl.clientHeight)/256);
+  let html='';
+  for(let x=sx;x<=ex;x++)for(let y=sy;y<=ey;y++)html+=`<img src="${templateFn(z,x,y)}" style="left:${x*256-o.left}px;top:${y*256-o.top}px" loading="lazy">`;
+  target.innerHTML=html;
+}
+function renderOrigin(){
+  const p=state.payload,o=origin();
+  const origins=Array.isArray(p.originStops)?p.originStops:[];
+  originLayer.innerHTML=origins.map(stop=>{
+    const pt=project(Number(stop.latitude),Number(stop.longitude),state.zoom);
+    return `<div class="origin-dot" title="${stop.stopName||''} ${stop.stopId||''}" style="left:${pt.x-o.left}px;top:${pt.y-o.top}px"></div>`;
+  }).join('');
+}
+function renderAll(){
+  if(!state.config||!state.payload)return;
+  renderTileLayer(tilesEl,baseTileUrl);
+  renderTileLayer(overlayEl,overlayTileUrl);
+  renderOrigin();
+}
+async function boot(){
+  const [config,payload]=await Promise.all([fetch('./api/map-config').then(r=>r.json()),fetch('./api/accessibility-map').then(r=>r.json())]);
+  state.config=config;state.payload=payload;
+  if(payload.status==='empty'){emptyEl.textContent=payload.message||'No data';return;}
+  state.centerLat=Number(payload.originLatitude||55.79);
+  state.centerLon=Number(payload.originLongitude||49.12);
+  state.zoom=Math.min(Number(payload.tileMaxZoom||17),Math.max(Number(payload.tileMinZoom||10),Number(config.initialZoom||12)));
+  document.getElementById('mainMeta').textContent=`${payload.originStopName} · ${payload.serviceDate} ${payload.departureTime} MSK · updated ${dtf.format(new Date(payload.updatedAt))} MSK`;
+  document.getElementById('countMeta').textContent=`${Number(payload.segmentCount||0).toLocaleString('ru-RU')} road fragments; ${payload.reachableStops} reachable stops`;
+  updateRangeMeta();
+  emptyEl.style.display='none';
+  renderAll();
+}
+mapEl.addEventListener('mousedown',e=>{state.dragging=true;mapEl.classList.add('dragging');state.startX=e.clientX;state.startY=e.clientY;const c=project(state.centerLat,state.centerLon,state.zoom);state.startCenterX=c.x;state.startCenterY=c.y;});
+window.addEventListener('mousemove',e=>{if(!state.dragging)return;const cx=state.startCenterX-(e.clientX-state.startX),cy=state.startCenterY-(e.clientY-state.startY);state.centerLon=worldToLon(cx,state.zoom);state.centerLat=worldToLat(cy,state.zoom);renderAll();});
+window.addEventListener('mouseup',()=>{state.dragging=false;mapEl.classList.remove('dragging');});
+document.getElementById('zoomIn').onclick=()=>{state.zoom=Math.min(Number(state.payload?.tileMaxZoom||17),state.zoom+1);renderAll();};
+document.getElementById('zoomOut').onclick=()=>{state.zoom=Math.max(Number(state.payload?.tileMinZoom||10),state.zoom-1);renderAll();};
+document.getElementById('modeRow').addEventListener('change',e=>{if(e.target?.name!=='accessMode')return;state.overlayMode=e.target.value;updateRangeMeta();renderAll();});
+window.addEventListener('resize',renderAll);
+boot().catch(err=>{emptyEl.textContent='Failed to load accessibility map: '+err.message;});
+</script>
+</body>
+</html>

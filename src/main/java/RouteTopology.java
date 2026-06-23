@@ -335,6 +335,14 @@ public class RouteTopology {
         return routesById.values();
     }
 
+    public Collection<StopInfo> getStops() {
+        return stopsById.values();
+    }
+
+    public Collection<RouteStopInfo> getRouteStops() {
+        return routeStops;
+    }
+
     public Collection<SegmentInfo> getAdjacentSegments() {
         return adjacentSegments;
     }
@@ -373,6 +381,14 @@ public class RouteTopology {
             this.displayRouteNumber = displayRouteNumber;
             this.transportType = transportType;
         }
+
+        public String getInternalRouteId() {
+            return internalRouteId;
+        }
+
+        public String getDisplayRouteNumber() {
+            return displayRouteNumber;
+        }
     }
 
     public static final class StopInfo {
@@ -386,6 +402,22 @@ public class RouteTopology {
             this.stopName = stopName;
             this.latitude = latitude;
             this.longitude = longitude;
+        }
+
+        public String getStopId() {
+            return stopId;
+        }
+
+        public String getStopName() {
+            return stopName;
+        }
+
+        public double getLatitude() {
+            return latitude;
+        }
+
+        public double getLongitude() {
+            return longitude;
         }
     }
 
@@ -421,6 +453,34 @@ public class RouteTopology {
 
         public int getStopOrder() {
             return stopOrder;
+        }
+
+        public String getInternalRouteId() {
+            return internalRouteId;
+        }
+
+        public String getRouteNumber() {
+            return routeNumber;
+        }
+
+        public String getStopId() {
+            return stopId;
+        }
+
+        public String getStopName() {
+            return stopName;
+        }
+
+        public double getStopLatitude() {
+            return stopLatitude;
+        }
+
+        public double getStopLongitude() {
+            return stopLongitude;
+        }
+
+        public int getDirection() {
+            return direction;
         }
     }
 

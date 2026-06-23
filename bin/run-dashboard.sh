@@ -11,6 +11,7 @@ export BUS_DASHBOARD_TRACE_CACHE_FILE=${BUS_DASHBOARD_TRACE_CACHE_FILE:-/home/el
 export BUS_DASHBOARD_STOP_LAST_PASS_CACHE_FILE=${BUS_DASHBOARD_STOP_LAST_PASS_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/stop-last-pass.json}
 export BUS_DASHBOARD_OVERTAKE_CACHE_FILE=${BUS_DASHBOARD_OVERTAKE_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/overtake.json}
 export BUS_DASHBOARD_RUBBERINESS_CACHE_FILE=${BUS_DASHBOARD_RUBBERINESS_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/rubberiness.json}
+export BUS_DASHBOARD_SPEED_MAP_CACHE_FILE=${BUS_DASHBOARD_SPEED_MAP_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/speed-map.json}
 export BUS_DASHBOARD_MAP_CONFIG_FILE=${BUS_DASHBOARD_MAP_CONFIG_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/map-config.json}
 export BUS_TILE_DIR=${BUS_TILE_DIR:-/home/eljah/apps/buscrawl/dashboard-cache/tiles/base}
 export BUS_TILE_ROOT=${BUS_TILE_ROOT:-/home/eljah/apps/buscrawl/dashboard-cache/tiles}

@@ -1,6 +1,7 @@
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.FileVisitOption;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -30,6 +31,26 @@ public final class IncrementalParquetSupport {
                             .thenComparing(file -> file.path))
                     .collect(Collectors.toList());
         }
+    }
+
+    public static List<ParquetFileInfo> listRecentParquetFilesFlat(Path parquetDir, Instant modifiedSince) throws IOException {
+        FileTime modifiedSinceTime = FileTime.from(modifiedSince);
+        List<ParquetFileInfo> result = new ArrayList<>();
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(parquetDir, "*.parquet")) {
+            for (Path path : files) {
+                if (!Files.isRegularFile(path) || !isStableParquetPath(path)) {
+                    continue;
+                }
+                ParquetFileInfo file = toParquetFileInfo(path, modifiedSinceTime);
+                if (file != null) {
+                    result.add(file);
+                }
+            }
+        }
+        result.sort(Comparator
+                .comparing((ParquetFileInfo file) -> parseInstant(file.modifiedAt))
+                .thenComparing(file -> file.path));
+        return result;
     }
 
     public static List<ParquetFileInfo> selectNewFiles(

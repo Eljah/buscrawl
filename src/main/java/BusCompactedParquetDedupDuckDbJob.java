@@ -5,6 +5,8 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.List;
+import java.util.stream.Collectors;
 import java.util.UUID;
 
 public class BusCompactedParquetDedupDuckDbJob {
@@ -30,7 +32,22 @@ public class BusCompactedParquetDedupDuckDbJob {
         Files.createDirectories(tempRoot);
 
         Path tempOutput = tempRoot.resolve("dedup-" + Instant.now().toEpochMilli() + "-" + UUID.randomUUID());
-        String inputGlob = inputDir.toAbsolutePath().toString().replace('\\', '/') + "/**/*.parquet";
+        List<String> inputFiles;
+        try (var paths = Files.walk(inputDir)) {
+            inputFiles = paths
+                    .filter(Files::isRegularFile)
+                    .map(Path::toString)
+                    .filter(path -> path.endsWith(".parquet"))
+                    .map(path -> path.replace('\\', '/'))
+                    .sorted()
+                    .collect(Collectors.toList());
+        }
+        if (inputFiles.isEmpty()) {
+            throw new IllegalStateException("No compacted parquet files found in " + inputDir);
+        }
+        String inputFileList = inputFiles.stream()
+                .map(path -> "'" + sqlEscape(path) + "'")
+                .collect(Collectors.joining(", ", "[", "]"));
         String outputPath = tempOutput.toAbsolutePath().toString().replace('\\', '/');
 
         Class.forName("org.duckdb.DuckDBDriver");
@@ -39,16 +56,17 @@ public class BusCompactedParquetDedupDuckDbJob {
             statement.execute("PRAGMA threads=" + threads);
             statement.execute("PRAGMA memory_limit='" + System.getenv().getOrDefault("BUS_COMPACTED_DEDUP_MEMORY_LIMIT", "8GB") + "'");
 
-            long inputRows = scalarLong(statement, "SELECT count(*) FROM read_parquet('" + sqlEscape(inputGlob) + "', union_by_name=true)");
+            long inputRows = scalarLong(statement, "SELECT count(*) FROM read_parquet(" + inputFileList + ", union_by_name=true, filename=true)");
             long uniqueRows = scalarLong(statement,
                     "SELECT count(*) FROM ("
-                            + "SELECT 1 FROM read_parquet('" + sqlEscape(inputGlob) + "', union_by_name=true) "
+                            + "SELECT 1 FROM read_parquet(" + inputFileList + ", union_by_name=true, filename=true) "
                             + "WHERE timestamp IS NOT NULL "
                             + "AND plate IS NOT NULL "
                             + "AND internalRouteId IS NOT NULL "
+                            + "AND eventTime IS NOT NULL "
                             + "AND latitude IS NOT NULL "
                             + "AND longitude IS NOT NULL "
-                            + "GROUP BY internalRouteId, realRouteNumber, plate, latitude, longitude, speed, sourceTimestamp"
+                            + "GROUP BY internalRouteId, realRouteNumber, plate, eventTime, latitude, longitude"
                             + ") t"
             );
             System.out.printf(
@@ -61,17 +79,19 @@ public class BusCompactedParquetDedupDuckDbJob {
             String copySql = "COPY ("
                     + "SELECT "
                     + "plate, internalRouteId, realRouteNumber, latitude, longitude, "
-                    + "min(eventTime) AS eventTime, speed, min(timestamp) AS timestamp, "
-                    + "min(readableTime) AS readableTime, sourceTimestamp, "
+                    + "eventTime, max(speed) AS speed, min(timestamp) AS timestamp, "
+                    + "min(readableTime) AS readableTime, min(sourceTimestamp) AS sourceTimestamp, "
                     + "min(sourceReadableTime) AS sourceReadableTime, "
-                    + "CAST(min(eventTime) + INTERVAL '3 hours' AS DATE) AS serviceDate "
-                    + "FROM read_parquet('" + sqlEscape(inputGlob) + "', union_by_name=true) "
+                    + "min(filename) AS sourceFile, "
+                    + "CAST(eventTime + INTERVAL '3 hours' AS DATE) AS serviceDate "
+                    + "FROM read_parquet(" + inputFileList + ", union_by_name=true, filename=true) "
                     + "WHERE timestamp IS NOT NULL "
                     + "AND plate IS NOT NULL "
                     + "AND internalRouteId IS NOT NULL "
+                    + "AND eventTime IS NOT NULL "
                     + "AND latitude IS NOT NULL "
                     + "AND longitude IS NOT NULL "
-                    + "GROUP BY internalRouteId, realRouteNumber, plate, latitude, longitude, speed, sourceTimestamp"
+                    + "GROUP BY internalRouteId, realRouteNumber, plate, eventTime, latitude, longitude"
                     + ") TO '" + sqlEscape(outputPath) + "' "
                     + "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (serviceDate))";
             statement.execute(copySql);

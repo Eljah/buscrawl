@@ -12,9 +12,59 @@ flock 9
 LOG_PREFIX="$(date -Is)"
 echo "$LOG_PREFIX derived data catchup started"
 
-for batch in $(seq 1 "${BUS_DERIVED_COMPACTION_MAX_BATCHES:-8}"); do
+raw_backlog_count() {
+  python3 - \
+    "${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet}" \
+    "${BUS_COMPACTED_PARQUET_STATE_FILE:-/home/eljah/data/buscrawl/bus-data-parquet-compacted/compaction-state.json}" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime
+
+raw_dir, state_file = sys.argv[1], sys.argv[2]
+try:
+    with open(state_file, "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+    cutoff = datetime.fromisoformat(
+        state["lastProcessedModifiedAt"].replace("Z", "+00:00")
+    ).timestamp()
+except Exception:
+    print(10**9)
+    raise SystemExit(0)
+
+count = 0
+try:
+    for name in os.listdir(raw_dir):
+        if not name.endswith(".parquet"):
+            continue
+        path = os.path.join(raw_dir, name)
+        try:
+            if os.path.getmtime(path) > cutoff:
+                count += 1
+        except FileNotFoundError:
+            pass
+except FileNotFoundError:
+    count = 10**9
+print(count)
+PY
+}
+
+initial_raw_backlog="$(raw_backlog_count)"
+fast_backlog_threshold="${BUS_DERIVED_FAST_COMPACTION_BACKLOG_THRESHOLD:-50000}"
+skip_downstream_backlog_threshold="${BUS_DERIVED_SKIP_DOWNSTREAM_RAW_BACKLOG_THRESHOLD:-50000}"
+if [[ "$initial_raw_backlog" -gt "$fast_backlog_threshold" ]]; then
+  compaction_max_batches="${BUS_DERIVED_FAST_COMPACTION_MAX_BATCHES:-10}"
+  compaction_max_files_per_run="${BUS_DERIVED_FAST_COMPACTION_MAX_FILES_PER_RUN:-50000}"
+  echo "$(date -Is) fast raw compaction mode: raw_backlog=$initial_raw_backlog max_batches=$compaction_max_batches max_files_per_run=$compaction_max_files_per_run"
+else
+  compaction_max_batches="${BUS_DERIVED_COMPACTION_MAX_BATCHES:-8}"
+  compaction_max_files_per_run="${BUS_DERIVED_COMPACTION_MAX_FILES_PER_RUN:-20000}"
+  echo "$(date -Is) normal raw compaction mode: raw_backlog=$initial_raw_backlog max_batches=$compaction_max_batches max_files_per_run=$compaction_max_files_per_run"
+fi
+
+for batch in $(seq 1 "$compaction_max_batches"); do
   batch_log="$(mktemp)"
-  BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN="${BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN:-1000}" \
+  BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN="$compaction_max_files_per_run" \
   BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS="${BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS:-8}" \
     ./bin/run-raw-parquet-compaction.sh | tee "$batch_log"
 
@@ -25,6 +75,13 @@ for batch in $(seq 1 "${BUS_DERIVED_COMPACTION_MAX_BATCHES:-8}"); do
   rm -f "$batch_log"
   echo "$(date -Is) raw parquet compaction batch $batch completed"
 done
+
+remaining_raw_backlog="$(raw_backlog_count)"
+if [[ "$remaining_raw_backlog" -gt "$skip_downstream_backlog_threshold" ]]; then
+  echo "$(date -Is) raw compaction still behind: raw_backlog=$remaining_raw_backlog; skipping downstream derived jobs in this pass"
+  echo "$(date -Is) derived data catchup finished"
+  exit 0
+fi
 
 for batch in $(seq 1 "${BUS_DERIVED_STOP_VISIT_MAX_BATCHES:-20}"); do
   batch_log="$(mktemp)"

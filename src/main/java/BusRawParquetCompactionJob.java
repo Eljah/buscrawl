@@ -3,6 +3,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
@@ -92,26 +93,29 @@ public class BusRawParquetCompactionJob {
             return;
         }
 
-        Path outputFile = outputDir.resolve("compact-" + Instant.now().toEpochMilli() + "-" + UUID.randomUUID() + ".parquet");
+        String batchId = "compact-" + Instant.now().toEpochMilli() + "-" + UUID.randomUUID();
+        Path tempOutputDir = outputDir.getParent().resolve(outputDir.getFileName() + "-batch-tmp").resolve(batchId);
+        Files.createDirectories(tempOutputDir.getParent());
         System.out.printf(
                 "BusRawParquetCompactionJob: compacting %d files out of %d available since %s into %s%n",
                 newFiles.size(),
                 selectedNewFiles.size(),
                 modifiedSince,
-                outputFile
+                tempOutputDir
         );
 
         Class.forName("org.duckdb.DuckDBDriver");
         try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
              Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA threads=" + Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_THREADS", "4")));
-            statement.execute(buildCopySql(newFiles, outputFile));
+            statement.execute(buildCopySql(newFiles, tempOutputDir));
         }
+        movePartitionedBatch(tempOutputDir, outputDir, batchId);
 
         updateState(stateFile, state, newFiles);
     }
 
-    private static String buildCopySql(List<IncrementalParquetSupport.ParquetFileInfo> files, Path outputFile) {
+    private static String buildCopySql(List<IncrementalParquetSupport.ParquetFileInfo> files, Path outputDir) {
         String fileList = files.stream()
                 .map(file -> "'" + sqlEscape(file.path) + "'")
                 .collect(Collectors.joining(", ", "[", "]"));
@@ -119,10 +123,11 @@ public class BusRawParquetCompactionJob {
         return "COPY ("
                 + "SELECT "
                 + "plate, internalRouteId, realRouteNumber, latitude, longitude, "
-                + "min(eventTime) AS eventTime, speed, "
+                + "eventTime, max(speed) AS speed, "
                 + "min(timestamp) AS timestamp, min(readableTime) AS readableTime, "
-                + "sourceTimestamp, min(sourceReadableTime) AS sourceReadableTime, "
-                + "min(filename) AS sourceFile "
+                + "min(sourceTimestamp) AS sourceTimestamp, min(sourceReadableTime) AS sourceReadableTime, "
+                + "min(filename) AS sourceFile, "
+                + "CAST(eventTime + INTERVAL '3 hours' AS DATE) AS serviceDate "
                 + "FROM read_parquet(" + fileList + ", union_by_name=true, filename=true) "
                 + "WHERE eventTime IS NOT NULL"
                 + " AND timestamp IS NOT NULL"
@@ -130,8 +135,38 @@ public class BusRawParquetCompactionJob {
                 + " AND internalRouteId IS NOT NULL"
                 + " AND latitude IS NOT NULL"
                 + " AND longitude IS NOT NULL"
-                + " GROUP BY internalRouteId, realRouteNumber, plate, latitude, longitude, speed, sourceTimestamp"
-                + ") TO '" + sqlEscape(outputFile.toAbsolutePath().toString()) + "' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                + " GROUP BY internalRouteId, realRouteNumber, plate, eventTime, latitude, longitude"
+                + ") TO '" + sqlEscape(outputDir.toAbsolutePath().toString()) + "' "
+                + "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (serviceDate))";
+    }
+
+    private static void movePartitionedBatch(Path tempOutputDir, Path outputDir, String batchId) throws Exception {
+        AtomicInteger movedFiles = new AtomicInteger();
+        try (var paths = Files.walk(tempOutputDir)) {
+            for (Path sourceFile : paths
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".parquet"))
+                    .collect(Collectors.toList())) {
+                Path relativeParent = tempOutputDir.relativize(sourceFile.getParent());
+                Path targetDir = outputDir.resolve(relativeParent);
+                Files.createDirectories(targetDir);
+                String targetName = batchId + "-" + movedFiles.incrementAndGet() + ".parquet";
+                Files.move(sourceFile, targetDir.resolve(targetName), StandardCopyOption.ATOMIC_MOVE);
+            }
+        }
+        deleteRecursively(tempOutputDir);
+        System.out.printf("BusRawParquetCompactionJob: moved %d partitioned parquet files into %s%n", movedFiles.get(), outputDir);
+    }
+
+    private static void deleteRecursively(Path path) throws Exception {
+        if (!Files.exists(path)) {
+            return;
+        }
+        try (var paths = Files.walk(path)) {
+            for (Path current : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+                Files.deleteIfExists(current);
+            }
+        }
     }
 
     private static List<IncrementalParquetSupport.ParquetFileInfo> listRecentParquetFilesWithFind(
@@ -143,6 +178,7 @@ public class BusRawParquetCompactionJob {
         Process process = new ProcessBuilder(
                 "find",
                 inputDir.toAbsolutePath().toString(),
+                "-ignore_readdir_race",
                 "-maxdepth",
                 "1",
                 "-type",
