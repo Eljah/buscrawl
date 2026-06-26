@@ -76,6 +76,7 @@ public class BusAccessibilityMapCacheJob {
     private static final int TILE_SIZE = 256;
 
     public static void main(String[] args) throws Exception {
+        ImageIO.setUseCache(false);
         Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
                 "BUS_TRAFFIC_BEHAVIOR_DIR",
                 "/home/eljah/data/buscrawl/traffic-behavior"
@@ -193,11 +194,30 @@ public class BusAccessibilityMapCacheJob {
                     Path walkTileRoot = snapshotRoot.resolve("walk");
                     Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
                     Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes = buildTileIndexes(segments, Double.POSITIVE_INFINITY);
+                    logSnapshotStage(snapshotId, "render total tiles start");
                     ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes);
-                    ColorScale totalLogColorScale = renderModes.contains("totalLog") ? renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes) : null;
-                    ColorScale walkColorScale = renderModes.contains("walk") ? renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes) : null;
-                    ColorScale stopTransportColorScale = renderModes.contains("stopTransport") ? renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes) : null;
+                    logSnapshotStage(snapshotId, "render total tiles done");
+                    ColorScale totalLogColorScale = null;
+                    if (renderModes.contains("totalLog")) {
+                        logSnapshotStage(snapshotId, "render totalLog tiles start");
+                        totalLogColorScale = renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes);
+                        logSnapshotStage(snapshotId, "render totalLog tiles done");
+                    }
+                    ColorScale walkColorScale = null;
+                    if (renderModes.contains("walk")) {
+                        logSnapshotStage(snapshotId, "render walk tiles start");
+                        walkColorScale = renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes);
+                        logSnapshotStage(snapshotId, "render walk tiles done");
+                    }
+                    ColorScale stopTransportColorScale = null;
+                    if (renderModes.contains("stopTransport")) {
+                        logSnapshotStage(snapshotId, "render stopTransport tiles start");
+                        stopTransportColorScale = renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes);
+                        logSnapshotStage(snapshotId, "render stopTransport tiles done");
+                    }
+                    logSnapshotStage(snapshotId, "calculate contours start");
                     ContourResult contourResult = calculateContourResult(segments);
+                    logSnapshotStage(snapshotId, "calculate contours done");
                     snapshots.add(new SnapshotPayload(
                             snapshotId,
                             snapshotDate,
@@ -1054,6 +1074,23 @@ public class BusAccessibilityMapCacheJob {
                 });
     }
 
+    private static void logSnapshotStage(String snapshotId, String stage) {
+        Runtime runtime = Runtime.getRuntime();
+        long usedMb = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024;
+        long totalMb = runtime.totalMemory() / 1024 / 1024;
+        long maxMb = runtime.maxMemory() / 1024 / 1024;
+        System.out.printf(
+                Locale.ROOT,
+                "BusAccessibilityMapCacheJob: stage snapshot=%s stage=\"%s\" heapUsedMb=%d heapTotalMb=%d heapMaxMb=%d at=%s%n",
+                snapshotId,
+                stage,
+                usedMb,
+                totalMb,
+                maxMb,
+                Instant.now()
+        );
+    }
+
     private static String pointKey(Point point) {
         return String.format(Locale.ROOT, "%.7f|%.7f", point.lat, point.lon);
     }
@@ -1086,11 +1123,9 @@ public class BusAccessibilityMapCacheJob {
                 Files.move(tempRoot, tileRoot, StandardCopyOption.REPLACE_EXISTING);
             }
             return colorScale;
-        } finally {
-            if (Files.exists(tempRoot)) {
-                clearDirectory(tempRoot);
-                Files.deleteIfExists(tempRoot);
-            }
+        } catch (Exception e) {
+            cleanupTempRootQuietly(tempRoot);
+            throw e;
         }
     }
 
@@ -1118,11 +1153,9 @@ public class BusAccessibilityMapCacheJob {
             } catch (Exception ignored) {
                 Files.move(tempRoot, tileRoot, StandardCopyOption.REPLACE_EXISTING);
             }
-        } finally {
-            if (Files.exists(tempRoot)) {
-                clearDirectory(tempRoot);
-                Files.deleteIfExists(tempRoot);
-            }
+        } catch (Exception e) {
+            cleanupTempRootQuietly(tempRoot);
+            throw e;
         }
     }
 
@@ -1382,11 +1415,42 @@ public class BusAccessibilityMapCacheJob {
         }
         List<Path> paths;
         try (java.util.stream.Stream<Path> stream = Files.walk(dir)) {
-            paths = stream.sorted(Comparator.reverseOrder()).collect(Collectors.toList());
+            paths = stream.sorted(Comparator
+                    .comparingInt(Path::getNameCount)
+                    .reversed()
+                    .thenComparing(Comparator.reverseOrder()))
+                    .collect(Collectors.toList());
         }
         for (Path path : paths) {
             if (!path.equals(dir)) {
                 Files.deleteIfExists(path);
+            }
+        }
+    }
+
+    private static void cleanupTempRootQuietly(Path tempRoot) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                if (!Files.exists(tempRoot)) {
+                    return;
+                }
+                clearDirectory(tempRoot);
+                Files.deleteIfExists(tempRoot);
+                return;
+            } catch (Exception e) {
+                System.err.printf(
+                        Locale.ROOT,
+                        "BusAccessibilityMapCacheJob: failed to cleanup temp tile root attempt=%d path=%s error=%s%n",
+                        attempt,
+                        tempRoot,
+                        e
+                );
+                try {
+                    Thread.sleep(250L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
         }
     }
