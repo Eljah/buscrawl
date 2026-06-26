@@ -93,7 +93,7 @@
     </div>
     <div class="area-card">
       <canvas class="area-chart" id="areaChart" width="960" height="184"></canvas>
-      <div class="area-legend"><span style="--line:#111">15 min area</span><span style="--line:#fff; text-shadow:0 1px 2px #555">30 min area</span><span style="--line:#123158">60 min area</span><span id="areaMeta"></span></div>
+      <div class="area-legend"><span style="--line:#05338c">15 min contour / area</span><span style="--line:#1969b9">30 min contour / area</span><span style="--line:#4fa6de">60 min contour / area</span><span id="areaMeta"></span></div>
     </div>
     <div class="map-shell" id="map">
       <div class="map-zoom"><button id="zoomIn" type="button">+</button><button id="zoomOut" type="button">-</button></div>
@@ -272,9 +272,9 @@ function renderAreaChart(){
     ctx.fillStyle='#657267';ctx.font='20px Georgia, serif';ctx.fillText(`${fmtScale(max*i/3)} km²`,6,y+6);
   }
   const keys=[
-    ['area60SquareKm','#123158'],
-    ['area30SquareKm','#f8f8f2'],
-    ['area15SquareKm','#111111']
+    ['area60SquareKm','#4fa6de'],
+    ['area30SquareKm','#1969b9'],
+    ['area15SquareKm','#05338c']
   ];
   for(const [key,color] of keys){
     ctx.beginPath();
@@ -283,8 +283,7 @@ function renderAreaChart(){
       const y=pad.t+h-h*(Number(p[key]||0)/max);
       if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
     });
-    ctx.strokeStyle=color;ctx.lineWidth=color==='#f8f8f2'?5:4;ctx.stroke();
-    if(color==='#f8f8f2'){ctx.strokeStyle='rgba(25,35,29,.35)';ctx.lineWidth=1;ctx.stroke();}
+    ctx.strokeStyle=color;ctx.lineWidth=4;ctx.stroke();
   }
   ctx.fillStyle='#657267';ctx.font='20px Georgia, serif';
   ctx.fillText(series[0].departureTime||'',pad.l,pad.t+h+24);

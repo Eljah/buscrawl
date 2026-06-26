@@ -64,6 +64,7 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_MINUTES", "0"));
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
     private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
+    private static final double CONTOUR_ENVELOPE_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_ENVELOPE_METERS", "250"));
     private static final double ROAD_NODE_GRID_DEGREES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_ROAD_NODE_GRID_DEGREES", "0.005"));
     private static final int TILE_SIZE = 256;
 
@@ -1184,56 +1185,101 @@ public class BusAccessibilityMapCacheJob {
         int offsetX = tileX * TILE_SIZE;
         int offsetY = tileY * TILE_SIZE;
         BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        try {
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
-            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 60.0, new Color(18, 49, 88, 190), contourStrokeWidth(zoom, 60.0));
-            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 30.0, new Color(255, 255, 255, 215), contourStrokeWidth(zoom, 30.0));
-            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 15.0, new Color(18, 18, 18, 230), contourStrokeWidth(zoom, 15.0));
-        } finally {
-            g.dispose();
-        }
+        drawContourBoundary(image, segments, zoom, offsetX, offsetY, 60.0, new Color(79, 166, 222, 215));
+        drawContourBoundary(image, segments, zoom, offsetX, offsetY, 30.0, new Color(25, 105, 185, 225));
+        drawContourBoundary(image, segments, zoom, offsetX, offsetY, 15.0, new Color(5, 51, 140, 235));
         return image;
     }
 
-    private static void drawContourThreshold(
-            Graphics2D g,
+    private static void drawContourBoundary(
+            BufferedImage target,
             List<AccessibleSegment> segments,
             int zoom,
             int offsetX,
             int offsetY,
             double thresholdMinutes,
-            Color color,
-            int width
+            Color color
     ) {
-        g.setStroke(new BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g.setColor(color);
-        for (AccessibleSegment segment : segments) {
-            if (segment.totalMinutes > thresholdMinutes) {
-                continue;
+        double tileCenterLat = pixelYToLat(offsetY + TILE_SIZE / 2.0, zoom);
+        int streetWidth = Math.max(strokeWidth(zoom), metersToPixels(CONTOUR_ENVELOPE_METERS, tileCenterLat, zoom));
+        int contourWidth = contourStrokeWidth(zoom);
+        int pad = Math.max(streetWidth + contourWidth + 2, 8);
+        BufferedImage mask = new BufferedImage(TILE_SIZE + pad * 2, TILE_SIZE + pad * 2, BufferedImage.TYPE_BYTE_GRAY);
+        Graphics2D g = mask.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+            g.setStroke(new BasicStroke(streetWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g.setColor(Color.WHITE);
+            for (AccessibleSegment segment : segments) {
+                if (segment.totalMinutes > thresholdMinutes) {
+                    continue;
+                }
+                double ax = lonToPixelX(segment.from.lon, zoom);
+                double ay = latToPixelY(segment.from.lat, zoom);
+                double bx = lonToPixelX(segment.to.lon, zoom);
+                double by = latToPixelY(segment.to.lat, zoom);
+                g.drawLine(
+                        (int) Math.round(ax - offsetX + pad),
+                        (int) Math.round(ay - offsetY + pad),
+                        (int) Math.round(bx - offsetX + pad),
+                        (int) Math.round(by - offsetY + pad)
+                );
             }
-            double ax = lonToPixelX(segment.from.lon, zoom);
-            double ay = latToPixelY(segment.from.lat, zoom);
-            double bx = lonToPixelX(segment.to.lon, zoom);
-            double by = latToPixelY(segment.to.lat, zoom);
-            g.drawLine(
-                    (int) Math.round(ax - offsetX),
-                    (int) Math.round(ay - offsetY),
-                    (int) Math.round(bx - offsetX),
-                    (int) Math.round(by - offsetY)
-            );
+        } finally {
+            g.dispose();
+        }
+        int rgb = color.getRGB();
+        for (int y = 0; y < TILE_SIZE; y++) {
+            for (int x = 0; x < TILE_SIZE; x++) {
+                int mx = x + pad;
+                int my = y + pad;
+                if (!isMaskSet(mask, mx, my) || !isMaskBoundary(mask, mx, my)) {
+                    continue;
+                }
+                paintContourPixel(target, x, y, contourWidth, rgb);
+            }
         }
     }
 
-    private static int contourStrokeWidth(int zoom, double thresholdMinutes) {
-        int base = Math.max(2, strokeWidth(zoom) + 1);
-        if (thresholdMinutes <= 15.0) {
-            return base + 2;
+    private static boolean isMaskBoundary(BufferedImage mask, int x, int y) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                if (!isMaskSet(mask, x + dx, y + dy)) {
+                    return true;
+                }
+            }
         }
-        if (thresholdMinutes <= 30.0) {
-            return base + 1;
+        return false;
+    }
+
+    private static boolean isMaskSet(BufferedImage mask, int x, int y) {
+        if (x < 0 || y < 0 || x >= mask.getWidth() || y >= mask.getHeight()) {
+            return false;
         }
-        return base;
+        return (mask.getRGB(x, y) & 0xff) > 0;
+    }
+
+    private static void paintContourPixel(BufferedImage target, int x, int y, int width, int rgb) {
+        int radius = Math.max(0, width / 2);
+        for (int dy = -radius; dy <= radius; dy++) {
+            int py = y + dy;
+            if (py < 0 || py >= TILE_SIZE) {
+                continue;
+            }
+            for (int dx = -radius; dx <= radius; dx++) {
+                int px = x + dx;
+                if (px >= 0 && px < TILE_SIZE) {
+                    target.setRGB(px, py, rgb);
+                }
+            }
+        }
+    }
+
+    private static int contourStrokeWidth(int zoom) {
+        return Math.max(1, strokeWidth(zoom) / 2);
     }
 
     private static int strokeWidth(int zoom) {
@@ -1305,11 +1351,43 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static double contourAreaSquareKm(List<AccessibleSegment> segments, double thresholdMinutes) {
-        double squareMeters = segments.stream()
-                .filter(segment -> segment.totalMinutes <= thresholdMinutes)
-                .mapToDouble(segment -> segment.lengthMeters * SAMPLE_METERS)
-                .sum();
-        return squareMeters / 1_000_000.0;
+        Set<String> occupiedCells = new HashSet<>();
+        double cellMeters = Math.max(25.0, SAMPLE_METERS);
+        int radiusCells = Math.max(0, (int) Math.ceil(CONTOUR_ENVELOPE_METERS / cellMeters));
+        for (AccessibleSegment segment : segments) {
+            if (segment.totalMinutes > thresholdMinutes) {
+                continue;
+            }
+            int steps = Math.max(1, (int) Math.ceil(segment.lengthMeters / cellMeters));
+            for (int step = 0; step <= steps; step++) {
+                double t = step / (double) steps;
+                Point point = interpolate(segment.from, segment.to, t);
+                addContourAreaCells(occupiedCells, point, cellMeters, radiusCells);
+            }
+        }
+        return occupiedCells.size() * cellMeters * cellMeters / 1_000_000.0;
+    }
+
+    private static void addContourAreaCells(Set<String> occupiedCells, Point point, double cellMeters, int radiusCells) {
+        long centerX = contourAreaCellX(point, cellMeters);
+        long centerY = contourAreaCellY(point, cellMeters);
+        for (int dy = -radiusCells; dy <= radiusCells; dy++) {
+            for (int dx = -radiusCells; dx <= radiusCells; dx++) {
+                if (Math.hypot(dx, dy) <= radiusCells + 0.25) {
+                    occupiedCells.add((centerX + dx) + "|" + (centerY + dy));
+                }
+            }
+        }
+    }
+
+    private static long contourAreaCellX(Point point, double cellMeters) {
+        double lonMeters = point.lon * 111_320.0 * Math.cos(Math.toRadians(point.lat));
+        return (long) Math.floor(lonMeters / cellMeters);
+    }
+
+    private static long contourAreaCellY(Point point, double cellMeters) {
+        double latMeters = point.lat * 111_320.0;
+        return (long) Math.floor(latMeters / cellMeters);
     }
 
     private static void writeContourStats(SparkSession spark, Path outputDir, List<SnapshotPayload> snapshots) {
@@ -1517,6 +1595,17 @@ public class BusAccessibilityMapCacheJob {
     private static double latToPixelY(double lat, int zoom) {
         double sin = Math.sin(Math.toRadians(lat));
         return (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * TILE_SIZE * Math.pow(2, zoom);
+    }
+
+    private static double pixelYToLat(double pixelY, int zoom) {
+        double n = Math.PI - 2.0 * Math.PI * pixelY / (TILE_SIZE * Math.pow(2, zoom));
+        return Math.toDegrees(Math.atan(Math.sinh(n)));
+    }
+
+    private static int metersToPixels(double meters, double lat, int zoom) {
+        double earthCircumferenceMeters = 2.0 * Math.PI * 6_378_137.0;
+        double metersPerPixel = Math.cos(Math.toRadians(lat)) * earthCircumferenceMeters / (TILE_SIZE * Math.pow(2, zoom));
+        return Math.max(1, (int) Math.round(meters / Math.max(0.1, metersPerPixel)));
     }
 
     private static int secondsOfDay(Instant instant, LocalDate serviceDate) {
