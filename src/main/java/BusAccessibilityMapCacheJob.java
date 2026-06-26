@@ -71,33 +71,24 @@ public class BusAccessibilityMapCacheJob {
                 "BUS_TRANSFER_POTENTIAL_DIR",
                 "/home/eljah/data/buscrawl/transfer-potential"
         ));
-            Path tileRoot = Path.of(System.getenv().getOrDefault(
-                    "BUS_ACCESSIBILITY_TILE_ROOT",
-                    outputFile.getParent().resolve("tiles/accessibility/current").toString()
-            ));
-            Path walkTileRoot = Path.of(System.getenv().getOrDefault(
-                    "BUS_ACCESSIBILITY_WALK_TILE_ROOT",
-                    tileRoot.resolveSibling("walk-current").toString()
-            ));
-            Path stopTransportTileRoot = Path.of(System.getenv().getOrDefault(
-                    "BUS_ACCESSIBILITY_STOP_TRANSPORT_TILE_ROOT",
-                    tileRoot.resolveSibling("stop-transport-current").toString()
-            ));
-            Path totalFullTileRoot = Path.of(System.getenv().getOrDefault(
-                    "BUS_ACCESSIBILITY_TOTAL_FULL_TILE_ROOT",
-                    tileRoot.resolveSibling("total-full-current").toString()
-            ));
-            Path totalLogTileRoot = Path.of(System.getenv().getOrDefault(
-                    "BUS_ACCESSIBILITY_TOTAL_LOG_TILE_ROOT",
-                    tileRoot.resolveSibling("total-log-current").toString()
-            ));
+        Path tileRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_TILE_ROOT",
+                outputFile.getParent().resolve("tiles/accessibility/current").toString()
+        ));
+        Path tileBaseRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_TILE_BASE_ROOT",
+                tileRoot.getParent() == null ? tileRoot.toString() : tileRoot.getParent().toString()
+        ));
         String originStopQuery = System.getenv().getOrDefault("BUS_ACCESSIBILITY_ORIGIN_STOP", "ПО Тасма");
-        String sourceMode = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SOURCE", "segment-trips").trim();
+        String sourceMode = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SOURCE", "transfer-potential").trim();
         LocalDate serviceDate = LocalDate.parse(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_SERVICE_DATE",
                 LocalDate.now(CITY_ZONE).minusDays(1).toString()
         ));
         LocalTime departureTime = LocalTime.parse(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEPARTURE_TIME", "08:00"));
+        List<LocalDate> serviceDates = parseServiceDates(serviceDate);
+        List<LocalTime> departureTimes = parseDepartureTimes(departureTime);
+        Set<String> renderModes = parseRenderModes();
         String sparkMaster = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SPARK_MASTER", "local[2]");
         Path sparkLocalDir = Path.of(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_SPARK_LOCAL_DIR",
@@ -119,41 +110,86 @@ public class BusAccessibilityMapCacheJob {
 
         try {
             Map<String, StopPoint> stopsById = loadStopsById();
-            Reachability reachability = "transfer-potential".equalsIgnoreCase(sourceMode)
-                    ? calculateReachabilityFromTransferPotential(
-                            spark,
-                            transferPotentialDir.resolve("journeys"),
-                            stopsById,
-                            originStopQuery,
-                            serviceDate,
-                            departureTime
-                    )
-                    : calculateReachability(
-                            spark,
-                            trafficBehaviorDir.resolve("segment-trips"),
-                            stopsById,
-                            originStopQuery,
-                            serviceDate,
-                            departureTime
-                    );
             List<RoadWay> roads = loadRoadWays(osmRoadsFile);
-            List<AccessibleSegment> segments = buildAccessibilitySegments(roads, reachability.stopTimes);
-            ColorScale totalColorScale = renderTiles(segments, tileRoot, ColorMetric.TOTAL);
-            ColorScale totalFullColorScale = renderTiles(segments, totalFullTileRoot, ColorMetric.TOTAL_FULL);
-            ColorScale totalLogColorScale = renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG);
-            ColorScale walkColorScale = renderTiles(segments, walkTileRoot, ColorMetric.WALK);
-            ColorScale stopTransportColorScale = renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT);
-            writePayload(outputFile, tileRoot, walkTileRoot, stopTransportTileRoot, totalFullTileRoot, totalLogTileRoot, originStopQuery, sourceMode, serviceDate, departureTime, reachability, roads, segments, totalColorScale, totalFullColorScale, totalLogColorScale, walkColorScale, stopTransportColorScale);
+            RoadGraph roadGraph = RoadGraph.build(roads);
+            List<SnapshotPayload> snapshots = new ArrayList<>();
+            for (LocalDate snapshotDate : serviceDates) {
+                Map<String, List<Event>> segmentEventsByStartStop = "transfer-potential".equalsIgnoreCase(sourceMode)
+                        ? Map.of()
+                        : loadSegmentEvents(spark, trafficBehaviorDir.resolve("segment-trips"), stopsById, snapshotDate);
+                for (LocalTime snapshotTime : departureTimes) {
+                    Reachability reachability;
+                    try {
+                        reachability = "transfer-potential".equalsIgnoreCase(sourceMode)
+                                ? calculateReachabilityFromTransferPotential(
+                                        spark,
+                                        transferPotentialDir.resolve("journeys"),
+                                        stopsById,
+                                        originStopQuery,
+                                        snapshotDate,
+                                        snapshotTime
+                                )
+                                : calculateReachabilityFromEvents(
+                                        stopsById,
+                                        originStopQuery,
+                                        snapshotDate,
+                                        snapshotTime,
+                                        segmentEventsByStartStop
+                                );
+                    } catch (IllegalStateException e) {
+                        System.out.printf(
+                                Locale.ROOT,
+                                "BusAccessibilityMapCacheJob: skipped snapshot %s: %s%n",
+                                snapshotId(snapshotDate, snapshotTime),
+                                e.getMessage()
+                        );
+                        continue;
+                    }
+                    List<AccessibleSegment> segments = buildAccessibilitySegments(roadGraph, roads, reachability.stopTimes);
+                    String snapshotId = snapshotId(snapshotDate, snapshotTime);
+                    Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
+                    Path totalTileRoot = snapshotRoot.resolve("total");
+                    Path totalFullTileRoot = snapshotRoot.resolve("total-full");
+                    Path totalLogTileRoot = snapshotRoot.resolve("total-log");
+                    Path walkTileRoot = snapshotRoot.resolve("walk");
+                    Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
+                    ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL);
+                    ColorScale totalFullColorScale = renderModes.contains("totalFull") ? renderTiles(segments, totalFullTileRoot, ColorMetric.TOTAL_FULL) : null;
+                    ColorScale totalLogColorScale = renderModes.contains("totalLog") ? renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG) : null;
+                    ColorScale walkColorScale = renderModes.contains("walk") ? renderTiles(segments, walkTileRoot, ColorMetric.WALK) : null;
+                    ColorScale stopTransportColorScale = renderModes.contains("stopTransport") ? renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT) : null;
+                    snapshots.add(new SnapshotPayload(
+                            snapshotId,
+                            snapshotDate,
+                            snapshotTime,
+                            reachability,
+                            segments.size(),
+                            totalColorScale,
+                            totalFullColorScale,
+                            totalLogColorScale,
+                            walkColorScale,
+                            stopTransportColorScale
+                    ));
+                    writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
+                    System.out.printf(
+                            Locale.ROOT,
+                            "BusAccessibilityMapCacheJob: rendered snapshot %s stops=%d segments=%d%n",
+                            snapshotId,
+                            reachability.stopTimes.size(),
+                            segments.size()
+                    );
+                }
+            }
+            writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
+            SnapshotPayload first = snapshots.isEmpty() ? null : snapshots.get(0);
             System.out.printf(
                     Locale.ROOT,
-                    "BusAccessibilityMapCacheJob: wrote %d PNG-tiled accessibility fragments from %d roads, %d origin stops, %d reachable stops using %s to %s and %s%n",
-                    segments.size(),
+                    "BusAccessibilityMapCacheJob: wrote %d accessibility snapshots from %d roads using %s to %s and %s%n",
+                    snapshots.size(),
                     roads.size(),
-                    reachability.originStops.size(),
-                    reachability.stopTimes.size(),
                     sourceMode,
                     outputFile,
-                    tileRoot
+                    tileBaseRoot
             );
         } finally {
             spark.stop();
@@ -168,11 +204,21 @@ public class BusAccessibilityMapCacheJob {
             LocalDate serviceDate,
             LocalTime departureTime
     ) {
-        List<StopPoint> originStops = selectOriginStops(stopsById, originStopQuery);
-        if (originStops.isEmpty()) {
-            throw new IllegalStateException("Origin stop not found in routes.json, query='" + originStopQuery + "'");
-        }
+        return calculateReachabilityFromEvents(
+                stopsById,
+                originStopQuery,
+                serviceDate,
+                departureTime,
+                loadSegmentEvents(spark, segmentTripsDir, stopsById, serviceDate)
+        );
+    }
 
+    private static Map<String, List<Event>> loadSegmentEvents(
+            SparkSession spark,
+            Path segmentTripsDir,
+            Map<String, StopPoint> stopsById,
+            LocalDate serviceDate
+    ) {
         Dataset<Row> rows = spark.read().parquet(segmentTripsDir.toAbsolutePath().toString())
                 .filter(col("serviceDate").cast("string").equalTo(serviceDate.toString()))
                 .select(
@@ -201,6 +247,20 @@ public class BusAccessibilityMapCacheJob {
         for (List<Event> events : eventsByStartStop.values()) {
             events.sort(Comparator.comparingInt(event -> event.departureSecond));
         }
+        return eventsByStartStop;
+    }
+
+    private static Reachability calculateReachabilityFromEvents(
+            Map<String, StopPoint> stopsById,
+            String originStopQuery,
+            LocalDate serviceDate,
+            LocalTime departureTime,
+            Map<String, List<Event>> eventsByStartStop
+    ) {
+        List<StopPoint> originStops = selectOriginStops(stopsById, originStopQuery);
+        if (originStops.isEmpty()) {
+            throw new IllegalStateException("Origin stop not found in routes.json, query='" + originStopQuery + "'");
+        }
 
         int requestedSecond = departureTime.toSecondOfDay();
         Map<String, StateNode> bestByDestination = findBestJourneys(
@@ -226,7 +286,72 @@ public class BusAccessibilityMapCacheJob {
                 })
                 .sorted(Comparator.comparingInt(stop -> stop.transportSeconds))
                 .collect(Collectors.toList());
+        stopTimes = expandStopTimesToSameNameClusters(stopTimes, stopsById);
         return new Reachability(originStops, stopTimes);
+    }
+
+    private static List<LocalDate> parseServiceDates(LocalDate defaultDate) {
+        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SERVICE_DATES", "").trim();
+        if (text.isBlank()) {
+            return List.of(defaultDate);
+        }
+        List<LocalDate> dates = new ArrayList<>();
+        for (String part : text.split(",")) {
+            String value = part.trim();
+            if (!value.isBlank()) {
+                dates.add(LocalDate.parse(value));
+            }
+        }
+        dates.sort(Comparator.naturalOrder());
+        return dates.isEmpty() ? List.of(defaultDate) : dates;
+    }
+
+    private static List<LocalTime> parseDepartureTimes(LocalTime defaultTime) {
+        String explicit = System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEPARTURE_TIMES", "").trim();
+        if (!explicit.isBlank()) {
+            List<LocalTime> times = new ArrayList<>();
+            for (String part : explicit.split(",")) {
+                String value = part.trim();
+                if (!value.isBlank()) {
+                    times.add(LocalTime.parse(value));
+                }
+            }
+            times.sort(Comparator.naturalOrder());
+            return times.isEmpty() ? List.of(defaultTime) : times;
+        }
+        LocalTime start = LocalTime.parse(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEPARTURE_START", "04:00"));
+        LocalTime end = LocalTime.parse(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEPARTURE_END", "23:45"));
+        int stepMinutes = Integer.parseInt(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEPARTURE_STEP_MINUTES", "15"));
+        if (stepMinutes <= 0) {
+            throw new IllegalArgumentException("BUS_ACCESSIBILITY_DEPARTURE_STEP_MINUTES must be positive");
+        }
+        List<LocalTime> times = new ArrayList<>();
+        int startSecond = start.toSecondOfDay();
+        int endSecond = end.toSecondOfDay();
+        if (endSecond < startSecond) {
+            throw new IllegalArgumentException("BUS_ACCESSIBILITY_DEPARTURE_END must not be earlier than BUS_ACCESSIBILITY_DEPARTURE_START");
+        }
+        for (int second = startSecond; second <= endSecond; second += stepMinutes * 60) {
+            times.add(LocalTime.ofSecondOfDay(second));
+        }
+        return times.isEmpty() ? List.of(defaultTime) : times;
+    }
+
+    private static Set<String> parseRenderModes() {
+        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_RENDER_MODES", "total,totalFull,totalLog,walk,stopTransport").trim();
+        Set<String> modes = new HashSet<>();
+        for (String part : text.split(",")) {
+            String mode = part.trim();
+            if (!mode.isBlank()) {
+                modes.add(mode);
+            }
+        }
+        modes.add("total");
+        return modes;
+    }
+
+    private static String snapshotId(LocalDate serviceDate, LocalTime departureTime) {
+        return serviceDate + "-" + String.format(Locale.ROOT, "%02d%02d", departureTime.getHour(), departureTime.getMinute());
     }
 
     private static Map<String, StateNode> findBestJourneys(
@@ -298,7 +423,9 @@ public class BusAccessibilityMapCacheJob {
             throw new IllegalStateException("Transfer potential journeys directory not found: " + journeysDir);
         }
 
-        int bucketMinute = departureTime.toSecondOfDay() / 60;
+        int transferBucketMinutes = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_BUCKET_MINUTES", "10"));
+        int requestedMinute = departureTime.toSecondOfDay() / 60;
+        int bucketMinute = (requestedMinute / transferBucketMinutes) * transferBucketMinutes;
         String[] originIds = originStops.stream().map(stop -> stop.stopId).toArray(String[]::new);
         Dataset<Row> bestJourneys = spark.read().parquet(journeysDir.toAbsolutePath().toString())
                 .filter(col("serviceDate").cast("string").equalTo(serviceDate.toString()))
@@ -326,7 +453,7 @@ public class BusAccessibilityMapCacheJob {
         for (StopPoint origin : originStops) {
             stopTimes.add(new StopTime(origin.stopId, origin.stopName, origin.lat, origin.lon, 0));
         }
-        stopTimes = stopTimes.stream()
+        stopTimes = expandStopTimesToSameNameClusters(stopTimes, stopsById).stream()
                 .collect(Collectors.toMap(
                         stop -> stop.stopId,
                         stop -> stop,
@@ -344,6 +471,49 @@ public class BusAccessibilityMapCacheJob {
             );
         }
         return new Reachability(originStops, stopTimes);
+    }
+
+    private static List<StopTime> expandStopTimesToSameNameClusters(
+            List<StopTime> stopTimes,
+            Map<String, StopPoint> stopsById
+    ) {
+        if (stopTimes.isEmpty()) {
+            return stopTimes;
+        }
+        Map<String, Integer> bestTransportByStopId = stopTimes.stream()
+                .collect(Collectors.toMap(
+                        stop -> stop.stopId,
+                        stop -> stop.transportSeconds,
+                        Math::min,
+                        HashMap::new
+                ));
+        Map<String, List<StopPoint>> allStopsByName = stopsById.values().stream()
+                .collect(Collectors.groupingBy(stop -> normalizeStopName(stop.stopName)));
+        for (StopTime reachable : stopTimes) {
+            String name = normalizeStopName(reachable.stopName);
+            List<StopPoint> sameNameStops = allStopsByName.getOrDefault(name, List.of());
+            for (StopPoint candidate : sameNameStops) {
+                if (candidate.stopId.equals(reachable.stopId)) {
+                    continue;
+                }
+                if (haversineMeters(reachable.lat, reachable.lon, candidate.lat, candidate.lon) <= STOP_CLUSTER_RADIUS_METERS) {
+                    bestTransportByStopId.merge(candidate.stopId, reachable.transportSeconds, Math::min);
+                }
+            }
+        }
+        return bestTransportByStopId.entrySet().stream()
+                .map(entry -> {
+                    StopPoint stop = requireStop(stopsById, entry.getKey());
+                    return new StopTime(
+                            stop.stopId,
+                            stop.stopName,
+                            stop.lat,
+                            stop.lon,
+                            entry.getValue()
+                    );
+                })
+                .sorted(Comparator.comparingInt(stop -> stop.transportSeconds))
+                .collect(Collectors.toList());
     }
 
     private static List<StopPoint> selectOriginStops(Map<String, StopPoint> stopsById, String originStopQuery) {
@@ -439,8 +609,7 @@ public class BusAccessibilityMapCacheJob {
         return !List.of("motorway", "motorway_link", "construction", "proposed", "platform", "elevator").contains(highway);
     }
 
-    private static List<AccessibleSegment> buildAccessibilitySegments(List<RoadWay> roads, List<StopTime> stops) {
-        RoadGraph graph = RoadGraph.build(roads);
+    private static List<AccessibleSegment> buildAccessibilitySegments(RoadGraph graph, List<RoadWay> roads, List<StopTime> stops) {
         Map<String, AccessLabel> accessByNode = calculateRoadGraphAccess(graph, stops);
         Map<String, AccessLabel> nearestStopByNode = calculateRoadGraphNearestStopAccess(graph, stops);
         List<AccessibleSegment> segments = new ArrayList<>();
@@ -727,14 +896,14 @@ public class BusAccessibilityMapCacheJob {
         Files.createDirectories(tempRoot);
         try {
             for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
-                Map<String, BufferedImage> images = new HashMap<>();
+                Map<String, List<AccessibleSegment>> segmentsByTile = new HashMap<>();
                 for (AccessibleSegment segment : segments) {
-                    renderSegmentToTiles(images, segment, zoom, colorScale);
+                    indexSegmentTiles(segmentsByTile, segment, zoom);
                 }
-                for (Map.Entry<String, BufferedImage> entry : images.entrySet()) {
+                for (Map.Entry<String, List<AccessibleSegment>> entry : segmentsByTile.entrySet()) {
                     Path tilePath = tempRoot.resolve(entry.getKey() + ".png");
                     Files.createDirectories(tilePath.getParent());
-                    ImageIO.write(entry.getValue(), "png", tilePath.toFile());
+                    ImageIO.write(renderTileSegments(entry.getKey(), entry.getValue(), colorScale), "png", tilePath.toFile());
                 }
             }
             if (Files.exists(tileRoot)) {
@@ -756,7 +925,7 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
-    private static void renderSegmentToTiles(Map<String, BufferedImage> images, AccessibleSegment segment, int zoom, ColorScale colorScale) {
+    private static void indexSegmentTiles(Map<String, List<AccessibleSegment>> segmentsByTile, AccessibleSegment segment, int zoom) {
         double ax = lonToPixelX(segment.from.lon, zoom);
         double ay = latToPixelY(segment.from.lat, zoom);
         double bx = lonToPixelX(segment.to.lon, zoom);
@@ -766,29 +935,43 @@ public class BusAccessibilityMapCacheJob {
         int maxTileX = (int) Math.floor((Math.max(ax, bx) + margin) / TILE_SIZE);
         int minTileY = (int) Math.floor((Math.min(ay, by) - margin) / TILE_SIZE);
         int maxTileY = (int) Math.floor((Math.max(ay, by) + margin) / TILE_SIZE);
-        Color color = accessibilityColor(colorScale.metric.value(segment), colorScale);
         for (int tileX = minTileX; tileX <= maxTileX; tileX++) {
             for (int tileY = minTileY; tileY <= maxTileY; tileY++) {
                 String key = zoom + "/" + tileX + "/" + tileY;
-                BufferedImage image = images.computeIfAbsent(key, ignored -> new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB));
-                Graphics2D g = image.createGraphics();
-                try {
-                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                    g.setStroke(new BasicStroke(strokeWidth(zoom), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-                    g.setColor(color);
-                    int offsetX = tileX * TILE_SIZE;
-                    int offsetY = tileY * TILE_SIZE;
-                    g.drawLine(
-                            (int) Math.round(ax - offsetX),
-                            (int) Math.round(ay - offsetY),
-                            (int) Math.round(bx - offsetX),
-                            (int) Math.round(by - offsetY)
-                    );
-                } finally {
-                    g.dispose();
-                }
+                segmentsByTile.computeIfAbsent(key, ignored -> new ArrayList<>()).add(segment);
             }
         }
+    }
+
+    private static BufferedImage renderTileSegments(String key, List<AccessibleSegment> segments, ColorScale colorScale) {
+        String[] parts = key.split("/");
+        int zoom = Integer.parseInt(parts[0]);
+        int tileX = Integer.parseInt(parts[1]);
+        int tileY = Integer.parseInt(parts[2]);
+        int offsetX = tileX * TILE_SIZE;
+        int offsetY = tileY * TILE_SIZE;
+        BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setStroke(new BasicStroke(strokeWidth(zoom), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            for (AccessibleSegment segment : segments) {
+                double ax = lonToPixelX(segment.from.lon, zoom);
+                double ay = latToPixelY(segment.from.lat, zoom);
+                double bx = lonToPixelX(segment.to.lon, zoom);
+                double by = latToPixelY(segment.to.lat, zoom);
+                g.setColor(accessibilityColor(colorScale.metric.value(segment), colorScale));
+                g.drawLine(
+                        (int) Math.round(ax - offsetX),
+                        (int) Math.round(ay - offsetY),
+                        (int) Math.round(bx - offsetX),
+                        (int) Math.round(by - offsetY)
+                );
+            }
+        } finally {
+            g.dispose();
+        }
+        return image;
     }
 
     private static int strokeWidth(int zoom) {
@@ -854,29 +1037,24 @@ public class BusAccessibilityMapCacheJob {
 
     private static void writePayload(
             Path outputFile,
-            Path tileRoot,
-            Path walkTileRoot,
-            Path stopTransportTileRoot,
-            Path totalFullTileRoot,
-            Path totalLogTileRoot,
+            Path tileBaseRoot,
             String originStopQuery,
             String sourceMode,
-            LocalDate serviceDate,
-            LocalTime departureTime,
-            Reachability reachability,
             List<RoadWay> roads,
-            List<AccessibleSegment> segments,
-            ColorScale totalColorScale,
-            ColorScale totalFullColorScale,
-            ColorScale totalLogColorScale,
-            ColorScale walkColorScale,
-            ColorScale stopTransportColorScale
+            List<LocalDate> requestedServiceDates,
+            List<LocalTime> requestedDepartureTimes,
+            List<SnapshotPayload> snapshots
     ) throws Exception {
+        if (snapshots.isEmpty()) {
+            throw new IllegalStateException("No accessibility snapshots were generated");
+        }
+        SnapshotPayload first = snapshots.get(0);
+        Reachability reachability = first.reachability;
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("updatedAt", Instant.now().toString());
         payload.put("sourceMode", sourceMode);
-        payload.put("serviceDate", serviceDate.toString());
-        payload.put("departureTime", departureTime.toString());
+        payload.put("serviceDate", first.serviceDate.toString());
+        payload.put("departureTime", first.departureTime.toString());
         payload.put("originStopQuery", originStopQuery);
         payload.put("originStops", reachability.originStops.stream().map(BusAccessibilityMapCacheJob::stopPayload).collect(Collectors.toList()));
         payload.put("originStopName", reachability.originStops.stream().map(stop -> stop.stopName).distinct().collect(Collectors.joining(", ")));
@@ -890,31 +1068,63 @@ public class BusAccessibilityMapCacheJob {
         payload.put("maxCandidateEventsPerStop", MAX_CANDIDATE_EVENTS_PER_STOP);
         payload.put("reachableStops", reachability.stopTimes.size());
         payload.put("roadWays", roads.size());
-        payload.put("segmentCount", segments.size());
+        payload.put("segmentCount", first.segmentCount);
         payload.put("tileMinZoom", MIN_ZOOM);
         payload.put("tileMaxZoom", MAX_ZOOM);
-        payload.put("tileOverlayTemplate", "./tiles/accessibility/current/{z}/{x}/{y}.png");
-        payload.put("totalFullTileOverlayTemplate", "./tiles/accessibility/total-full-current/{z}/{x}/{y}.png");
-        payload.put("totalLogTileOverlayTemplate", "./tiles/accessibility/total-log-current/{z}/{x}/{y}.png");
-        payload.put("walkTileOverlayTemplate", "./tiles/accessibility/walk-current/{z}/{x}/{y}.png");
-        payload.put("stopTransportTileOverlayTemplate", "./tiles/accessibility/stop-transport-current/{z}/{x}/{y}.png");
-        payload.put("tileRoot", tileRoot.toString());
-        payload.put("totalFullTileRoot", totalFullTileRoot.toString());
-        payload.put("totalLogTileRoot", totalLogTileRoot.toString());
-        payload.put("walkTileRoot", walkTileRoot.toString());
-        payload.put("stopTransportTileRoot", stopTransportTileRoot.toString());
-        payload.put("totalColorMinMinutes", round1(totalColorScale.minMinutes));
-        payload.put("totalColorMaxMinutes", round1(totalColorScale.maxMinutes));
-        payload.put("totalFullColorMinMinutes", round1(totalFullColorScale.minMinutes));
-        payload.put("totalFullColorMaxMinutes", round1(totalFullColorScale.maxMinutes));
-        payload.put("totalLogColorMinMinutes", round1(totalLogColorScale.minMinutes));
-        payload.put("totalLogColorMaxMinutes", round1(totalLogColorScale.maxMinutes));
-        payload.put("walkColorMinMinutes", round1(walkColorScale.minMinutes));
-        payload.put("walkColorMaxMinutes", round1(walkColorScale.maxMinutes));
-        payload.put("stopTransportColorMinMinutes", round1(stopTransportColorScale.minMinutes));
-        payload.put("stopTransportColorMaxMinutes", round1(stopTransportColorScale.maxMinutes));
+        payload.put("tileOverlayTemplate", first.tileOverlayTemplate());
+        payload.put("totalFullTileOverlayTemplate", first.totalFullColorScale == null ? null : first.totalFullTileOverlayTemplate());
+        payload.put("totalLogTileOverlayTemplate", first.totalLogColorScale == null ? null : first.totalLogTileOverlayTemplate());
+        payload.put("walkTileOverlayTemplate", first.walkColorScale == null ? null : first.walkTileOverlayTemplate());
+        payload.put("stopTransportTileOverlayTemplate", first.stopTransportColorScale == null ? null : first.stopTransportTileOverlayTemplate());
+        payload.put("tileRoot", tileBaseRoot.resolve(first.id).resolve("total").toString());
+        payload.put("totalFullTileRoot", tileBaseRoot.resolve(first.id).resolve("total-full").toString());
+        payload.put("totalLogTileRoot", tileBaseRoot.resolve(first.id).resolve("total-log").toString());
+        payload.put("walkTileRoot", tileBaseRoot.resolve(first.id).resolve("walk").toString());
+        payload.put("stopTransportTileRoot", tileBaseRoot.resolve(first.id).resolve("stop-transport").toString());
+        payload.put("totalColorMinMinutes", round1(first.totalColorScale.minMinutes));
+        payload.put("totalColorMaxMinutes", round1(first.totalColorScale.maxMinutes));
+        putScale(payload, "totalFull", first.totalFullColorScale);
+        putScale(payload, "totalLog", first.totalLogColorScale);
+        putScale(payload, "walk", first.walkColorScale);
+        putScale(payload, "stopTransport", first.stopTransportColorScale);
         payload.put("stops", reachability.stopTimes.stream().map(BusAccessibilityMapCacheJob::stopTimePayload).collect(Collectors.toList()));
+        payload.put("serviceDates", snapshots.stream().map(snapshot -> snapshot.serviceDate.toString()).distinct().collect(Collectors.toList()));
+        payload.put("departureTimes", snapshots.stream().map(snapshot -> snapshot.departureTime.toString()).distinct().collect(Collectors.toList()));
+        payload.put("requestedServiceDates", requestedServiceDates.stream().map(LocalDate::toString).collect(Collectors.toList()));
+        payload.put("requestedDepartureTimes", requestedDepartureTimes.stream().map(LocalTime::toString).collect(Collectors.toList()));
+        payload.put("availableModes", first.availableModes());
+        payload.put("snapshots", snapshots.stream().map(BusAccessibilityMapCacheJob::snapshotPayload).collect(Collectors.toList()));
         writeJsonAtomic(outputFile, payload);
+    }
+
+    private static Map<String, Object> snapshotPayload(SnapshotPayload snapshot) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("id", snapshot.id);
+        payload.put("serviceDate", snapshot.serviceDate.toString());
+        payload.put("departureTime", snapshot.departureTime.toString());
+        payload.put("reachableStops", snapshot.reachability.stopTimes.size());
+        payload.put("segmentCount", snapshot.segmentCount);
+        payload.put("tileOverlayTemplate", snapshot.tileOverlayTemplate());
+        payload.put("availableModes", snapshot.availableModes());
+        payload.put("totalFullTileOverlayTemplate", snapshot.totalFullColorScale == null ? null : snapshot.totalFullTileOverlayTemplate());
+        payload.put("totalLogTileOverlayTemplate", snapshot.totalLogColorScale == null ? null : snapshot.totalLogTileOverlayTemplate());
+        payload.put("walkTileOverlayTemplate", snapshot.walkColorScale == null ? null : snapshot.walkTileOverlayTemplate());
+        payload.put("stopTransportTileOverlayTemplate", snapshot.stopTransportColorScale == null ? null : snapshot.stopTransportTileOverlayTemplate());
+        payload.put("totalColorMinMinutes", round1(snapshot.totalColorScale.minMinutes));
+        payload.put("totalColorMaxMinutes", round1(snapshot.totalColorScale.maxMinutes));
+        putScale(payload, "totalFull", snapshot.totalFullColorScale);
+        putScale(payload, "totalLog", snapshot.totalLogColorScale);
+        putScale(payload, "walk", snapshot.walkColorScale);
+        putScale(payload, "stopTransport", snapshot.stopTransportColorScale);
+        return payload;
+    }
+
+    private static void putScale(Map<String, Object> payload, String prefix, ColorScale scale) {
+        if (scale == null) {
+            return;
+        }
+        payload.put(prefix + "ColorMinMinutes", round1(scale.minMinutes));
+        payload.put(prefix + "ColorMaxMinutes", round1(scale.maxMinutes));
     }
 
     private static double round1(double value) {
@@ -1343,6 +1553,81 @@ public class BusAccessibilityMapCacheJob {
                 max = min + 120.0;
             }
             return new ColorScale(metric, min, max, metric == ColorMetric.TOTAL_LOG);
+        }
+    }
+
+    private static final class SnapshotPayload {
+        private final String id;
+        private final LocalDate serviceDate;
+        private final LocalTime departureTime;
+        private final Reachability reachability;
+        private final int segmentCount;
+        private final ColorScale totalColorScale;
+        private final ColorScale totalFullColorScale;
+        private final ColorScale totalLogColorScale;
+        private final ColorScale walkColorScale;
+        private final ColorScale stopTransportColorScale;
+
+        private SnapshotPayload(
+                String id,
+                LocalDate serviceDate,
+                LocalTime departureTime,
+                Reachability reachability,
+                int segmentCount,
+                ColorScale totalColorScale,
+                ColorScale totalFullColorScale,
+                ColorScale totalLogColorScale,
+                ColorScale walkColorScale,
+                ColorScale stopTransportColorScale
+        ) {
+            this.id = id;
+            this.serviceDate = serviceDate;
+            this.departureTime = departureTime;
+            this.reachability = reachability;
+            this.segmentCount = segmentCount;
+            this.totalColorScale = totalColorScale;
+            this.totalFullColorScale = totalFullColorScale;
+            this.totalLogColorScale = totalLogColorScale;
+            this.walkColorScale = walkColorScale;
+            this.stopTransportColorScale = stopTransportColorScale;
+        }
+
+        private String tileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/total/{z}/{x}/{y}.png";
+        }
+
+        private String totalFullTileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/total-full/{z}/{x}/{y}.png";
+        }
+
+        private String totalLogTileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/total-log/{z}/{x}/{y}.png";
+        }
+
+        private String walkTileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/walk/{z}/{x}/{y}.png";
+        }
+
+        private String stopTransportTileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/stop-transport/{z}/{x}/{y}.png";
+        }
+
+        private List<String> availableModes() {
+            List<String> modes = new ArrayList<>();
+            modes.add("total");
+            if (totalFullColorScale != null) {
+                modes.add("totalFull");
+            }
+            if (totalLogColorScale != null) {
+                modes.add("totalLog");
+            }
+            if (walkColorScale != null) {
+                modes.add("walk");
+            }
+            if (stopTransportColorScale != null) {
+                modes.add("stopTransport");
+            }
+            return modes;
         }
     }
 

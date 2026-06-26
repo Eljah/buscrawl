@@ -1,6 +1,8 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.BufferedOutputStream;
 import java.io.BufferedWriter;
+import java.io.DataOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -9,15 +11,23 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class BusTransferStaticGraphCacheJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int BINARY_MAGIC = 0x42534731; // BSG1
+    private static final int BINARY_VERSION = 1;
+    private static final Comparator<Label> LABEL_ORDER = Comparator
+            .comparingInt((Label label) -> label.rides)
+            .thenComparingDouble(label -> label.distanceMeters)
+            .thenComparing(Label::pathSignature);
 
     public static void main(String[] args) throws Exception {
         String routesPath = System.getenv().getOrDefault("BUS_ROUTES_JSON", "");
@@ -30,18 +40,43 @@ public class BusTransferStaticGraphCacheJob {
                 "BUS_TRANSFER_STATIC_WALK_RADIUS_METERS",
                 "300"
         ));
+        double stopClusterRadiusMeters = Double.parseDouble(System.getenv().getOrDefault(
+                "BUS_TRANSFER_STATIC_STOP_CLUSTER_RADIUS_METERS",
+                "180"
+        ));
         int maxSettledStatesPerOrigin = Integer.parseInt(System.getenv().getOrDefault(
                 "BUS_TRANSFER_STATIC_MAX_SETTLED_STATES_PER_ORIGIN",
                 "250000"
         ));
+        int maxAlternativesPerState = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_TRANSFER_STATIC_MAX_ALTERNATIVES_PER_STATE",
+                "6"
+        ));
+        int maxAlternativesPerDestination = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_TRANSFER_STATIC_MAX_ALTERNATIVES_PER_DESTINATION",
+                "8"
+        ));
+        double alternativeDistanceRatio = Double.parseDouble(System.getenv().getOrDefault(
+                "BUS_TRANSFER_STATIC_ALTERNATIVE_DISTANCE_RATIO",
+                "1.5"
+        ));
+        boolean writeJsonl = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_TRANSFER_STATIC_WRITE_JSONL",
+                "false"
+        ));
 
         Files.createDirectories(outputDir);
         RouteTopology topology = RouteTopology.load(routesPath);
-        Graph graph = Graph.build(topology, walkRadiusMeters);
+        Graph graph = Graph.build(topology, walkRadiusMeters, stopClusterRadiusMeters);
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("createdAt", Instant.now().toString());
         metadata.put("maxTransfers", maxTransfers);
         metadata.put("walkRadiusMeters", walkRadiusMeters);
+        metadata.put("stopClusterRadiusMeters", stopClusterRadiusMeters);
+        metadata.put("maxAlternativesPerState", maxAlternativesPerState);
+        metadata.put("maxAlternativesPerDestination", maxAlternativesPerDestination);
+        metadata.put("alternativeDistanceRatio", alternativeDistanceRatio);
+        metadata.put("format", writeJsonl ? "binary+jsonl" : "binary");
         metadata.put("stops", graph.stopsById.size());
         metadata.put("rideEdges", graph.rideEdgesByStart.values().stream().mapToInt(List::size).sum());
         metadata.put("walkEdges", graph.walkEdgesByStart.values().stream().mapToInt(List::size).sum());
@@ -52,27 +87,51 @@ public class BusTransferStaticGraphCacheJob {
         );
 
         for (int transferLimit = 1; transferLimit <= maxTransfers; transferLimit++) {
-            Path outputFile = outputDir.resolve("paths-max-transfers-" + transferLimit + ".jsonl");
-            long rows = 0L;
-            try (BufferedWriter writer = Files.newBufferedWriter(outputFile, StandardCharsets.UTF_8)) {
+            Path binaryOutputDir = outputDir.resolve("paths-max-transfers-" + transferLimit + "-by-origin");
+            Path jsonOutputFile = outputDir.resolve("paths-max-transfers-" + transferLimit + ".jsonl");
+            Files.createDirectories(binaryOutputDir);
+            long rows;
+            try (BufferedWriter jsonWriter = writeJsonl ? Files.newBufferedWriter(jsonOutputFile, StandardCharsets.UTF_8) : null) {
+                rows = 0L;
                 for (RouteTopology.StopInfo origin : graph.sortedStops) {
-                    Map<String, Label> bestByDestination = shortestPaths(
+                    Map<String, List<Label>> bestByDestination = shortestPathAlternatives(
                             graph,
                             origin.getStopId(),
                             transferLimit + 1,
-                            maxSettledStatesPerOrigin
+                            maxSettledStatesPerOrigin,
+                            maxAlternativesPerState,
+                            maxAlternativesPerDestination,
+                            alternativeDistanceRatio
                     );
+                    List<BinaryCandidate> originCandidates = new ArrayList<>();
                     for (RouteTopology.StopInfo destination : graph.sortedStops) {
                         if (origin.getStopId().equals(destination.getStopId())) {
                             continue;
                         }
-                        Label label = bestByDestination.get(destination.getStopId());
-                        if (label == null || label.rides == 0) {
+                        List<Label> labels = destinationAlternatives(
+                                graph,
+                                bestByDestination,
+                                destination,
+                                maxAlternativesPerDestination,
+                                alternativeDistanceRatio
+                        );
+                        if (labels == null || labels.isEmpty()) {
                             continue;
                         }
-                        writer.write(MAPPER.writeValueAsString(toRecord(origin, destination, label, transferLimit)));
-                        writer.newLine();
-                        rows++;
+                        for (int i = 0; i < labels.size(); i++) {
+                            Label label = labels.get(i);
+                            originCandidates.add(new BinaryCandidate(destination.getStopId(), label, i));
+                            if (jsonWriter != null) {
+                                jsonWriter.write(MAPPER.writeValueAsString(toRecord(origin, destination, label, transferLimit, i)));
+                                jsonWriter.newLine();
+                            }
+                            rows++;
+                        }
+                    }
+                    Path originFile = binaryOutputDir.resolve(origin.getStopId() + ".bin");
+                    try (DataOutputStream binaryWriter = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(originFile)))) {
+                        writeBinaryHeader(binaryWriter, graph, 1);
+                        writeBinaryOriginBlock(binaryWriter, graph, origin.getStopId(), originCandidates);
                     }
                 }
             }
@@ -80,84 +139,278 @@ public class BusTransferStaticGraphCacheJob {
                     Locale.ROOT,
                     "BusTransferStaticGraphCacheJob: wrote %,d rows to %s%n",
                     rows,
-                    outputFile.toAbsolutePath()
+                    binaryOutputDir.toAbsolutePath()
             );
         }
     }
 
-    private static Map<String, Label> shortestPaths(
+    private static void writeBinaryHeader(DataOutputStream writer, Graph graph, int originCount) throws Exception {
+        writer.writeInt(BINARY_MAGIC);
+        writer.writeInt(BINARY_VERSION);
+        writeStringDictionary(writer, graph.stopIds);
+        writeStringDictionary(writer, graph.routeIds);
+        writeStringDictionary(writer, graph.routeNumbers);
+        writer.writeInt(originCount);
+    }
+
+    private static void writeStringDictionary(DataOutputStream writer, List<String> values) throws Exception {
+        writer.writeInt(values.size());
+        for (String value : values) {
+            writer.writeUTF(value == null ? "" : value);
+        }
+    }
+
+    private static void writeBinaryOriginBlock(
+            DataOutputStream writer,
+            Graph graph,
+            String originStopId,
+            List<BinaryCandidate> candidates
+    ) throws Exception {
+        writer.writeInt(graph.stopIdToInt.get(originStopId));
+        writer.writeInt(candidates.size());
+        for (BinaryCandidate candidate : candidates) {
+            writer.writeInt(graph.stopIdToInt.get(candidate.destinationStopId));
+            writer.writeInt(candidate.label.rides);
+            writer.writeInt((int) Math.round(candidate.label.distanceMeters));
+            writer.writeInt(candidate.alternativeIndex);
+            List<PathEdge> edges = pathEdges(candidate.label);
+            writer.writeInt(edges.size());
+            for (PathEdge edge : edges) {
+                if (edge instanceof WalkEdge) {
+                    WalkEdge walk = (WalkEdge) edge;
+                    writer.writeByte(0);
+                    writer.writeInt(graph.stopIdToInt.get(walk.startStopId));
+                    writer.writeInt(graph.stopIdToInt.get(walk.endStopId));
+                    writer.writeInt((int) Math.round(walk.distanceMeters));
+                    continue;
+                }
+                RideEdge ride = (RideEdge) edge;
+                writer.writeByte(1);
+                writer.writeInt(graph.stopIdToInt.get(ride.startStopId));
+                writer.writeInt(graph.stopIdToInt.get(ride.endStopId));
+                writer.writeInt((int) Math.round(ride.distanceMeters));
+                writer.writeInt(graph.routeIdToInt.get(ride.internalRouteId));
+                writer.writeInt(graph.routeNumberToInt.get(ride.routeNumber));
+                writer.writeInt(ride.direction);
+            }
+        }
+    }
+
+    private static List<PathEdge> pathEdges(Label label) {
+        List<PathEdge> edges = new ArrayList<>();
+        for (Label cursor = label; cursor != null && cursor.edge != null; cursor = cursor.previous) {
+            edges.add(0, cursor.edge);
+        }
+        return edges;
+    }
+
+    private static Map<String, List<Label>> shortestPathAlternatives(
             Graph graph,
             String originStopId,
             int maxRides,
-            int maxSettledStates
+            int maxSettledStates,
+            int maxAlternativesPerState,
+            int maxAlternativesPerDestination,
+            double alternativeDistanceRatio
     ) {
-        PriorityQueue<Label> queue = new PriorityQueue<>(Comparator.comparingDouble(label -> label.distanceMeters));
-        Map<StateKey, Double> bestStateDistance = new HashMap<>();
-        Map<String, Label> bestByDestination = new HashMap<>();
+        PriorityQueue<Label> queue = new PriorityQueue<>(LABEL_ORDER);
+        Map<StateKey, List<Label>> labelsByState = new HashMap<>();
+        Map<String, List<Label>> labelsByDestination = new HashMap<>();
         Label start = new Label(originStopId, 0, 0.0, null, null);
         queue.add(start);
-        bestStateDistance.put(new StateKey(originStopId, 0), 0.0);
+        labelsByState.put(new StateKey(originStopId, 0), new ArrayList<>(List.of(start)));
         int settled = 0;
 
         while (!queue.isEmpty() && settled < maxSettledStates) {
             Label current = queue.poll();
             StateKey currentKey = new StateKey(current.stopId, current.rides);
-            double knownDistance = bestStateDistance.getOrDefault(currentKey, Double.POSITIVE_INFINITY);
-            if (current.distanceMeters > knownDistance + 0.001) {
+            if (!labelsByState.getOrDefault(currentKey, List.of()).contains(current)) {
                 continue;
             }
             settled++;
             if (current.rides > 0) {
-                bestByDestination.merge(
+                addDestinationLabel(
+                        labelsByDestination,
                         current.stopId,
                         current,
-                        (oldLabel, newLabel) -> oldLabel.distanceMeters <= newLabel.distanceMeters ? oldLabel : newLabel
+                        maxAlternativesPerDestination,
+                        alternativeDistanceRatio
                 );
             }
 
             if (current.rides < maxRides) {
                 for (RideEdge edge : graph.rideEdgesByStart.getOrDefault(current.stopId, List.of())) {
-                    addLabel(queue, bestStateDistance, new Label(
+                    if (current.containsStop(edge.endStopId)) {
+                        continue;
+                    }
+                    addStateLabel(queue, labelsByState, new Label(
                             edge.endStopId,
                             current.rides + 1,
                             current.distanceMeters + edge.distanceMeters,
                             current,
                             edge
-                    ));
+                    ), maxAlternativesPerState, alternativeDistanceRatio);
                 }
             }
             for (WalkEdge edge : graph.walkEdgesByStart.getOrDefault(current.stopId, List.of())) {
-                addLabel(queue, bestStateDistance, new Label(
+                if (current.containsStop(edge.endStopId)) {
+                    continue;
+                }
+                addStateLabel(queue, labelsByState, new Label(
                         edge.endStopId,
                         current.rides,
                         current.distanceMeters + edge.distanceMeters,
                         current,
                         edge
-                ));
+                ), maxAlternativesPerState, alternativeDistanceRatio);
             }
         }
-        return bestByDestination;
+        labelsByDestination.replaceAll((stopId, labels) -> filteredAlternatives(
+                labels,
+                maxAlternativesPerDestination,
+                alternativeDistanceRatio
+        ));
+        return labelsByDestination;
     }
 
-    private static void addLabel(
+    private static List<Label> destinationAlternatives(
+            Graph graph,
+            Map<String, List<Label>> rawBestByDestination,
+            RouteTopology.StopInfo destination,
+            int maxAlternatives,
+            double alternativeDistanceRatio
+    ) {
+        List<Label> alternatives = new ArrayList<>();
+        for (ClusterStop clusterStop : graph.clusterStopsByStopId.getOrDefault(destination.getStopId(), List.of())) {
+            List<Label> labels = rawBestByDestination.get(clusterStop.stopId);
+            if (labels == null || labels.isEmpty()) {
+                continue;
+            }
+            for (Label label : labels) {
+                Label candidate = label;
+                if (!clusterStop.stopId.equals(destination.getStopId())) {
+                    candidate = new Label(
+                            destination.getStopId(),
+                            label.rides,
+                            label.distanceMeters + clusterStop.distanceMeters,
+                            label,
+                            new WalkEdge(
+                                    clusterStop.stopId,
+                                    destination.getStopId(),
+                                    clusterStop.stopName,
+                                    destination.getStopName(),
+                                    clusterStop.distanceMeters
+                            )
+                    );
+                }
+                if (isUsefulAlternative(alternatives, candidate, alternativeDistanceRatio)) {
+                    alternatives.add(candidate);
+                    alternatives.sort(LABEL_ORDER);
+                    trimAlternatives(alternatives, maxAlternatives, alternativeDistanceRatio);
+                }
+            }
+        }
+        return filteredAlternatives(alternatives, maxAlternatives, alternativeDistanceRatio);
+    }
+
+    private static void addStateLabel(
             PriorityQueue<Label> queue,
-            Map<StateKey, Double> bestStateDistance,
-            Label next
+            Map<StateKey, List<Label>> labelsByState,
+            Label next,
+            int maxAlternatives,
+            double alternativeDistanceRatio
     ) {
         StateKey key = new StateKey(next.stopId, next.rides);
-        double oldDistance = bestStateDistance.getOrDefault(key, Double.POSITIVE_INFINITY);
-        if (next.distanceMeters + 0.001 >= oldDistance) {
+        List<Label> labels = labelsByState.computeIfAbsent(key, ignored -> new ArrayList<>());
+        if (!isUsefulAlternative(labels, next, alternativeDistanceRatio)) {
             return;
         }
-        bestStateDistance.put(key, next.distanceMeters);
+        labels.add(next);
+        labels.sort(LABEL_ORDER);
+        trimAlternatives(labels, maxAlternatives, alternativeDistanceRatio);
+        if (!labels.contains(next)) {
+            return;
+        }
         queue.add(next);
+    }
+
+    private static void addDestinationLabel(
+            Map<String, List<Label>> labelsByDestination,
+            String stopId,
+            Label next,
+            int maxAlternatives,
+            double alternativeDistanceRatio
+    ) {
+        List<Label> labels = labelsByDestination.computeIfAbsent(stopId, ignored -> new ArrayList<>());
+        if (!isUsefulAlternative(labels, next, alternativeDistanceRatio)) {
+            return;
+        }
+        labels.add(next);
+        labels.sort(LABEL_ORDER);
+        trimAlternatives(labels, maxAlternatives, alternativeDistanceRatio);
+    }
+
+    private static boolean isUsefulAlternative(List<Label> existing, Label next, double alternativeDistanceRatio) {
+        String nextSignature = next.pathSignature();
+        for (Label label : existing) {
+            if (label.pathSignature().equals(nextSignature)) {
+                return false;
+            }
+        }
+        double bestDistance = existing.stream()
+                .mapToDouble(label -> label.distanceMeters)
+                .min()
+                .orElse(Double.POSITIVE_INFINITY);
+        int bestRides = existing.stream()
+                .mapToInt(label -> label.rides)
+                .min()
+                .orElse(Integer.MAX_VALUE);
+        return bestDistance == Double.POSITIVE_INFINITY
+                || next.distanceMeters <= bestDistance * alternativeDistanceRatio + 0.001
+                || next.rides <= bestRides;
+    }
+
+    private static List<Label> filteredAlternatives(
+            List<Label> labels,
+            int maxAlternatives,
+            double alternativeDistanceRatio
+    ) {
+        List<Label> copy = new ArrayList<>(labels);
+        copy.sort(LABEL_ORDER);
+        trimAlternatives(copy, maxAlternatives, alternativeDistanceRatio);
+        return copy;
+    }
+
+    private static void trimAlternatives(List<Label> labels, int maxAlternatives, double alternativeDistanceRatio) {
+        if (labels.isEmpty()) {
+            return;
+        }
+        double bestDistance = labels.stream().mapToDouble(label -> label.distanceMeters).min().orElse(Double.POSITIVE_INFINITY);
+        int bestRides = labels.stream().mapToInt(label -> label.rides).min().orElse(Integer.MAX_VALUE);
+        Set<String> signatures = new HashSet<>();
+        List<Label> kept = new ArrayList<>();
+        for (Label label : labels) {
+            if (!signatures.add(label.pathSignature())) {
+                continue;
+            }
+            if (label.distanceMeters > bestDistance * alternativeDistanceRatio + 0.001 && label.rides > bestRides) {
+                continue;
+            }
+            kept.add(label);
+            if (kept.size() >= maxAlternatives) {
+                break;
+            }
+        }
+        labels.clear();
+        labels.addAll(kept);
     }
 
     private static Map<String, Object> toRecord(
             RouteTopology.StopInfo origin,
             RouteTopology.StopInfo destination,
             Label label,
-            int transferLimit
+            int transferLimit,
+            int alternativeIndex
     ) {
         List<PathEdge> edges = new ArrayList<>();
         for (Label cursor = label; cursor != null && cursor.edge != null; cursor = cursor.previous) {
@@ -178,6 +431,7 @@ public class BusTransferStaticGraphCacheJob {
         record.put("destinationStopId", destination.getStopId());
         record.put("destinationStopName", destination.getStopName());
         record.put("maxTransfers", transferLimit);
+        record.put("alternativeIndex", alternativeIndex);
         record.put("transferCount", Math.max(0, label.rides - 1));
         record.put("rideCount", label.rides);
         record.put("totalDistanceMeters", Math.round(label.distanceMeters));
@@ -196,6 +450,7 @@ public class BusTransferStaticGraphCacheJob {
     }
 
     private interface PathEdge {
+        String signature();
     }
 
     private static final class Graph {
@@ -203,20 +458,47 @@ public class BusTransferStaticGraphCacheJob {
         private final List<RouteTopology.StopInfo> sortedStops;
         private final Map<String, List<RideEdge>> rideEdgesByStart;
         private final Map<String, List<WalkEdge>> walkEdgesByStart;
+        private final Map<String, List<ClusterStop>> clusterStopsByStopId;
+        private final List<String> stopIds;
+        private final Map<String, Integer> stopIdToInt;
+        private final List<String> routeIds;
+        private final Map<String, Integer> routeIdToInt;
+        private final List<String> routeNumbers;
+        private final Map<String, Integer> routeNumberToInt;
 
         private Graph(
                 Map<String, RouteTopology.StopInfo> stopsById,
                 List<RouteTopology.StopInfo> sortedStops,
                 Map<String, List<RideEdge>> rideEdgesByStart,
-                Map<String, List<WalkEdge>> walkEdgesByStart
+                Map<String, List<WalkEdge>> walkEdgesByStart,
+                Map<String, List<ClusterStop>> clusterStopsByStopId
         ) {
             this.stopsById = stopsById;
             this.sortedStops = sortedStops;
             this.rideEdgesByStart = rideEdgesByStart;
             this.walkEdgesByStart = walkEdgesByStart;
+            this.clusterStopsByStopId = clusterStopsByStopId;
+            this.stopIds = sortedStops.stream()
+                    .map(RouteTopology.StopInfo::getStopId)
+                    .collect(Collectors.toList());
+            this.stopIdToInt = indexByValue(stopIds);
+            this.routeIds = rideEdgesByStart.values().stream()
+                    .flatMap(Collection::stream)
+                    .map(edge -> edge.internalRouteId)
+                    .distinct()
+                    .sorted()
+                    .collect(Collectors.toList());
+            this.routeIdToInt = indexByValue(routeIds);
+            this.routeNumbers = rideEdgesByStart.values().stream()
+                    .flatMap(Collection::stream)
+                    .map(edge -> edge.routeNumber)
+                    .distinct()
+                    .sorted()
+                    .collect(Collectors.toList());
+            this.routeNumberToInt = indexByValue(routeNumbers);
         }
 
-        private static Graph build(RouteTopology topology, double walkRadiusMeters) {
+        private static Graph build(RouteTopology topology, double walkRadiusMeters, double stopClusterRadiusMeters) {
             Map<String, RouteTopology.StopInfo> stopsById = topology.getStops().stream()
                     .collect(Collectors.toMap(
                             RouteTopology.StopInfo::getStopId,
@@ -289,7 +571,83 @@ public class BusTransferStaticGraphCacheJob {
                             .add(new WalkEdge(right.getStopId(), left.getStopId(), right.getStopName(), left.getStopName(), distance));
                 }
             }
-            return new Graph(stopsById, sortedStops, rideEdgesByStart, walkEdgesByStart);
+            return new Graph(
+                    stopsById,
+                    sortedStops,
+                    rideEdgesByStart,
+                    walkEdgesByStart,
+                    buildSameNameClusters(sortedStops, stopClusterRadiusMeters)
+            );
+        }
+
+        private static Map<String, List<ClusterStop>> buildSameNameClusters(
+                List<RouteTopology.StopInfo> stops,
+                double stopClusterRadiusMeters
+        ) {
+            Map<String, List<RouteTopology.StopInfo>> byName = stops.stream()
+                    .collect(Collectors.groupingBy(stop -> normalizeStopName(stop.getStopName())));
+            Map<String, List<ClusterStop>> result = new HashMap<>();
+            for (List<RouteTopology.StopInfo> sameNameStops : byName.values()) {
+                for (RouteTopology.StopInfo destination : sameNameStops) {
+                    List<ClusterStop> cluster = new ArrayList<>();
+                    for (RouteTopology.StopInfo candidate : sameNameStops) {
+                        double distance = haversineMeters(
+                                destination.getLatitude(),
+                                destination.getLongitude(),
+                                candidate.getLatitude(),
+                                candidate.getLongitude()
+                        );
+                        if (destination.getStopId().equals(candidate.getStopId()) || distance <= stopClusterRadiusMeters) {
+                            cluster.add(new ClusterStop(
+                                    candidate.getStopId(),
+                                    candidate.getStopName(),
+                                    distance
+                            ));
+                        }
+                    }
+                    cluster.sort(Comparator
+                            .comparingDouble((ClusterStop stop) -> stop.distanceMeters)
+                            .thenComparing(stop -> stop.stopId));
+                    result.put(destination.getStopId(), cluster);
+                }
+            }
+            return result;
+        }
+    }
+
+    private static Map<String, Integer> indexByValue(List<String> values) {
+        Map<String, Integer> result = new HashMap<>();
+        for (int i = 0; i < values.size(); i++) {
+            result.put(values.get(i), i);
+        }
+        return result;
+    }
+
+    private static String normalizeStopName(String stopName) {
+        return stopName == null ? "" : stopName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static final class BinaryCandidate {
+        private final String destinationStopId;
+        private final Label label;
+        private final int alternativeIndex;
+
+        private BinaryCandidate(String destinationStopId, Label label, int alternativeIndex) {
+            this.destinationStopId = destinationStopId;
+            this.label = label;
+            this.alternativeIndex = alternativeIndex;
+        }
+    }
+
+    private static final class ClusterStop {
+        private final String stopId;
+        private final String stopName;
+        private final double distanceMeters;
+
+        private ClusterStop(String stopId, String stopName, double distanceMeters) {
+            this.stopId = stopId;
+            this.stopName = stopName;
+            this.distanceMeters = distanceMeters;
         }
     }
 
@@ -344,6 +702,11 @@ public class BusTransferStaticGraphCacheJob {
             item.put("distanceMeters", distanceMeters);
             return item;
         }
+
+        @Override
+        public String signature() {
+            return "ride:" + internalRouteId + ":" + direction + ":" + startStopId + ":" + endStopId;
+        }
     }
 
     private static final class WalkEdge implements PathEdge {
@@ -377,6 +740,11 @@ public class BusTransferStaticGraphCacheJob {
             item.put("distanceMeters", distanceMeters);
             return item;
         }
+
+        @Override
+        public String signature() {
+            return "walk:" + startStopId + ":" + endStopId;
+        }
     }
 
     private static final class Label {
@@ -392,6 +760,23 @@ public class BusTransferStaticGraphCacheJob {
             this.distanceMeters = distanceMeters;
             this.previous = previous;
             this.edge = edge;
+        }
+
+        private boolean containsStop(String candidateStopId) {
+            for (Label cursor = this; cursor != null; cursor = cursor.previous) {
+                if (cursor.stopId.equals(candidateStopId)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private String pathSignature() {
+            List<String> parts = new ArrayList<>();
+            for (Label cursor = this; cursor != null && cursor.edge != null; cursor = cursor.previous) {
+                parts.add(0, cursor.edge.signature());
+            }
+            return String.join(";", parts);
         }
     }
 

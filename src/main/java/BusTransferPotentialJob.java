@@ -9,6 +9,8 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.io.BufferedInputStream;
+import java.io.DataInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -48,10 +50,15 @@ import static org.apache.spark.sql.functions.sum;
 
 public class BusTransferPotentialJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int STATIC_GRAPH_BINARY_MAGIC = 0x42534731; // BSG1
+    private static final int STATIC_GRAPH_BINARY_VERSION = 1;
     private static final String JOURNEYS_DIR = "journeys";
     private static final String FRAGMENTS_DIR = "journey-fragments";
     private static final String REQUEST_COUNTS_DIR = "request-grid-counts";
     private static final ZoneId UTC = ZoneOffset.UTC;
+    private static final int MAX_RIDE_SEGMENT_GAP_SECONDS = Integer.parseInt(
+            System.getenv().getOrDefault("BUS_TRANSFER_MAX_RIDE_SEGMENT_GAP_SECONDS", "1800")
+    );
 
     public static void main(String[] args) throws Exception {
         Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
@@ -99,11 +106,15 @@ public class BusTransferPotentialJob {
                 String.valueOf(Math.max(0, Math.min(3, maxRides - 1)))
         ));
         int outputPartitions = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_POTENTIAL_OUTPUT_PARTITIONS", "24"));
-        int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "100000"));
-        String stopBeforeLocalTimeText = System.getenv().getOrDefault("BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME", "").trim();
+        int maxBucketsPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_MAX_BUCKETS_PER_RUN", "24"));
+        String stopBeforeLocalTimeText = System.getenv().getOrDefault("BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME", "04:00").trim();
         long maxDetailedJourneysPerDay = Long.parseLong(System.getenv().getOrDefault(
                 "BUS_TRANSFER_MAX_DETAILED_JOURNEYS_PER_DAY",
                 "5000000"
+        ));
+        Set<String> originStopFilter = parseStopIdFilter(System.getenv().getOrDefault(
+                "BUS_TRANSFER_ORIGIN_STOP_IDS",
+                ""
         ));
         String targetDateText = System.getenv().getOrDefault("BUS_TRANSFER_TARGET_DATE", "").trim();
         boolean backfill = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TRANSFER_BACKFILL", "false"));
@@ -172,6 +183,7 @@ public class BusTransferPotentialJob {
                         staticRouteNetworkFallback,
                         staticFallbackMinDestinations,
                         maxDetailedJourneysPerDay,
+                        originStopFilter,
                         outputPartitions,
                         writeBatchRows,
                         state.processedBucketKeys,
@@ -244,6 +256,7 @@ public class BusTransferPotentialJob {
             boolean staticRouteNetworkFallback,
             int staticFallbackMinDestinations,
             long maxDetailedJourneysPerDay,
+            Set<String> originStopFilter,
             int outputPartitions,
             int writeBatchRows,
             Collection<String> alreadyProcessedBucketKeys,
@@ -267,6 +280,8 @@ public class BusTransferPotentialJob {
                         "startStopName",
                         "endStopId",
                         "endStopName",
+                        "startStopOrder",
+                        "endStopOrder",
                         "distanceMeters",
                         "startExitedStopAt",
                         "endEnteredStopAt",
@@ -314,6 +329,20 @@ public class BusTransferPotentialJob {
         SearchMode parsedSearchMode = SearchMode.parse(searchMode);
 
         List<String> orderedStops = new ArrayList<>(stopIds);
+        List<String> orderedOriginStops = orderedStops;
+        if (!originStopFilter.isEmpty()) {
+            orderedOriginStops = orderedStops.stream()
+                    .filter(originStopFilter::contains)
+                    .collect(Collectors.toList());
+            if (orderedOriginStops.isEmpty()) {
+                System.out.printf(
+                        Locale.ROOT,
+                        "BusTransferPotentialJob: no origin stops from BUS_TRANSFER_ORIGIN_STOP_IDS are present for %s%n",
+                        serviceDateText
+                );
+                return ProcessResult.empty();
+            }
+        }
         int firstBucket = floorToBucket(minDepartureSecond, bucketMinutes);
         int lastBucket = floorToBucket(maxDepartureSecond, bucketMinutes);
         List<String> processedBucketKeys = new ArrayList<>();
@@ -339,11 +368,11 @@ public class BusTransferPotentialJob {
                     "BusTransferPotentialJob: processing %s bucketMinute=%d stops=%d events=%d%n",
                     serviceDateText,
                     bucketMinute,
-                    orderedStops.size(),
+                    orderedOriginStops.size(),
                     events.size()
             );
             Timestamp requestedDepartureAt = Timestamp.from(serviceDate.atStartOfDay(cityZone).plusSeconds(bucketSecond).toInstant());
-            long possibleRequests = possiblePerOrigin * orderedStops.size();
+            long possibleRequests = possiblePerOrigin * orderedOriginStops.size();
             long reachableRequests = 0L;
             long fragmentCount = 0L;
             List<Row> journeyRows = new ArrayList<>();
@@ -353,7 +382,7 @@ public class BusTransferPotentialJob {
             clearBucketPartition(outputRoot.resolve(FRAGMENTS_DIR), serviceDateText, bucketMinute);
             clearBucketPartition(outputRoot.resolve(REQUEST_COUNTS_DIR), serviceDateText, bucketMinute);
 
-            for (String originStopId : orderedStops) {
+            for (String originStopId : orderedOriginStops) {
                 Map<String, StateNode> bestByDestination = findBestJourneys(
                         originStopId,
                         bucketSecond,
@@ -387,7 +416,7 @@ public class BusTransferPotentialJob {
                             .map(fragment -> fragment.routeNumber)
                             .collect(Collectors.joining(">"));
                     int totalWaitSeconds = fragments.stream().mapToInt(fragment -> fragment.waitBeforeSeconds).sum();
-                    int totalRideSeconds = path.stream().mapToInt(event -> event.travelDurationSeconds).sum();
+                    int totalRideSeconds = fragments.stream().mapToInt(fragment -> fragment.rideSeconds).sum();
                     int totalJourneySeconds = destination.arrivalSecond - bucketSecond;
                     Event first = path.get(0);
                     Event last = path.get(path.size() - 1);
@@ -553,7 +582,7 @@ public class BusTransferPotentialJob {
             int maxCandidateEventsPerRoutePattern
     ) {
         Map<String, StateNode> bestByDestination = new HashMap<>();
-        List<StaticPathCandidate> candidates = staticGraphCache.candidatesByOrigin.get(originStopId);
+        List<StaticPathCandidate> candidates = staticGraphCache.candidatesForOrigin(originStopId);
         if (candidates == null || candidates.isEmpty()) {
             return bestByDestination;
         }
@@ -614,9 +643,14 @@ public class BusTransferPotentialJob {
         }
         int startIndex = lowerBoundByDeparture(startEvents, current.arrivalSecond);
         int accepted = 0;
+        Set<String> attemptedBoardEvents = new HashSet<>();
         for (int i = startIndex; i < startEvents.size() && accepted < maxCandidateEventsPerRoutePattern; i++) {
             Event boardEvent = startEvents.get(i);
             if (!rideEdge.matches(boardEvent)) {
+                continue;
+            }
+            String boardKey = boardEvent.rideKey() + "|" + boardEvent.startStopId + "|" + boardEvent.endStopId + "|" + boardEvent.arrivalSecond;
+            if (!attemptedBoardEvents.add(boardKey)) {
                 continue;
             }
             accepted++;
@@ -648,10 +682,18 @@ public class BusTransferPotentialJob {
                 if (!event.startStopId.equals(boardEvent.startStopId) || event.departureSecond < current.arrivalSecond) {
                     return null;
                 }
-            } else if (last == null
-                    || !event.startStopId.equals(last.endStopId)
-                    || event.departureSecond < last.arrivalSecond) {
+            } else if (last == null || event.departureSecond < last.arrivalSecond) {
+                if (isDuplicateOrOverlappingSegment(event, last)) {
+                    continue;
+                }
+                continue;
+            } else if (isNewVehicleRun(event, last)) {
                 break;
+            } else {
+                StateNode skipped = skippedTargetNode(current, previous, last, event, targetStopId, searchIndex, rideCount);
+                if (skipped != null) {
+                    return skipped;
+                }
             }
             StateNode next = new StateNode(event.endStopId, event.arrivalSecond, event.rideKey(), rideCount, previous, event);
             if (event.endStopId.equals(targetStopId)) {
@@ -804,9 +846,12 @@ public class BusTransferPotentialJob {
                 if (!event.startStopId.equals(current.stopId) || event.departureSecond < current.arrivalSecond) {
                     return;
                 }
-            } else if (last == null
-                    || !event.startStopId.equals(last.endStopId)
-                    || event.departureSecond < last.arrivalSecond) {
+            } else if (last == null || event.departureSecond < last.arrivalSecond) {
+                if (isDuplicateOrOverlappingSegment(event, last)) {
+                    continue;
+                }
+                continue;
+            } else if (isNewVehicleRun(event, last)) {
                 break;
             }
             StateNode next = new StateNode(event.endStopId, event.arrivalSecond, event.rideKey(), rideCount, previous, event);
@@ -821,6 +866,50 @@ public class BusTransferPotentialJob {
             previous = next;
             last = event;
         }
+    }
+
+    private static boolean isDuplicateOrOverlappingSegment(Event event, Event last) {
+        return last != null
+                && event.segmentId.equals(last.segmentId)
+                && event.startStopId.equals(last.startStopId)
+                && event.endStopId.equals(last.endStopId)
+                && event.arrivalSecond <= last.arrivalSecond;
+    }
+
+    private static boolean isNewVehicleRun(Event event, Event last) {
+        if (last == null) {
+            return false;
+        }
+        return event.departureSecond - last.arrivalSecond > MAX_RIDE_SEGMENT_GAP_SECONDS;
+    }
+
+    private static StateNode skippedTargetNode(
+            StateNode current,
+            StateNode previous,
+            Event last,
+            Event nextEvent,
+            String targetStopId,
+            SearchIndex searchIndex,
+            int rideCount
+    ) {
+        if (last == null
+                || !last.routePatternKey().equals(nextEvent.routePatternKey())
+                || nextEvent.startStopOrder <= last.endStopOrder + 1) {
+            return null;
+        }
+        StopOnRoute target = searchIndex.stopOnRoute(last.routePatternKey(), targetStopId);
+        if (target == null || target.stopOrder <= last.endStopOrder || target.stopOrder >= nextEvent.startStopOrder) {
+            return null;
+        }
+        int gapSeconds = nextEvent.departureSecond - last.arrivalSecond;
+        if (gapSeconds <= 0) {
+            return null;
+        }
+        int orderGap = nextEvent.startStopOrder - last.endStopOrder;
+        int targetOffset = target.stopOrder - last.endStopOrder;
+        int arrivalSecond = last.arrivalSecond + Math.max(1, (int) Math.round(gapSeconds * (targetOffset / (double) orderGap)));
+        Event synthetic = Event.syntheticSkippedStop(last, target, arrivalSecond);
+        return new StateNode(synthetic.endStopId, synthetic.arrivalSecond, synthetic.rideKey(), rideCount, previous, synthetic);
     }
 
     private static int bestArrival(Map<String, int[]> bestStateTime, String stopId, int rideCount) {
@@ -875,14 +964,14 @@ public class BusTransferPotentialJob {
                 current.boardAt = event.departureInstant;
                 current.alightAt = event.arrivalInstant;
                 current.waitBeforeSeconds = Math.max(0, event.departureSecond - readySecond);
-                current.rideSeconds = event.travelDurationSeconds;
+                current.rideSeconds = Math.max(0, event.arrivalSecond - event.departureSecond);
                 current.segmentCount = 1;
                 current.segmentTripIds = event.tripId;
             } else {
                 current.endStopId = event.endStopId;
                 current.endStopName = event.endStopName;
                 current.alightAt = event.arrivalInstant;
-                current.rideSeconds += event.travelDurationSeconds;
+                current.rideSeconds = Math.max(0, (int) java.time.Duration.between(current.boardAt, event.arrivalInstant).getSeconds());
                 current.segmentCount++;
                 current.segmentTripIds = current.segmentTripIds + "," + event.tripId;
             }
@@ -989,6 +1078,16 @@ public class BusTransferPotentialJob {
     private static Set<String> collectTopologyStopIds(RouteTopology topology) {
         return topology.buildStops().stream()
                 .map(stop -> String.valueOf(stop.get("stopId")))
+                .collect(Collectors.toCollection(TreeSet::new));
+    }
+
+    private static Set<String> parseStopIdFilter(String text) {
+        if (text == null || text.isBlank()) {
+            return Set.of();
+        }
+        return java.util.Arrays.stream(text.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
                 .collect(Collectors.toCollection(TreeSet::new));
     }
 
@@ -1215,6 +1314,8 @@ public class BusTransferPotentialJob {
         private String routeNumber;
         private int direction;
         private String segmentId;
+        private int startStopOrder;
+        private int endStopOrder;
         private String startStopId;
         private String startStopName;
         private String endStopId;
@@ -1241,6 +1342,8 @@ public class BusTransferPotentialJob {
                 event.startStopName = row.getAs("startStopName");
                 event.endStopId = row.getAs("endStopId");
                 event.endStopName = row.getAs("endStopName");
+                event.startStopOrder = ((Number) row.getAs("startStopOrder")).intValue();
+                event.endStopOrder = ((Number) row.getAs("endStopOrder")).intValue();
                 event.departureInstant = rowInstant(row.getAs("startExitedStopAt"));
                 event.arrivalInstant = rowInstant(row.getAs("endEnteredStopAt"));
                 event.departureSecond = secondOfDay(event.departureInstant, cityZone);
@@ -1257,6 +1360,31 @@ public class BusTransferPotentialJob {
             }
         }
 
+        private static Event syntheticSkippedStop(Event last, StopOnRoute target, int arrivalSecond) {
+            Event event = new Event();
+            event.tripId = "synthetic-skip|" + last.tripId + "|" + target.stopId;
+            event.weekdayIso = last.weekdayIso;
+            event.plate = last.plate;
+            event.internalRouteId = last.internalRouteId;
+            event.routeNumber = last.routeNumber;
+            event.direction = last.direction;
+            event.segmentId = last.segmentId + "|skip|" + target.stopId;
+            event.startStopOrder = last.endStopOrder;
+            event.endStopOrder = target.stopOrder;
+            event.startStopId = last.endStopId;
+            event.startStopName = last.endStopName;
+            event.endStopId = target.stopId;
+            event.endStopName = target.stopName;
+            event.departureSecond = last.arrivalSecond;
+            event.arrivalSecond = arrivalSecond;
+            event.departureInstant = last.arrivalInstant;
+            event.arrivalInstant = last.arrivalInstant.plusSeconds(Math.max(0, arrivalSecond - last.arrivalSecond));
+            event.travelDurationSeconds = Math.max(0, arrivalSecond - last.arrivalSecond);
+            event.rideKey = last.rideKey;
+            event.routePatternKey = last.routePatternKey;
+            return event;
+        }
+
         private String rideKey() {
             return rideKey;
         }
@@ -1270,17 +1398,20 @@ public class BusTransferPotentialJob {
         private final Map<String, List<Event>> eventsByRideKey;
         private final IdentityHashMap<Event, Integer> eventIndexByIdentity;
         private final Map<String, Set<String>> routePatternsByStop;
+        private final Map<String, StopOnRoute> stopsByRoutePatternStop;
         private final Set<String> transferStops;
 
         private SearchIndex(
                 Map<String, List<Event>> eventsByRideKey,
                 IdentityHashMap<Event, Integer> eventIndexByIdentity,
                 Map<String, Set<String>> routePatternsByStop,
+                Map<String, StopOnRoute> stopsByRoutePatternStop,
                 Set<String> transferStops
         ) {
             this.eventsByRideKey = eventsByRideKey;
             this.eventIndexByIdentity = eventIndexByIdentity;
             this.routePatternsByStop = routePatternsByStop;
+            this.stopsByRoutePatternStop = stopsByRoutePatternStop;
             this.transferStops = transferStops;
         }
 
@@ -1300,24 +1431,57 @@ public class BusTransferPotentialJob {
             }
 
             Map<String, Set<String>> routePatternsByStop = new HashMap<>();
+            Map<String, StopOnRoute> stopsByRoutePatternStop = new HashMap<>();
             for (Map.Entry<String, List<Event>> entry : eventsByStartStop.entrySet()) {
                 Set<String> patterns = routePatternsByStop.computeIfAbsent(entry.getKey(), ignored -> new HashSet<>());
                 for (Event event : entry.getValue()) {
                     patterns.add(event.routePatternKey());
+                    stopsByRoutePatternStop.putIfAbsent(
+                            event.routePatternKey() + "|" + event.startStopId,
+                            new StopOnRoute(event.startStopId, event.startStopName, event.startStopOrder)
+                    );
+                    stopsByRoutePatternStop.putIfAbsent(
+                            event.routePatternKey() + "|" + event.endStopId,
+                            new StopOnRoute(event.endStopId, event.endStopName, event.endStopOrder)
+                    );
                 }
             }
             for (Event event : events) {
                 routePatternsByStop.computeIfAbsent(event.endStopId, ignored -> new HashSet<>()).add(event.routePatternKey());
+                stopsByRoutePatternStop.putIfAbsent(
+                        event.routePatternKey() + "|" + event.startStopId,
+                        new StopOnRoute(event.startStopId, event.startStopName, event.startStopOrder)
+                );
+                stopsByRoutePatternStop.putIfAbsent(
+                        event.routePatternKey() + "|" + event.endStopId,
+                        new StopOnRoute(event.endStopId, event.endStopName, event.endStopOrder)
+                );
             }
             Set<String> transferStops = routePatternsByStop.entrySet().stream()
                     .filter(entry -> entry.getValue().size() > 1)
                     .map(Map.Entry::getKey)
                     .collect(Collectors.toSet());
-            return new SearchIndex(eventsByRideKey, eventIndexByIdentity, routePatternsByStop, transferStops);
+            return new SearchIndex(eventsByRideKey, eventIndexByIdentity, routePatternsByStop, stopsByRoutePatternStop, transferStops);
         }
 
         private boolean isTransferStop(String stopId) {
             return transferStops.contains(stopId);
+        }
+
+        private StopOnRoute stopOnRoute(String routePatternKey, String stopId) {
+            return stopsByRoutePatternStop.get(routePatternKey + "|" + stopId);
+        }
+    }
+
+    private static final class StopOnRoute {
+        private final String stopId;
+        private final String stopName;
+        private final int stopOrder;
+
+        private StopOnRoute(String stopId, String stopName, int stopOrder) {
+            this.stopId = stopId;
+            this.stopName = stopName;
+            this.stopOrder = stopOrder;
         }
     }
 
@@ -1339,9 +1503,25 @@ public class BusTransferPotentialJob {
 
     private static final class StaticGraphCache {
         private final Map<String, List<StaticPathCandidate>> candidatesByOrigin;
+        private final Path perOriginDir;
 
         private StaticGraphCache(Map<String, List<StaticPathCandidate>> candidatesByOrigin) {
             this.candidatesByOrigin = candidatesByOrigin;
+            this.perOriginDir = null;
+        }
+
+        private StaticGraphCache(Path perOriginDir) {
+            int maxCachedOrigins = Math.max(0, Integer.parseInt(System.getenv().getOrDefault(
+                    "BUS_TRANSFER_STATIC_ORIGIN_CACHE_SIZE",
+                    "16"
+            )));
+            this.candidatesByOrigin = new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, List<StaticPathCandidate>> eldest) {
+                    return size() > maxCachedOrigins;
+                }
+            };
+            this.perOriginDir = perOriginDir;
         }
 
         private static StaticGraphCache empty() {
@@ -1349,9 +1529,18 @@ public class BusTransferPotentialJob {
         }
 
         private static StaticGraphCache load(Path cacheDir, int maxTransfers) throws Exception {
+            Path perOriginDir = cacheDir.resolve("paths-max-transfers-" + maxTransfers + "-by-origin");
+            if (Files.isDirectory(perOriginDir)) {
+                System.out.printf(Locale.ROOT, "BusTransferPotentialJob: using per-origin binary static graph cache %s%n", perOriginDir);
+                return new StaticGraphCache(perOriginDir);
+            }
+            Path binaryFile = cacheDir.resolve("paths-max-transfers-" + maxTransfers + ".bin");
+            if (Files.exists(binaryFile)) {
+                return loadBinary(binaryFile);
+            }
             Path file = cacheDir.resolve("paths-max-transfers-" + maxTransfers + ".jsonl");
             if (!Files.exists(file)) {
-                throw new IllegalStateException("Static transfer graph cache not found: " + file);
+                throw new IllegalStateException("Static transfer graph cache not found: " + binaryFile + " or " + file);
             }
             Map<String, List<StaticPathCandidate>> result = new HashMap<>();
             long rows = 0L;
@@ -1383,6 +1572,122 @@ public class BusTransferPotentialJob {
                     result.size()
             );
             return new StaticGraphCache(result);
+        }
+
+        private List<StaticPathCandidate> candidatesForOrigin(String originStopId) {
+            if (perOriginDir == null) {
+                return candidatesByOrigin.get(originStopId);
+            }
+            List<StaticPathCandidate> cached = candidatesByOrigin.get(originStopId);
+            if (cached != null) {
+                return cached;
+            }
+            Path file = perOriginDir.resolve(originStopId + ".bin");
+            if (!Files.exists(file)) {
+                candidatesByOrigin.put(originStopId, List.of());
+                return List.of();
+            }
+            try {
+                Map<String, List<StaticPathCandidate>> loaded = readBinaryFile(file);
+                List<StaticPathCandidate> candidates = loaded.getOrDefault(originStopId, List.of());
+                candidates.sort(Comparator
+                        .comparingInt((StaticPathCandidate candidate) -> candidate.rideCount)
+                        .thenComparingDouble(candidate -> candidate.totalDistanceMeters)
+                        .thenComparing(candidate -> candidate.destinationStopId));
+                candidatesByOrigin.put(originStopId, candidates);
+                return candidates;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to load static graph origin cache " + file, e);
+            }
+        }
+
+        private static StaticGraphCache loadBinary(Path file) throws Exception {
+            Map<String, List<StaticPathCandidate>> result = readBinaryFile(file);
+            long accepted = result.values().stream().mapToLong(List::size).sum();
+            long rows = accepted;
+            for (List<StaticPathCandidate> candidates : result.values()) {
+                candidates.sort(Comparator
+                        .comparingInt((StaticPathCandidate candidate) -> candidate.rideCount)
+                        .thenComparingDouble(candidate -> candidate.totalDistanceMeters)
+                        .thenComparing(candidate -> candidate.destinationStopId));
+            }
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusTransferPotentialJob: loaded binary static graph cache %s rows=%d accepted=%d origins=%d%n",
+                    file,
+                    rows,
+                    accepted,
+                    result.size()
+            );
+            return new StaticGraphCache(result);
+        }
+
+        private static Map<String, List<StaticPathCandidate>> readBinaryFile(Path file) throws Exception {
+            Map<String, List<StaticPathCandidate>> result = new HashMap<>();
+            try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
+                int magic = input.readInt();
+                int version = input.readInt();
+                if (magic != STATIC_GRAPH_BINARY_MAGIC || version != STATIC_GRAPH_BINARY_VERSION) {
+                    throw new IllegalStateException("Unsupported static graph binary cache: " + file);
+                }
+                List<String> stopIds = readStringDictionary(input);
+                List<String> routeIds = readStringDictionary(input);
+                List<String> routeNumbers = readStringDictionary(input);
+                int originCount = input.readInt();
+                for (int originIndex = 0; originIndex < originCount; originIndex++) {
+                    String originStopId = stopIds.get(input.readInt());
+                    int candidateCount = input.readInt();
+                    List<StaticPathCandidate> candidates = result.computeIfAbsent(originStopId, ignored -> new ArrayList<>());
+                    for (int i = 0; i < candidateCount; i++) {
+                        String destinationStopId = stopIds.get(input.readInt());
+                        int rideCount = input.readInt();
+                        double totalDistanceMeters = input.readInt();
+                        input.readInt(); // alternativeIndex; ordering is already encoded by file order.
+                        int edgeCount = input.readInt();
+                        List<StaticEdge> edges = new ArrayList<>(edgeCount);
+                        for (int edgeIndex = 0; edgeIndex < edgeCount; edgeIndex++) {
+                            int type = input.readUnsignedByte();
+                            String fromStopId = stopIds.get(input.readInt());
+                            String toStopId = stopIds.get(input.readInt());
+                            double distanceMeters = input.readInt();
+                            if (type == 0) {
+                                edges.add(new StaticEdge(true, fromStopId, toStopId, distanceMeters));
+                                continue;
+                            }
+                            String internalRouteId = routeIds.get(input.readInt());
+                            String routeNumber = routeNumbers.get(input.readInt());
+                            int direction = input.readInt();
+                            edges.add(new StaticRideEdge(
+                                    fromStopId,
+                                    toStopId,
+                                    distanceMeters,
+                                    internalRouteId,
+                                    routeNumber,
+                                    direction
+                            ));
+                        }
+                        if (!edges.isEmpty()) {
+                            candidates.add(new StaticPathCandidate(
+                                    originStopId,
+                                    destinationStopId,
+                                    rideCount,
+                                    totalDistanceMeters,
+                                    edges
+                            ));
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
+        private static List<String> readStringDictionary(DataInputStream input) throws Exception {
+            int count = input.readInt();
+            List<String> values = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                values.add(input.readUTF());
+            }
+            return values;
         }
     }
 
