@@ -31,6 +31,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -65,6 +66,7 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
     private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
     private static final double CONTOUR_ENVELOPE_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_ENVELOPE_METERS", "250"));
+    private static final double CONTOUR_PROJECTION_LAT = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_PROJECTION_LAT", "55.8"));
     private static final double EFFECTIVE_WALK_RADIUS_METERS = Math.max(
             WALK_RADIUS_METERS,
             CONTOUR_THRESHOLDS_MINUTES[CONTOUR_THRESHOLDS_MINUTES.length - 1] * 60.0 * WALK_SPEED_MPS
@@ -185,32 +187,24 @@ public class BusAccessibilityMapCacheJob {
                     String snapshotId = snapshotId(snapshotDate, snapshotTime);
                     Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
                     Path totalTileRoot = snapshotRoot.resolve("total");
-                    Path totalFullTileRoot = snapshotRoot.resolve("total-full");
                     Path totalLogTileRoot = snapshotRoot.resolve("total-log");
                     Path walkTileRoot = snapshotRoot.resolve("walk");
                     Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
-                    Path contourTileRoot = snapshotRoot.resolve("contours");
                     Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes = buildTileIndexes(segments, Double.POSITIVE_INFINITY);
-                    Map<Integer, Map<String, List<AccessibleSegment>>> contourTileIndexes = buildTileIndexes(
-                            segments,
-                            CONTOUR_THRESHOLDS_MINUTES[CONTOUR_THRESHOLDS_MINUTES.length - 1]
-                    );
                     ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes);
-                    ColorScale totalFullColorScale = renderModes.contains("totalFull") ? renderTiles(segments, totalFullTileRoot, ColorMetric.TOTAL_FULL, tileIndexes) : null;
                     ColorScale totalLogColorScale = renderModes.contains("totalLog") ? renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes) : null;
                     ColorScale walkColorScale = renderModes.contains("walk") ? renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes) : null;
                     ColorScale stopTransportColorScale = renderModes.contains("stopTransport") ? renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes) : null;
-                    ContourStats contourStats = calculateContourStats(segments);
-                    renderContourTiles(contourTileRoot, contourTileIndexes);
+                    ContourResult contourResult = calculateContourResult(segments);
                     snapshots.add(new SnapshotPayload(
                             snapshotId,
                             snapshotDate,
                             snapshotTime,
                             reachability,
                             segments.size(),
-                            contourStats,
+                            contourResult.stats,
+                            contourResult.polygons,
                             totalColorScale,
-                            totalFullColorScale,
                             totalLogColorScale,
                             walkColorScale,
                             stopTransportColorScale
@@ -384,7 +378,7 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static Set<String> parseRenderModes() {
-        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_RENDER_MODES", "total,totalFull,totalLog,walk,stopTransport").trim();
+        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_RENDER_MODES", "total,totalLog,walk,stopTransport").trim();
         Set<String> modes = new HashSet<>();
         for (String part : text.split(",")) {
             String mode = part.trim();
@@ -1354,13 +1348,29 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static ContourStats calculateContourStats(List<AccessibleSegment> segments) {
-        double area15 = contourAreaSquareKm(segments, 15.0);
-        double area30 = contourAreaSquareKm(segments, 30.0);
-        double area60 = contourAreaSquareKm(segments, 60.0);
-        return new ContourStats(area15, area30, area60);
+        return calculateContourResult(segments).stats;
     }
 
-    private static double contourAreaSquareKm(List<AccessibleSegment> segments, double thresholdMinutes) {
+    private static ContourResult calculateContourResult(List<AccessibleSegment> segments) {
+        List<ContourPolygon> polygons = new ArrayList<>();
+        double area15 = 0.0;
+        double area30 = 0.0;
+        double area60 = 0.0;
+        for (double threshold : CONTOUR_THRESHOLDS_MINUTES) {
+            ContourThresholdResult thresholdResult = contourThresholdResult(segments, threshold);
+            polygons.addAll(thresholdResult.polygons);
+            if (threshold <= 15.0) {
+                area15 = thresholdResult.areaSquareKm;
+            } else if (threshold <= 30.0) {
+                area30 = thresholdResult.areaSquareKm;
+            } else if (threshold <= 60.0) {
+                area60 = thresholdResult.areaSquareKm;
+            }
+        }
+        return new ContourResult(new ContourStats(area15, area30, area60), polygons);
+    }
+
+    private static ContourThresholdResult contourThresholdResult(List<AccessibleSegment> segments, double thresholdMinutes) {
         Set<String> occupiedCells = new HashSet<>();
         double cellMeters = Math.max(25.0, SAMPLE_METERS);
         int radiusCells = Math.max(0, (int) Math.ceil(CONTOUR_ENVELOPE_METERS / cellMeters));
@@ -1375,7 +1385,23 @@ public class BusAccessibilityMapCacheJob {
                 addContourAreaCells(occupiedCells, point, cellMeters, radiusCells);
             }
         }
-        return occupiedCells.size() * cellMeters * cellMeters / 1_000_000.0;
+        List<ContourPolygon> polygons = new ArrayList<>();
+        double areaSquareMeters = 0.0;
+        for (Set<String> component : contourComponents(occupiedCells)) {
+            List<MeterPoint> hull = contourHull(component, cellMeters);
+            if (hull.size() < 3) {
+                continue;
+            }
+            double componentArea = Math.abs(shoelaceSquareMeters(hull));
+            if (componentArea < cellMeters * cellMeters) {
+                continue;
+            }
+            areaSquareMeters += componentArea;
+            polygons.add(new ContourPolygon(thresholdMinutes, hull.stream()
+                    .map(BusAccessibilityMapCacheJob::meterPointToGeoPoint)
+                    .collect(Collectors.toList())));
+        }
+        return new ContourThresholdResult(areaSquareMeters / 1_000_000.0, polygons);
     }
 
     private static void addContourAreaCells(Set<String> occupiedCells, Point point, double cellMeters, int radiusCells) {
@@ -1391,13 +1417,119 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static long contourAreaCellX(Point point, double cellMeters) {
-        double lonMeters = point.lon * 111_320.0 * Math.cos(Math.toRadians(point.lat));
+        double lonMeters = point.lon * 111_320.0 * Math.cos(Math.toRadians(CONTOUR_PROJECTION_LAT));
         return (long) Math.floor(lonMeters / cellMeters);
     }
 
     private static long contourAreaCellY(Point point, double cellMeters) {
         double latMeters = point.lat * 111_320.0;
         return (long) Math.floor(latMeters / cellMeters);
+    }
+
+    private static List<Set<String>> contourComponents(Set<String> occupiedCells) {
+        List<Set<String>> components = new ArrayList<>();
+        Set<String> remaining = new HashSet<>(occupiedCells);
+        while (!remaining.isEmpty()) {
+            String start = remaining.iterator().next();
+            Set<String> component = new HashSet<>();
+            ArrayDeque<String> queue = new ArrayDeque<>();
+            queue.add(start);
+            remaining.remove(start);
+            while (!queue.isEmpty()) {
+                String current = queue.removeFirst();
+                component.add(current);
+                long[] xy = parseCellKey(current);
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        String next = (xy[0] + dx) + "|" + (xy[1] + dy);
+                        if (remaining.remove(next)) {
+                            queue.add(next);
+                        }
+                    }
+                }
+            }
+            components.add(component);
+        }
+        return components;
+    }
+
+    private static long[] parseCellKey(String key) {
+        int split = key.indexOf('|');
+        return new long[]{
+                Long.parseLong(key.substring(0, split)),
+                Long.parseLong(key.substring(split + 1))
+        };
+    }
+
+    private static List<MeterPoint> contourHull(Set<String> component, double cellMeters) {
+        List<MeterPoint> corners = new ArrayList<>(component.size() * 4);
+        for (String key : component) {
+            long[] xy = parseCellKey(key);
+            double x0 = xy[0] * cellMeters;
+            double y0 = xy[1] * cellMeters;
+            double x1 = x0 + cellMeters;
+            double y1 = y0 + cellMeters;
+            corners.add(new MeterPoint(x0, y0));
+            corners.add(new MeterPoint(x0, y1));
+            corners.add(new MeterPoint(x1, y0));
+            corners.add(new MeterPoint(x1, y1));
+        }
+        corners.sort(Comparator
+                .comparingDouble((MeterPoint point) -> point.x)
+                .thenComparingDouble(point -> point.y));
+        List<MeterPoint> unique = new ArrayList<>();
+        MeterPoint previous = null;
+        for (MeterPoint point : corners) {
+            if (previous == null || previous.x != point.x || previous.y != point.y) {
+                unique.add(point);
+                previous = point;
+            }
+        }
+        if (unique.size() <= 3) {
+            return unique;
+        }
+        List<MeterPoint> lower = new ArrayList<>();
+        for (MeterPoint point : unique) {
+            while (lower.size() >= 2 && cross(lower.get(lower.size() - 2), lower.get(lower.size() - 1), point) <= 0) {
+                lower.remove(lower.size() - 1);
+            }
+            lower.add(point);
+        }
+        List<MeterPoint> upper = new ArrayList<>();
+        for (int i = unique.size() - 1; i >= 0; i--) {
+            MeterPoint point = unique.get(i);
+            while (upper.size() >= 2 && cross(upper.get(upper.size() - 2), upper.get(upper.size() - 1), point) <= 0) {
+                upper.remove(upper.size() - 1);
+            }
+            upper.add(point);
+        }
+        lower.remove(lower.size() - 1);
+        upper.remove(upper.size() - 1);
+        lower.addAll(upper);
+        return lower;
+    }
+
+    private static double cross(MeterPoint a, MeterPoint b, MeterPoint c) {
+        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    }
+
+    private static double shoelaceSquareMeters(List<MeterPoint> polygon) {
+        double area = 0.0;
+        for (int i = 0; i < polygon.size(); i++) {
+            MeterPoint a = polygon.get(i);
+            MeterPoint b = polygon.get((i + 1) % polygon.size());
+            area += a.x * b.y - b.x * a.y;
+        }
+        return area / 2.0;
+    }
+
+    private static Point meterPointToGeoPoint(MeterPoint point) {
+        double lat = point.y / 111_320.0;
+        double lon = point.x / (111_320.0 * Math.cos(Math.toRadians(CONTOUR_PROJECTION_LAT)));
+        return new Point(lat, lon);
     }
 
     private static void writeContourStats(SparkSession spark, Path outputDir, List<SnapshotPayload> snapshots) {
@@ -1478,20 +1610,16 @@ public class BusAccessibilityMapCacheJob {
         payload.put("tileMinZoom", MIN_ZOOM);
         payload.put("tileMaxZoom", MAX_ZOOM);
         payload.put("tileOverlayTemplate", first.tileOverlayTemplate());
-        payload.put("contourTileOverlayTemplate", first.contourTileOverlayTemplate());
-        payload.put("totalFullTileOverlayTemplate", first.totalFullColorScale == null ? null : first.totalFullTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", first.totalLogColorScale == null ? null : first.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", first.walkColorScale == null ? null : first.walkTileOverlayTemplate());
         payload.put("stopTransportTileOverlayTemplate", first.stopTransportColorScale == null ? null : first.stopTransportTileOverlayTemplate());
         payload.put("tileRoot", tileBaseRoot.resolve(first.id).resolve("total").toString());
-        payload.put("totalFullTileRoot", tileBaseRoot.resolve(first.id).resolve("total-full").toString());
         payload.put("totalLogTileRoot", tileBaseRoot.resolve(first.id).resolve("total-log").toString());
         payload.put("walkTileRoot", tileBaseRoot.resolve(first.id).resolve("walk").toString());
         payload.put("stopTransportTileRoot", tileBaseRoot.resolve(first.id).resolve("stop-transport").toString());
         payload.put("contourThresholdMinutes", List.of(15, 30, 60));
         payload.put("totalColorMinMinutes", round1(first.totalColorScale.minMinutes));
         payload.put("totalColorMaxMinutes", round1(first.totalColorScale.maxMinutes));
-        putScale(payload, "totalFull", first.totalFullColorScale);
         putScale(payload, "totalLog", first.totalLogColorScale);
         putScale(payload, "walk", first.walkColorScale);
         putScale(payload, "stopTransport", first.stopTransportColorScale);
@@ -1514,19 +1642,31 @@ public class BusAccessibilityMapCacheJob {
         payload.put("reachableStops", snapshot.reachability.stopTimes.size());
         payload.put("segmentCount", snapshot.segmentCount);
         payload.put("tileOverlayTemplate", snapshot.tileOverlayTemplate());
-        payload.put("contourTileOverlayTemplate", snapshot.contourTileOverlayTemplate());
         payload.put("availableModes", snapshot.availableModes());
-        payload.put("totalFullTileOverlayTemplate", snapshot.totalFullColorScale == null ? null : snapshot.totalFullTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", snapshot.totalLogColorScale == null ? null : snapshot.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", snapshot.walkColorScale == null ? null : snapshot.walkTileOverlayTemplate());
         payload.put("stopTransportTileOverlayTemplate", snapshot.stopTransportColorScale == null ? null : snapshot.stopTransportTileOverlayTemplate());
         payload.put("totalColorMinMinutes", round1(snapshot.totalColorScale.minMinutes));
         payload.put("totalColorMaxMinutes", round1(snapshot.totalColorScale.maxMinutes));
-        putScale(payload, "totalFull", snapshot.totalFullColorScale);
         putScale(payload, "totalLog", snapshot.totalLogColorScale);
         putScale(payload, "walk", snapshot.walkColorScale);
         putScale(payload, "stopTransport", snapshot.stopTransportColorScale);
         payload.put("contourArea", contourAreaPayload(snapshot));
+        payload.put("contourPolygons", snapshot.contourPolygons.stream()
+                .map(BusAccessibilityMapCacheJob::contourPolygonPayload)
+                .collect(Collectors.toList()));
+        return payload;
+    }
+
+    private static Map<String, Object> contourPolygonPayload(ContourPolygon polygon) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("thresholdMinutes", (int) Math.round(polygon.thresholdMinutes));
+        payload.put("points", polygon.points.stream().map(point -> {
+            List<Double> pair = new ArrayList<>(2);
+            pair.add(round6(point.lat));
+            pair.add(round6(point.lon));
+            return pair;
+        }).collect(Collectors.toList()));
         return payload;
     }
 
@@ -1555,6 +1695,10 @@ public class BusAccessibilityMapCacheJob {
 
     private static double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static double round6(double value) {
+        return Math.round(value * 1_000_000.0) / 1_000_000.0;
     }
 
     private static Map<String, Object> stopPayload(StopPoint stop) {
@@ -2059,7 +2203,7 @@ public class BusAccessibilityMapCacheJob {
         private final int segmentCount;
         private final ContourStats contourStats;
         private final ColorScale totalColorScale;
-        private final ColorScale totalFullColorScale;
+        private final List<ContourPolygon> contourPolygons;
         private final ColorScale totalLogColorScale;
         private final ColorScale walkColorScale;
         private final ColorScale stopTransportColorScale;
@@ -2071,8 +2215,8 @@ public class BusAccessibilityMapCacheJob {
                 Reachability reachability,
                 int segmentCount,
                 ContourStats contourStats,
+                List<ContourPolygon> contourPolygons,
                 ColorScale totalColorScale,
-                ColorScale totalFullColorScale,
                 ColorScale totalLogColorScale,
                 ColorScale walkColorScale,
                 ColorScale stopTransportColorScale
@@ -2083,8 +2227,8 @@ public class BusAccessibilityMapCacheJob {
             this.reachability = reachability;
             this.segmentCount = segmentCount;
             this.contourStats = contourStats;
+            this.contourPolygons = contourPolygons;
             this.totalColorScale = totalColorScale;
-            this.totalFullColorScale = totalFullColorScale;
             this.totalLogColorScale = totalLogColorScale;
             this.walkColorScale = walkColorScale;
             this.stopTransportColorScale = stopTransportColorScale;
@@ -2092,14 +2236,6 @@ public class BusAccessibilityMapCacheJob {
 
         private String tileOverlayTemplate() {
             return "./tiles/accessibility/" + id + "/total/{z}/{x}/{y}.png";
-        }
-
-        private String contourTileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/contours/{z}/{x}/{y}.png";
-        }
-
-        private String totalFullTileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/total-full/{z}/{x}/{y}.png";
         }
 
         private String totalLogTileOverlayTemplate() {
@@ -2117,9 +2253,6 @@ public class BusAccessibilityMapCacheJob {
         private List<String> availableModes() {
             List<String> modes = new ArrayList<>();
             modes.add("total");
-            if (totalFullColorScale != null) {
-                modes.add("totalFull");
-            }
             if (totalLogColorScale != null) {
                 modes.add("totalLog");
             }
@@ -2142,6 +2275,46 @@ public class BusAccessibilityMapCacheJob {
             this.area15SquareKm = area15SquareKm;
             this.area30SquareKm = area30SquareKm;
             this.area60SquareKm = area60SquareKm;
+        }
+    }
+
+    private static final class ContourResult {
+        private final ContourStats stats;
+        private final List<ContourPolygon> polygons;
+
+        private ContourResult(ContourStats stats, List<ContourPolygon> polygons) {
+            this.stats = stats;
+            this.polygons = polygons;
+        }
+    }
+
+    private static final class ContourThresholdResult {
+        private final double areaSquareKm;
+        private final List<ContourPolygon> polygons;
+
+        private ContourThresholdResult(double areaSquareKm, List<ContourPolygon> polygons) {
+            this.areaSquareKm = areaSquareKm;
+            this.polygons = polygons;
+        }
+    }
+
+    private static final class ContourPolygon {
+        private final double thresholdMinutes;
+        private final List<Point> points;
+
+        private ContourPolygon(double thresholdMinutes, List<Point> points) {
+            this.thresholdMinutes = thresholdMinutes;
+            this.points = points;
+        }
+    }
+
+    private static final class MeterPoint {
+        private final double x;
+        private final double y;
+
+        private MeterPoint(double x, double y) {
+            this.x = x;
+            this.y = y;
         }
     }
 

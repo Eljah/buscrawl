@@ -22,7 +22,7 @@
     .tile-layer img { position:absolute; width:256px; height:256px; }
     #tiles { z-index:1; }
     #accessibilityTiles { z-index:2; pointer-events:none; }
-    #contourTiles { z-index:3; pointer-events:none; }
+    .contour-svg { position:absolute; inset:0; z-index:3; width:100%; height:100%; pointer-events:none; overflow:hidden; }
     .origin-layer { z-index:4; pointer-events:none; }
     .origin-dot { position:absolute; width:18px; height:18px; margin:-9px 0 0 -9px; border-radius:999px; background:#111; border:3px solid #fff; box-shadow:0 8px 20px rgba(0,0,0,.35); }
     .origin-dot::after { content:""; position:absolute; inset:-8px; border-radius:999px; border:2px solid rgba(17,17,17,.35); }
@@ -86,7 +86,6 @@
     </div>
     <div class="mode-row" id="modeRow">
       <label><input type="radio" name="accessMode" value="total" checked> total time balanced</label>
-      <label><input type="radio" name="accessMode" value="totalFull"> total time full range</label>
       <label><input type="radio" name="accessMode" value="totalLog"> total time log scale</label>
       <label><input type="radio" name="accessMode" value="walk"> walk part of best total route</label>
       <label><input type="radio" name="accessMode" value="stopTransport"> transport to nearest stop cluster</label>
@@ -114,7 +113,7 @@
       <div class="time-probe" id="timeProbe">hover heatmap for minutes</div>
       <div class="tile-layer" id="tiles"></div>
       <div class="tile-layer" id="accessibilityTiles"></div>
-      <div class="tile-layer" id="contourTiles"></div>
+      <svg class="contour-svg" id="contourSvg"></svg>
       <div class="origin-layer" id="originLayer"></div>
       <div class="empty" id="emptyState">Loading...</div>
     </div>
@@ -125,13 +124,13 @@
 const mapEl=document.getElementById('map');
 const tilesEl=document.getElementById('tiles');
 const overlayEl=document.getElementById('accessibilityTiles');
-const contourEl=document.getElementById('contourTiles');
+const contourSvg=document.getElementById('contourSvg');
 const emptyEl=document.getElementById('emptyState');
 const originLayer=document.getElementById('originLayer');
 const timeProbe=document.getElementById('timeProbe');
 const state={payload:null,config:null,currentSnapshot:null,centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
 const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-const fullModeList=['total','totalFull','totalLog','walk','stopTransport'];
+const fullModeList=['total','totalLog','walk','stopTransport'];
 
 function lonToWorldX(lon,z){return ((lon+180)/360)*256*Math.pow(2,z);}
 function latToWorldY(lat,z){const s=Math.sin(lat*Math.PI/180);return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*256*Math.pow(2,z);}
@@ -145,23 +144,16 @@ function overlayTileUrl(z,x,y){
   const snapshot=currentSnapshot();
   const suffix=state.payload.updatedAt?`?v=${encodeURIComponent(state.payload.updatedAt)}-${snapshot.id||'single'}-${state.overlayMode}`:'';
   let template=snapshot.tileOverlayTemplate;
-  if(state.overlayMode==='totalFull'&&snapshot.totalFullTileOverlayTemplate)template=snapshot.totalFullTileOverlayTemplate;
   if(state.overlayMode==='totalLog'&&snapshot.totalLogTileOverlayTemplate)template=snapshot.totalLogTileOverlayTemplate;
   if(state.overlayMode==='walk'&&snapshot.walkTileOverlayTemplate)template=snapshot.walkTileOverlayTemplate;
   if(state.overlayMode==='stopTransport'&&snapshot.stopTransportTileOverlayTemplate)template=snapshot.stopTransportTileOverlayTemplate;
-  return applyTemplate(template,z,x,y)+suffix;
-}
-function contourTileUrl(z,x,y){
-  const snapshot=currentSnapshot();
-  const suffix=state.payload.updatedAt?`?v=${encodeURIComponent(state.payload.updatedAt)}-${snapshot.id||'single'}-contours`:'';
-  const template=snapshot.contourTileOverlayTemplate||`./tiles/accessibility/${snapshot.id}/contours/{z}/{x}/{y}.png`;
   return applyTemplate(template,z,x,y)+suffix;
 }
 function currentSnapshot(){
   return state.currentSnapshot||state.payload||{};
 }
 function isTotalMode(){
-  return state.overlayMode==='total'||state.overlayMode==='totalFull'||state.overlayMode==='totalLog';
+  return state.overlayMode==='total'||state.overlayMode==='totalLog';
 }
 function updateSnapshotMeta(){
   const p=state.payload,s=currentSnapshot();
@@ -200,14 +192,6 @@ function updateRangeMeta(){
       range.textContent='waiting for generated PNG tiles for this departure';
       labels.innerHTML=scaleLabels(Number(root.totalColorMinMinutes||0),Number(root.totalColorMaxMinutes||120),'total');
       document.getElementById('scaleTicks').innerHTML=thresholdTicks(Number(root.totalColorMinMinutes||0),Number(root.totalColorMaxMinutes||120),false);
-      return;
-    }
-    if(state.overlayMode==='totalFull'){
-      const min=Number(p.totalFullColorMinMinutes||0).toFixed(1);
-      const max=Number(p.totalFullColorMaxMinutes||0).toFixed(1);
-      range.textContent=`${min}-${max} min; transport + walk; full data range, no clipping`;
-      labels.innerHTML=scaleLabels(Number(p.totalFullColorMinMinutes||0),Number(p.totalFullColorMaxMinutes||0),'total');
-      document.getElementById('scaleTicks').innerHTML=thresholdTicks(Number(p.totalFullColorMinMinutes||0),Number(p.totalFullColorMaxMinutes||0),false);
       return;
     }
     if(state.overlayMode==='totalLog'){
@@ -335,11 +319,34 @@ function renderOrigin(){
     return `<div class="origin-dot" title="${stop.stopName||''} ${stop.stopId||''}" style="left:${pt.x-o.left}px;top:${pt.y-o.top}px"></div>`;
   }).join('');
 }
+function renderContours(){
+  const snapshot=currentSnapshot();
+  const polygons=Array.isArray(snapshot.contourPolygons)?snapshot.contourPolygons:[];
+  if(!polygons.length){contourSvg.innerHTML='';return;}
+  const o=origin();
+  const colors={15:'#05338c',30:'#1969b9',60:'#4fa6de'};
+  const widths={15:2.5,30:2,60:1.8};
+  const paths=polygons.map(poly=>{
+    const points=Array.isArray(poly.points)?poly.points:[];
+    if(points.length<3)return '';
+    const d=points.map((pair,index)=>{
+      const lat=Number(pair[0]),lon=Number(pair[1]);
+      const p=project(lat,lon,state.zoom);
+      return `${index===0?'M':'L'} ${(p.x-o.left).toFixed(1)} ${(p.y-o.top).toFixed(1)}`;
+    }).join(' ')+' Z';
+    const threshold=Number(poly.thresholdMinutes||60);
+    const color=colors[threshold]||'#1969b9';
+    const width=widths[threshold]||2;
+    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linejoin="round" stroke-linecap="round" opacity=".95"><title>${threshold} min contour</title></path>`;
+  }).join('');
+  contourSvg.setAttribute('viewBox',`0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+  contourSvg.innerHTML=paths;
+}
 function renderAll(){
   if(!state.config||!state.payload)return;
   renderTileLayer(tilesEl,baseTileUrl);
   renderTileLayer(overlayEl,overlayTileUrl);
-  if(isTotalMode())renderTileLayer(contourEl,contourTileUrl);else contourEl.innerHTML='';
+  renderContours();
   renderOrigin();
 }
 async function boot(){
@@ -413,15 +420,12 @@ function pendingSnapshot(payload,serviceDate,departureTime){
     reachableStops:0,segmentCount:0,
     availableModes:payload.availableModes||fullModeList,
     tileOverlayTemplate:`./tiles/accessibility/${id}/total/{z}/{x}/{y}.png`,
-    contourTileOverlayTemplate:`./tiles/accessibility/${id}/contours/{z}/{x}/{y}.png`,
-    totalFullTileOverlayTemplate:`./tiles/accessibility/${id}/total-full/{z}/{x}/{y}.png`,
     totalLogTileOverlayTemplate:`./tiles/accessibility/${id}/total-log/{z}/{x}/{y}.png`,
     walkTileOverlayTemplate:`./tiles/accessibility/${id}/walk/{z}/{x}/{y}.png`,
     stopTransportTileOverlayTemplate:`./tiles/accessibility/${id}/stop-transport/{z}/{x}/{y}.png`,
+    contourPolygons:[],
     totalColorMinMinutes:payload.totalColorMinMinutes,
     totalColorMaxMinutes:payload.totalColorMaxMinutes,
-    totalFullColorMinMinutes:payload.totalFullColorMinMinutes,
-    totalFullColorMaxMinutes:payload.totalFullColorMaxMinutes,
     totalLogColorMinMinutes:payload.totalLogColorMinMinutes,
     totalLogColorMaxMinutes:payload.totalLogColorMaxMinutes,
     walkColorMaxMinutes:payload.walkColorMaxMinutes,
@@ -453,7 +457,6 @@ function sampleOverlayMinutes(e){
 }
 function currentColorScale(){
   const p=currentSnapshot();
-  if(state.overlayMode==='totalFull')return {min:Number(p.totalFullColorMinMinutes||0),max:Number(p.totalFullColorMaxMinutes||120),log:false};
   if(state.overlayMode==='totalLog')return {min:Number(p.totalLogColorMinMinutes||0),max:Number(p.totalLogColorMaxMinutes||120),log:true};
   return {min:Number(p.totalColorMinMinutes||0),max:Number(p.totalColorMaxMinutes||120),log:false};
 }
