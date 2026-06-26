@@ -95,6 +95,15 @@
       <label>Departure <select id="timeSelect"></select></label>
       <span class="snapshot-status" id="snapshotStatus"></span>
     </div>
+    <div class="map-shell" id="map">
+      <div class="map-zoom"><button id="zoomIn" type="button">+</button><button id="zoomOut" type="button">-</button></div>
+      <div class="time-probe" id="timeProbe">hover heatmap for minutes</div>
+      <div class="tile-layer" id="tiles"></div>
+      <div class="tile-layer" id="accessibilityTiles"></div>
+      <svg class="contour-svg" id="contourSvg"></svg>
+      <div class="origin-layer" id="originLayer"></div>
+      <div class="empty" id="emptyState">Loading...</div>
+    </div>
     <div class="chart-card">
       <div class="chart-head">
         <div>
@@ -107,15 +116,6 @@
         <div class="area-empty">Reachability area series is not generated yet.</div>
       </div>
       <div class="area-legend"><span style="--line:#05338c">15 min contour / area</span><span style="--line:#1969b9">30 min contour / area</span><span style="--line:#4fa6de">60 min contour / area</span></div>
-    </div>
-    <div class="map-shell" id="map">
-      <div class="map-zoom"><button id="zoomIn" type="button">+</button><button id="zoomOut" type="button">-</button></div>
-      <div class="time-probe" id="timeProbe">hover heatmap for minutes</div>
-      <div class="tile-layer" id="tiles"></div>
-      <div class="tile-layer" id="accessibilityTiles"></div>
-      <svg class="contour-svg" id="contourSvg"></svg>
-      <div class="origin-layer" id="originLayer"></div>
-      <div class="empty" id="emptyState">Loading...</div>
     </div>
   </section>
 </div>
@@ -207,7 +207,7 @@ function updateRangeMeta(){
       const max=Number(p.stopTransportColorMaxMinutes||0).toFixed(1);
       range.textContent=`${min}-${max}+ min; best transport time inside nearest same-name stop cluster; cluster radius ${Math.round(root.stopClusterRadiusMeters||0)} m`;
       labels.innerHTML=scaleLabels(Number(p.stopTransportColorMinMinutes||0),Number(p.stopTransportColorMaxMinutes||0),'transport');
-      document.getElementById('scaleTicks').innerHTML='';
+      document.getElementById('scaleTicks').innerHTML=thresholdTicks(Number(p.stopTransportColorMinMinutes||0),Number(p.stopTransportColorMaxMinutes||0),false);
       return;
     }
     const min=Number(p.totalColorMinMinutes||0).toFixed(1);
