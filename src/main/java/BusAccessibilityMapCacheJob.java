@@ -65,6 +65,10 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
     private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
     private static final double CONTOUR_ENVELOPE_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_ENVELOPE_METERS", "250"));
+    private static final double EFFECTIVE_WALK_RADIUS_METERS = Math.max(
+            WALK_RADIUS_METERS,
+            CONTOUR_THRESHOLDS_MINUTES[CONTOUR_THRESHOLDS_MINUTES.length - 1] * 60.0 * WALK_SPEED_MPS
+    );
     private static final double ROAD_NODE_GRID_DEGREES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_ROAD_NODE_GRID_DEGREES", "0.005"));
     private static final int TILE_SIZE = 256;
 
@@ -733,8 +737,8 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static List<AccessibleSegment> buildAccessibilitySegments(RoadGraph graph, List<RoadWay> roads, List<StopTime> stops) {
-        Map<String, AccessLabel> accessByNode = calculateRoadGraphAccess(graph, stops);
-        Map<String, AccessLabel> nearestStopByNode = calculateRoadGraphNearestStopAccess(graph, stops);
+        Map<String, AccessLabel> accessByNode = calculateRoadGraphAccess(graph, stops, EFFECTIVE_WALK_RADIUS_METERS);
+        Map<String, AccessLabel> nearestStopByNode = calculateRoadGraphNearestStopAccess(graph, stops, EFFECTIVE_WALK_RADIUS_METERS);
         List<AccessibleSegment> segments = new ArrayList<>();
         for (RoadWay road : roads) {
             for (int i = 1; i < road.points.size(); i++) {
@@ -757,11 +761,11 @@ public class BusAccessibilityMapCacheJob {
                     Point p0 = interpolate(a, b, t0);
                     Point p1 = interpolate(a, b, t1);
                     Point mid = interpolate(a, b, (t0 + t1) / 2.0);
-                    BestAccess best = bestAccessOnRoadSegment(a, b, mid, distance, aAccess, bAccess);
+                    BestAccess best = bestAccessOnRoadSegment(a, b, mid, distance, aAccess, bAccess, EFFECTIVE_WALK_RADIUS_METERS);
                     if (best == null) {
                         continue;
                     }
-                    BestAccess nearest = nearestAccessOnRoadSegment(a, b, mid, distance, aNearest, bNearest);
+                    BestAccess nearest = nearestAccessOnRoadSegment(a, b, mid, distance, aNearest, bNearest, EFFECTIVE_WALK_RADIUS_METERS);
                     if (nearest == null) {
                         nearest = best;
                     }
@@ -784,7 +788,7 @@ public class BusAccessibilityMapCacheJob {
         return segments;
     }
 
-    private static Map<String, AccessLabel> calculateRoadGraphAccess(RoadGraph graph, List<StopTime> stops) {
+    private static Map<String, AccessLabel> calculateRoadGraphAccess(RoadGraph graph, List<StopTime> stops, double maxWalkMeters) {
         PriorityQueue<AccessState> queue = new PriorityQueue<>(Comparator.comparingDouble(state -> state.totalSeconds));
         Map<String, AccessLabel> bestByNode = new HashMap<>();
         for (StopTime stop : stops) {
@@ -816,7 +820,7 @@ public class BusAccessibilityMapCacheJob {
             }
             for (RoadEdge edge : graph.edgesByNode.getOrDefault(current.nodeId, List.of())) {
                 double nextWalkMeters = current.walkMeters + edge.distanceMeters;
-                if (nextWalkMeters > WALK_RADIUS_METERS) {
+                if (nextWalkMeters > maxWalkMeters) {
                     continue;
                 }
                 double nextTotalSeconds = current.totalSeconds + edge.distanceMeters / WALK_SPEED_MPS;
@@ -831,7 +835,7 @@ public class BusAccessibilityMapCacheJob {
         return bestByNode;
     }
 
-    private static Map<String, AccessLabel> calculateRoadGraphNearestStopAccess(RoadGraph graph, List<StopTime> stops) {
+    private static Map<String, AccessLabel> calculateRoadGraphNearestStopAccess(RoadGraph graph, List<StopTime> stops, double maxWalkMeters) {
         List<StopTime> clusteredStops = stopsWithClusterBestTransport(stops);
         PriorityQueue<AccessState> queue = new PriorityQueue<>(Comparator.comparingDouble(state -> state.walkMeters));
         Map<String, AccessLabel> bestByNode = new HashMap<>();
@@ -864,7 +868,7 @@ public class BusAccessibilityMapCacheJob {
             }
             for (RoadEdge edge : graph.edgesByNode.getOrDefault(current.nodeId, List.of())) {
                 double nextWalkMeters = current.walkMeters + edge.distanceMeters;
-                if (nextWalkMeters > WALK_RADIUS_METERS) {
+                if (nextWalkMeters > maxWalkMeters) {
                     continue;
                 }
                 double nextTotalSeconds = current.stop.transportSeconds + nextWalkMeters / WALK_SPEED_MPS;
@@ -950,23 +954,24 @@ public class BusAccessibilityMapCacheJob {
             Point point,
             double segmentDistance,
             AccessLabel aAccess,
-            AccessLabel bAccess
+            AccessLabel bAccess,
+            double maxWalkMeters
     ) {
         BestAccess best = null;
         if (aAccess != null) {
             double distanceFromA = haversineMeters(a.lat, a.lon, point.lat, point.lon);
-            best = candidateAccess(best, aAccess, distanceFromA);
+            best = candidateAccess(best, aAccess, distanceFromA, maxWalkMeters);
         }
         if (bAccess != null) {
             double distanceFromB = haversineMeters(b.lat, b.lon, point.lat, point.lon);
-            best = candidateAccess(best, bAccess, Math.min(distanceFromB, segmentDistance));
+            best = candidateAccess(best, bAccess, Math.min(distanceFromB, segmentDistance), maxWalkMeters);
         }
         return best;
     }
 
-    private static BestAccess candidateAccess(BestAccess best, AccessLabel access, double extraMeters) {
+    private static BestAccess candidateAccess(BestAccess best, AccessLabel access, double extraMeters, double maxWalkMeters) {
         double walkMeters = access.walkMeters + extraMeters;
-        if (walkMeters > WALK_RADIUS_METERS) {
+        if (walkMeters > maxWalkMeters) {
             return best;
         }
         double totalSeconds = access.totalSeconds + extraMeters / WALK_SPEED_MPS;
@@ -983,23 +988,24 @@ public class BusAccessibilityMapCacheJob {
             Point point,
             double segmentDistance,
             AccessLabel aAccess,
-            AccessLabel bAccess
+            AccessLabel bAccess,
+            double maxWalkMeters
     ) {
         BestAccess best = null;
         if (aAccess != null) {
             double distanceFromA = haversineMeters(a.lat, a.lon, point.lat, point.lon);
-            best = candidateNearestAccess(best, aAccess, distanceFromA);
+            best = candidateNearestAccess(best, aAccess, distanceFromA, maxWalkMeters);
         }
         if (bAccess != null) {
             double distanceFromB = haversineMeters(b.lat, b.lon, point.lat, point.lon);
-            best = candidateNearestAccess(best, bAccess, Math.min(distanceFromB, segmentDistance));
+            best = candidateNearestAccess(best, bAccess, Math.min(distanceFromB, segmentDistance), maxWalkMeters);
         }
         return best;
     }
 
-    private static BestAccess candidateNearestAccess(BestAccess best, AccessLabel access, double extraMeters) {
+    private static BestAccess candidateNearestAccess(BestAccess best, AccessLabel access, double extraMeters, double maxWalkMeters) {
         double walkMeters = access.walkMeters + extraMeters;
-        if (walkMeters > WALK_RADIUS_METERS) {
+        if (walkMeters > maxWalkMeters) {
             return best;
         }
         double walkSeconds = walkMeters / WALK_SPEED_MPS;
@@ -1154,27 +1160,31 @@ public class BusAccessibilityMapCacheJob {
         int offsetX = tileX * TILE_SIZE;
         int offsetY = tileY * TILE_SIZE;
         BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        try {
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
-            g.setStroke(new BasicStroke(strokeWidth(zoom), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            for (AccessibleSegment segment : segments) {
-                double ax = lonToPixelX(segment.from.lon, zoom);
-                double ay = latToPixelY(segment.from.lat, zoom);
-                double bx = lonToPixelX(segment.to.lon, zoom);
-                double by = latToPixelY(segment.to.lat, zoom);
-                g.setColor(accessibilityColor(colorScale.metric.value(segment), colorScale));
-                g.drawLine(
-                        (int) Math.round(ax - offsetX),
-                        (int) Math.round(ay - offsetY),
-                        (int) Math.round(bx - offsetX),
-                        (int) Math.round(by - offsetY)
-                );
-            }
-        } finally {
-            g.dispose();
+        int width = strokeWidth(zoom);
+        for (AccessibleSegment segment : segments) {
+            int ax = (int) Math.round(lonToPixelX(segment.from.lon, zoom) - offsetX);
+            int ay = (int) Math.round(latToPixelY(segment.from.lat, zoom) - offsetY);
+            int bx = (int) Math.round(lonToPixelX(segment.to.lon, zoom) - offsetX);
+            int by = (int) Math.round(latToPixelY(segment.to.lat, zoom) - offsetY);
+            drawRasterLine(image, ax, ay, bx, by, width, accessibilityColor(colorScale.metric.value(segment), colorScale).getRGB());
         }
         return image;
+    }
+
+    private static void drawRasterLine(BufferedImage image, int x0, int y0, int x1, int y1, int width, int rgb) {
+        int dx = x1 - x0;
+        int dy = y1 - y0;
+        int steps = Math.max(Math.abs(dx), Math.abs(dy));
+        if (steps == 0) {
+            paintContourPixel(image, x0, y0, width, rgb);
+            return;
+        }
+        for (int step = 0; step <= steps; step++) {
+            double t = step / (double) steps;
+            int x = (int) Math.round(x0 + dx * t);
+            int y = (int) Math.round(y0 + dy * t);
+            paintContourPixel(image, x, y, width, rgb);
+        }
     }
 
     private static BufferedImage renderTileContours(String key, List<AccessibleSegment> segments) {
@@ -1457,6 +1467,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("originLongitude", reachability.originStops.stream().mapToDouble(stop -> stop.lon).average().orElse(49.12));
         payload.put("walkSpeedMps", WALK_SPEED_MPS);
         payload.put("walkRadiusMeters", WALK_RADIUS_METERS);
+        payload.put("effectiveWalkRadiusMeters", EFFECTIVE_WALK_RADIUS_METERS);
         payload.put("stopClusterRadiusMeters", STOP_CLUSTER_RADIUS_METERS);
         payload.put("sampleMeters", SAMPLE_METERS);
         payload.put("maxRides", MAX_RIDES);
@@ -2009,7 +2020,7 @@ public class BusAccessibilityMapCacheJob {
 
         private static ColorScale fromSegments(List<AccessibleSegment> segments, ColorMetric metric) {
             if (metric == ColorMetric.WALK) {
-                return new ColorScale(metric, 0.0, WALK_RADIUS_METERS / WALK_SPEED_MPS / 60.0);
+                return new ColorScale(metric, 0.0, EFFECTIVE_WALK_RADIUS_METERS / WALK_SPEED_MPS / 60.0);
             }
             if (COLOR_MAX_MINUTES > COLOR_MIN_MINUTES) {
                 return new ColorScale(metric, COLOR_MIN_MINUTES, COLOR_MAX_MINUTES);

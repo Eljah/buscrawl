@@ -192,7 +192,7 @@ function updateRangeMeta(){
   const labels=document.getElementById('scaleLabels');
   if(state.overlayMode==='walk'){
     const max=Number(p.walkColorMaxMinutes||0).toFixed(1);
-    range.textContent=`0-${max} min walking inside the best transport+walk route; speed ${Number(root.walkSpeedMps||0).toFixed(1)} m/s`;
+    range.textContent=`0-${max} min walking inside the best transport+walk route; radius ${Math.round(root.effectiveWalkRadiusMeters||root.walkRadiusMeters||0)} m; speed ${Number(root.walkSpeedMps||0).toFixed(1)} m/s`;
     labels.innerHTML=scaleLabels(0,Number(p.walkColorMaxMinutes||0),'walk');
     document.getElementById('scaleTicks').innerHTML='';
   }else{
