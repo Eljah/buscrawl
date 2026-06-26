@@ -1,11 +1,21 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -25,6 +35,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -52,6 +63,8 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MIN_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MIN_MINUTES", "0"));
     private static final double COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_MINUTES", "0"));
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
+    private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
+    private static final double ROAD_NODE_GRID_DEGREES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_ROAD_NODE_GRID_DEGREES", "0.005"));
     private static final int TILE_SIZE = 256;
 
     public static void main(String[] args) throws Exception {
@@ -78,6 +91,10 @@ public class BusAccessibilityMapCacheJob {
         Path tileBaseRoot = Path.of(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_TILE_BASE_ROOT",
                 tileRoot.getParent() == null ? tileRoot.toString() : tileRoot.getParent().toString()
+        ));
+        Path contourStatsDir = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_CONTOUR_STATS_DIR",
+                outputFile.getParent().resolve("accessibility-contour-stats").toString()
         ));
         String originStopQuery = System.getenv().getOrDefault("BUS_ACCESSIBILITY_ORIGIN_STOP", "ПО Тасма");
         String sourceMode = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SOURCE", "transfer-potential").trim();
@@ -112,20 +129,34 @@ public class BusAccessibilityMapCacheJob {
             Map<String, StopPoint> stopsById = loadStopsById();
             List<RoadWay> roads = loadRoadWays(osmRoadsFile);
             RoadGraph roadGraph = RoadGraph.build(roads);
+            boolean useTransferPotential = "transfer-potential".equalsIgnoreCase(sourceMode);
+            List<StopPoint> transferOriginStops = useTransferPotential
+                    ? selectOriginStops(stopsById, originStopQuery)
+                    : List.of();
+            if (useTransferPotential && transferOriginStops.isEmpty()) {
+                throw new IllegalStateException("Origin stop not found in routes.json, query='" + originStopQuery + "'");
+            }
             List<SnapshotPayload> snapshots = new ArrayList<>();
             for (LocalDate snapshotDate : serviceDates) {
-                Map<String, List<Event>> segmentEventsByStartStop = "transfer-potential".equalsIgnoreCase(sourceMode)
+                Map<String, List<Event>> segmentEventsByStartStop = useTransferPotential
                         ? Map.of()
                         : loadSegmentEvents(spark, trafficBehaviorDir.resolve("segment-trips"), stopsById, snapshotDate);
+                Map<Integer, List<StopTime>> transferStopTimesByBucket = useTransferPotential
+                        ? loadTransferStopTimesByBucket(
+                                spark,
+                                transferPotentialDir.resolve("journeys"),
+                                stopsById,
+                                transferOriginStops,
+                                snapshotDate
+                        )
+                        : Map.of();
                 for (LocalTime snapshotTime : departureTimes) {
                     Reachability reachability;
                     try {
-                        reachability = "transfer-potential".equalsIgnoreCase(sourceMode)
-                                ? calculateReachabilityFromTransferPotential(
-                                        spark,
-                                        transferPotentialDir.resolve("journeys"),
-                                        stopsById,
-                                        originStopQuery,
+                        reachability = useTransferPotential
+                                ? calculateReachabilityFromTransferCache(
+                                        transferOriginStops,
+                                        transferStopTimesByBucket,
                                         snapshotDate,
                                         snapshotTime
                                 )
@@ -153,23 +184,33 @@ public class BusAccessibilityMapCacheJob {
                     Path totalLogTileRoot = snapshotRoot.resolve("total-log");
                     Path walkTileRoot = snapshotRoot.resolve("walk");
                     Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
-                    ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL);
-                    ColorScale totalFullColorScale = renderModes.contains("totalFull") ? renderTiles(segments, totalFullTileRoot, ColorMetric.TOTAL_FULL) : null;
-                    ColorScale totalLogColorScale = renderModes.contains("totalLog") ? renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG) : null;
-                    ColorScale walkColorScale = renderModes.contains("walk") ? renderTiles(segments, walkTileRoot, ColorMetric.WALK) : null;
-                    ColorScale stopTransportColorScale = renderModes.contains("stopTransport") ? renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT) : null;
+                    Path contourTileRoot = snapshotRoot.resolve("contours");
+                    Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes = buildTileIndexes(segments, Double.POSITIVE_INFINITY);
+                    Map<Integer, Map<String, List<AccessibleSegment>>> contourTileIndexes = buildTileIndexes(
+                            segments,
+                            CONTOUR_THRESHOLDS_MINUTES[CONTOUR_THRESHOLDS_MINUTES.length - 1]
+                    );
+                    ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes);
+                    ColorScale totalFullColorScale = renderModes.contains("totalFull") ? renderTiles(segments, totalFullTileRoot, ColorMetric.TOTAL_FULL, tileIndexes) : null;
+                    ColorScale totalLogColorScale = renderModes.contains("totalLog") ? renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes) : null;
+                    ColorScale walkColorScale = renderModes.contains("walk") ? renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes) : null;
+                    ColorScale stopTransportColorScale = renderModes.contains("stopTransport") ? renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes) : null;
+                    ContourStats contourStats = calculateContourStats(segments);
+                    renderContourTiles(contourTileRoot, contourTileIndexes);
                     snapshots.add(new SnapshotPayload(
                             snapshotId,
                             snapshotDate,
                             snapshotTime,
                             reachability,
                             segments.size(),
+                            contourStats,
                             totalColorScale,
                             totalFullColorScale,
                             totalLogColorScale,
                             walkColorScale,
                             stopTransportColorScale
                     ));
+                    writeContourStats(spark, contourStatsDir, snapshots);
                     writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
                     System.out.printf(
                             Locale.ROOT,
@@ -473,6 +514,87 @@ public class BusAccessibilityMapCacheJob {
         return new Reachability(originStops, stopTimes);
     }
 
+    private static Map<Integer, List<StopTime>> loadTransferStopTimesByBucket(
+            SparkSession spark,
+            Path journeysDir,
+            Map<String, StopPoint> stopsById,
+            List<StopPoint> originStops,
+            LocalDate serviceDate
+    ) {
+        if (!Files.exists(journeysDir)) {
+            throw new IllegalStateException("Transfer potential journeys directory not found: " + journeysDir);
+        }
+        String[] originIds = originStops.stream().map(stop -> stop.stopId).toArray(String[]::new);
+        Dataset<Row> bestJourneys = spark.read().parquet(journeysDir.toAbsolutePath().toString())
+                .filter(col("serviceDate").cast("string").equalTo(serviceDate.toString()))
+                .filter(col("originStopId").isin((Object[]) originIds))
+                .filter(col("reachable").equalTo(true))
+                .groupBy("departureBucketMinute", "destinationStopId")
+                .agg(min("totalJourneySeconds").alias("transportSeconds"));
+
+        Map<Integer, List<StopTime>> byBucket = new HashMap<>();
+        for (Row row : bestJourneys.collectAsList()) {
+            Integer bucketMinute = ((Number) row.getAs("departureBucketMinute")).intValue();
+            String stopId = row.getAs("destinationStopId");
+            if (stopId == null || !stopsById.containsKey(stopId) || row.isNullAt(2)) {
+                continue;
+            }
+            StopPoint stop = requireStop(stopsById, stopId);
+            byBucket.computeIfAbsent(bucketMinute, ignored -> new ArrayList<>()).add(new StopTime(
+                    stop.stopId,
+                    stop.stopName,
+                    stop.lat,
+                    stop.lon,
+                    ((Number) row.getAs("transportSeconds")).intValue()
+            ));
+        }
+        for (Map.Entry<Integer, List<StopTime>> entry : byBucket.entrySet()) {
+            List<StopTime> stopTimes = entry.getValue();
+            for (StopPoint origin : originStops) {
+                stopTimes.add(new StopTime(origin.stopId, origin.stopName, origin.lat, origin.lon, 0));
+            }
+            List<StopTime> expanded = expandStopTimesToSameNameClusters(stopTimes, stopsById).stream()
+                    .collect(Collectors.toMap(
+                            stop -> stop.stopId,
+                            stop -> stop,
+                            (left, right) -> left.transportSeconds <= right.transportSeconds ? left : right,
+                            LinkedHashMap::new
+                    ))
+                    .values()
+                    .stream()
+                    .sorted(Comparator.comparingInt(stop -> stop.transportSeconds))
+                    .collect(Collectors.toList());
+            entry.setValue(expanded);
+        }
+        System.out.printf(
+                Locale.ROOT,
+                "BusAccessibilityMapCacheJob: loaded transfer reachability cache for %s buckets=%d origins=%d%n",
+                serviceDate,
+                byBucket.size(),
+                originStops.size()
+        );
+        return byBucket;
+    }
+
+    private static Reachability calculateReachabilityFromTransferCache(
+            List<StopPoint> originStops,
+            Map<Integer, List<StopTime>> stopTimesByBucket,
+            LocalDate serviceDate,
+            LocalTime departureTime
+    ) {
+        int transferBucketMinutes = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_BUCKET_MINUTES", "10"));
+        int requestedMinute = departureTime.toSecondOfDay() / 60;
+        int bucketMinute = (requestedMinute / transferBucketMinutes) * transferBucketMinutes;
+        List<StopTime> stopTimes = stopTimesByBucket.get(bucketMinute);
+        if (stopTimes == null || stopTimes.size() <= originStops.size()) {
+            throw new IllegalStateException(
+                    "No transfer-potential journeys found for serviceDate=" + serviceDate
+                            + ", bucketMinute=" + bucketMinute
+            );
+        }
+        return new Reachability(originStops, stopTimes);
+    }
+
     private static List<StopTime> expandStopTimesToSameNameClusters(
             List<StopTime> stopTimes,
             Map<String, StopPoint> stopsById
@@ -651,6 +773,7 @@ public class BusAccessibilityMapCacheJob {
                             best.stop.transportSeconds / 60.0,
                             nearest.stop.transportSeconds / 60.0,
                             nearest.walkDistanceMeters,
+                            haversineMeters(p0.lat, p0.lon, p1.lat, p1.lon),
                             best.stop.stopId,
                             best.stop.stopName
                     ));
@@ -890,21 +1013,22 @@ public class BusAccessibilityMapCacheJob {
         return String.format(Locale.ROOT, "%.7f|%.7f", point.lat, point.lon);
     }
 
-    private static ColorScale renderTiles(List<AccessibleSegment> segments, Path tileRoot, ColorMetric metric) throws Exception {
+    private static ColorScale renderTiles(
+            List<AccessibleSegment> segments,
+            Path tileRoot,
+            ColorMetric metric,
+            Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes
+    ) throws Exception {
         ColorScale colorScale = ColorScale.fromSegments(segments, metric);
         Path tempRoot = tileRoot.resolveSibling(tileRoot.getFileName() + ".tmp-" + System.currentTimeMillis());
         Files.createDirectories(tempRoot);
         try {
             for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
-                Map<String, List<AccessibleSegment>> segmentsByTile = new HashMap<>();
-                for (AccessibleSegment segment : segments) {
-                    indexSegmentTiles(segmentsByTile, segment, zoom);
-                }
-                for (Map.Entry<String, List<AccessibleSegment>> entry : segmentsByTile.entrySet()) {
-                    Path tilePath = tempRoot.resolve(entry.getKey() + ".png");
-                    Files.createDirectories(tilePath.getParent());
-                    ImageIO.write(renderTileSegments(entry.getKey(), entry.getValue(), colorScale), "png", tilePath.toFile());
-                }
+                Map<String, List<AccessibleSegment>> segmentsByTile = tileIndexes.getOrDefault(zoom, Map.of());
+                segmentsByTile.entrySet().parallelStream().forEach(entry -> writeTileUnchecked(
+                        tempRoot.resolve(entry.getKey() + ".png"),
+                        renderTileSegments(entry.getKey(), entry.getValue(), colorScale)
+                ));
             }
             if (Files.exists(tileRoot)) {
                 clearDirectory(tileRoot);
@@ -922,6 +1046,84 @@ public class BusAccessibilityMapCacheJob {
                 clearDirectory(tempRoot);
                 Files.deleteIfExists(tempRoot);
             }
+        }
+    }
+
+    private static void renderContourTiles(
+            Path tileRoot,
+            Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes
+    ) throws Exception {
+        Path tempRoot = tileRoot.resolveSibling(tileRoot.getFileName() + ".tmp-" + System.currentTimeMillis());
+        Files.createDirectories(tempRoot);
+        try {
+            for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
+                Map<String, List<AccessibleSegment>> segmentsByTile = tileIndexes.getOrDefault(zoom, Map.of());
+                segmentsByTile.entrySet().parallelStream().forEach(entry -> writeTileUnchecked(
+                        tempRoot.resolve(entry.getKey() + ".png"),
+                        renderTileContours(entry.getKey(), entry.getValue())
+                ));
+            }
+            if (Files.exists(tileRoot)) {
+                clearDirectory(tileRoot);
+                Files.delete(tileRoot);
+            }
+            Files.createDirectories(tileRoot.getParent());
+            try {
+                Files.move(tempRoot, tileRoot, StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception ignored) {
+                Files.move(tempRoot, tileRoot, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            if (Files.exists(tempRoot)) {
+                clearDirectory(tempRoot);
+                Files.deleteIfExists(tempRoot);
+            }
+        }
+    }
+
+    private static Map<Integer, Map<String, List<AccessibleSegment>>> buildTileIndexes(
+            List<AccessibleSegment> segments,
+            double maxTotalMinutes
+    ) {
+        Map<Integer, Map<String, List<AccessibleSegment>>> indexes = new HashMap<>();
+        for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
+            Map<String, List<AccessibleSegment>> segmentsByTile = new HashMap<>();
+            for (AccessibleSegment segment : segments) {
+                if (segment.totalMinutes <= maxTotalMinutes) {
+                    indexSegmentTiles(segmentsByTile, segment, zoom);
+                }
+            }
+            indexes.put(zoom, segmentsByTile);
+        }
+        return indexes;
+    }
+
+    private static void writeTileUnchecked(Path tilePath, BufferedImage image) {
+        try {
+            Files.createDirectories(tilePath.getParent());
+            writePngFast(image, tilePath);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to write tile " + tilePath, e);
+        }
+    }
+
+    private static void writePngFast(BufferedImage image, Path tilePath) throws Exception {
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("png");
+        if (!writers.hasNext()) {
+            ImageIO.write(image, "png", tilePath.toFile());
+            return;
+        }
+        ImageWriter writer = writers.next();
+        ImageWriteParam param = writer.getDefaultWriteParam();
+        if (param.canWriteCompressed()) {
+            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(1.0f);
+        }
+        try (ImageOutputStream output = ImageIO.createImageOutputStream(tilePath.toFile())) {
+            writer.setOutput(output);
+            writer.write(null, new IIOImage(image, null, null), param);
+        } finally {
+            writer.dispose();
         }
     }
 
@@ -953,7 +1155,7 @@ public class BusAccessibilityMapCacheJob {
         BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = image.createGraphics();
         try {
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
             g.setStroke(new BasicStroke(strokeWidth(zoom), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
             for (AccessibleSegment segment : segments) {
                 double ax = lonToPixelX(segment.from.lon, zoom);
@@ -972,6 +1174,66 @@ public class BusAccessibilityMapCacheJob {
             g.dispose();
         }
         return image;
+    }
+
+    private static BufferedImage renderTileContours(String key, List<AccessibleSegment> segments) {
+        String[] parts = key.split("/");
+        int zoom = Integer.parseInt(parts[0]);
+        int tileX = Integer.parseInt(parts[1]);
+        int tileY = Integer.parseInt(parts[2]);
+        int offsetX = tileX * TILE_SIZE;
+        int offsetY = tileY * TILE_SIZE;
+        BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 60.0, new Color(18, 49, 88, 190), contourStrokeWidth(zoom, 60.0));
+            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 30.0, new Color(255, 255, 255, 215), contourStrokeWidth(zoom, 30.0));
+            drawContourThreshold(g, segments, zoom, offsetX, offsetY, 15.0, new Color(18, 18, 18, 230), contourStrokeWidth(zoom, 15.0));
+        } finally {
+            g.dispose();
+        }
+        return image;
+    }
+
+    private static void drawContourThreshold(
+            Graphics2D g,
+            List<AccessibleSegment> segments,
+            int zoom,
+            int offsetX,
+            int offsetY,
+            double thresholdMinutes,
+            Color color,
+            int width
+    ) {
+        g.setStroke(new BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setColor(color);
+        for (AccessibleSegment segment : segments) {
+            if (segment.totalMinutes > thresholdMinutes) {
+                continue;
+            }
+            double ax = lonToPixelX(segment.from.lon, zoom);
+            double ay = latToPixelY(segment.from.lat, zoom);
+            double bx = lonToPixelX(segment.to.lon, zoom);
+            double by = latToPixelY(segment.to.lat, zoom);
+            g.drawLine(
+                    (int) Math.round(ax - offsetX),
+                    (int) Math.round(ay - offsetY),
+                    (int) Math.round(bx - offsetX),
+                    (int) Math.round(by - offsetY)
+            );
+        }
+    }
+
+    private static int contourStrokeWidth(int zoom, double thresholdMinutes) {
+        int base = Math.max(2, strokeWidth(zoom) + 1);
+        if (thresholdMinutes <= 15.0) {
+            return base + 2;
+        }
+        if (thresholdMinutes <= 30.0) {
+            return base + 1;
+        }
+        return base;
     }
 
     private static int strokeWidth(int zoom) {
@@ -1035,6 +1297,61 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
+    private static ContourStats calculateContourStats(List<AccessibleSegment> segments) {
+        double area15 = contourAreaSquareKm(segments, 15.0);
+        double area30 = contourAreaSquareKm(segments, 30.0);
+        double area60 = contourAreaSquareKm(segments, 60.0);
+        return new ContourStats(area15, area30, area60);
+    }
+
+    private static double contourAreaSquareKm(List<AccessibleSegment> segments, double thresholdMinutes) {
+        double squareMeters = segments.stream()
+                .filter(segment -> segment.totalMinutes <= thresholdMinutes)
+                .mapToDouble(segment -> segment.lengthMeters * SAMPLE_METERS)
+                .sum();
+        return squareMeters / 1_000_000.0;
+    }
+
+    private static void writeContourStats(SparkSession spark, Path outputDir, List<SnapshotPayload> snapshots) {
+        try {
+            Files.createDirectories(outputDir);
+            List<Row> rows = snapshots.stream()
+                    .map(snapshot -> RowFactory.create(
+                            java.sql.Date.valueOf(snapshot.serviceDate),
+                            snapshot.departureTime.toString(),
+                            Timestamp.from(snapshot.serviceDate.atTime(snapshot.departureTime).atZone(CITY_ZONE).toInstant()),
+                            snapshot.id,
+                            snapshot.reachability.stopTimes.size(),
+                            snapshot.segmentCount,
+                            snapshot.contourStats.area15SquareKm,
+                            snapshot.contourStats.area30SquareKm,
+                            snapshot.contourStats.area60SquareKm
+                    ))
+                    .collect(Collectors.toList());
+            spark.createDataFrame(rows, contourStatsSchema())
+                    .coalesce(1)
+                    .write()
+                    .mode(SaveMode.Overwrite)
+                    .parquet(outputDir.toAbsolutePath().toString());
+        } catch (Exception e) {
+            System.err.println("BusAccessibilityMapCacheJob: failed to write contour stats: " + e.getMessage());
+        }
+    }
+
+    private static StructType contourStatsSchema() {
+        return new StructType(new StructField[]{
+                new StructField("serviceDate", DataTypes.DateType, false, Metadata.empty()),
+                new StructField("departureTime", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("departureAt", DataTypes.TimestampType, false, Metadata.empty()),
+                new StructField("snapshotId", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("reachableStops", DataTypes.IntegerType, false, Metadata.empty()),
+                new StructField("segmentCount", DataTypes.IntegerType, false, Metadata.empty()),
+                new StructField("area15SquareKm", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("area30SquareKm", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("area60SquareKm", DataTypes.DoubleType, false, Metadata.empty())
+        });
+    }
+
     private static void writePayload(
             Path outputFile,
             Path tileBaseRoot,
@@ -1072,6 +1389,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("tileMinZoom", MIN_ZOOM);
         payload.put("tileMaxZoom", MAX_ZOOM);
         payload.put("tileOverlayTemplate", first.tileOverlayTemplate());
+        payload.put("contourTileOverlayTemplate", first.contourTileOverlayTemplate());
         payload.put("totalFullTileOverlayTemplate", first.totalFullColorScale == null ? null : first.totalFullTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", first.totalLogColorScale == null ? null : first.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", first.walkColorScale == null ? null : first.walkTileOverlayTemplate());
@@ -1081,6 +1399,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("totalLogTileRoot", tileBaseRoot.resolve(first.id).resolve("total-log").toString());
         payload.put("walkTileRoot", tileBaseRoot.resolve(first.id).resolve("walk").toString());
         payload.put("stopTransportTileRoot", tileBaseRoot.resolve(first.id).resolve("stop-transport").toString());
+        payload.put("contourThresholdMinutes", List.of(15, 30, 60));
         payload.put("totalColorMinMinutes", round1(first.totalColorScale.minMinutes));
         payload.put("totalColorMaxMinutes", round1(first.totalColorScale.maxMinutes));
         putScale(payload, "totalFull", first.totalFullColorScale);
@@ -1093,6 +1412,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("requestedServiceDates", requestedServiceDates.stream().map(LocalDate::toString).collect(Collectors.toList()));
         payload.put("requestedDepartureTimes", requestedDepartureTimes.stream().map(LocalTime::toString).collect(Collectors.toList()));
         payload.put("availableModes", first.availableModes());
+        payload.put("contourAreaSeries", snapshots.stream().map(BusAccessibilityMapCacheJob::contourAreaPayload).collect(Collectors.toList()));
         payload.put("snapshots", snapshots.stream().map(BusAccessibilityMapCacheJob::snapshotPayload).collect(Collectors.toList()));
         writeJsonAtomic(outputFile, payload);
     }
@@ -1105,6 +1425,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("reachableStops", snapshot.reachability.stopTimes.size());
         payload.put("segmentCount", snapshot.segmentCount);
         payload.put("tileOverlayTemplate", snapshot.tileOverlayTemplate());
+        payload.put("contourTileOverlayTemplate", snapshot.contourTileOverlayTemplate());
         payload.put("availableModes", snapshot.availableModes());
         payload.put("totalFullTileOverlayTemplate", snapshot.totalFullColorScale == null ? null : snapshot.totalFullTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", snapshot.totalLogColorScale == null ? null : snapshot.totalLogTileOverlayTemplate());
@@ -1116,6 +1437,18 @@ public class BusAccessibilityMapCacheJob {
         putScale(payload, "totalLog", snapshot.totalLogColorScale);
         putScale(payload, "walk", snapshot.walkColorScale);
         putScale(payload, "stopTransport", snapshot.stopTransportColorScale);
+        payload.put("contourArea", contourAreaPayload(snapshot));
+        return payload;
+    }
+
+    private static Map<String, Object> contourAreaPayload(SnapshotPayload snapshot) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("snapshotId", snapshot.id);
+        payload.put("serviceDate", snapshot.serviceDate.toString());
+        payload.put("departureTime", snapshot.departureTime.toString());
+        payload.put("area15SquareKm", round2(snapshot.contourStats.area15SquareKm));
+        payload.put("area30SquareKm", round2(snapshot.contourStats.area30SquareKm));
+        payload.put("area60SquareKm", round2(snapshot.contourStats.area60SquareKm));
         return payload;
     }
 
@@ -1129,6 +1462,10 @@ public class BusAccessibilityMapCacheJob {
 
     private static double round1(double value) {
         return Math.round(value * 10.0) / 10.0;
+    }
+
+    private static double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
     }
 
     private static Map<String, Object> stopPayload(StopPoint stop) {
@@ -1319,6 +1656,7 @@ public class BusAccessibilityMapCacheJob {
         private final double stopTransportMinutes;
         private final double nearestStopTransportMinutes;
         private final double nearestStopWalkDistanceMeters;
+        private final double lengthMeters;
         private final String nearestStopId;
         private final String nearestStopName;
 
@@ -1331,6 +1669,7 @@ public class BusAccessibilityMapCacheJob {
                 double stopTransportMinutes,
                 double nearestStopTransportMinutes,
                 double nearestStopWalkDistanceMeters,
+                double lengthMeters,
                 String nearestStopId,
                 String nearestStopName
         ) {
@@ -1342,6 +1681,7 @@ public class BusAccessibilityMapCacheJob {
             this.stopTransportMinutes = stopTransportMinutes;
             this.nearestStopTransportMinutes = nearestStopTransportMinutes;
             this.nearestStopWalkDistanceMeters = nearestStopWalkDistanceMeters;
+            this.lengthMeters = lengthMeters;
             this.nearestStopId = nearestStopId;
             this.nearestStopName = nearestStopName;
         }
@@ -1391,23 +1731,31 @@ public class BusAccessibilityMapCacheJob {
         private final List<Point> nodes;
         private final Map<String, Integer> nodeIdsByPointKey;
         private final Map<Integer, List<RoadEdge>> edgesByNode;
+        private final Map<String, List<Integer>> nodeIdsByGridCell;
 
-        private RoadGraph(List<Point> nodes, Map<String, Integer> nodeIdsByPointKey, Map<Integer, List<RoadEdge>> edgesByNode) {
+        private RoadGraph(
+                List<Point> nodes,
+                Map<String, Integer> nodeIdsByPointKey,
+                Map<Integer, List<RoadEdge>> edgesByNode,
+                Map<String, List<Integer>> nodeIdsByGridCell
+        ) {
             this.nodes = nodes;
             this.nodeIdsByPointKey = nodeIdsByPointKey;
             this.edgesByNode = edgesByNode;
+            this.nodeIdsByGridCell = nodeIdsByGridCell;
         }
 
         private static RoadGraph build(List<RoadWay> roads) {
             List<Point> nodes = new ArrayList<>();
             Map<String, Integer> nodeIdsByPointKey = new HashMap<>();
             Map<Integer, List<RoadEdge>> edgesByNode = new HashMap<>();
+            Map<String, List<Integer>> nodeIdsByGridCell = new HashMap<>();
             for (RoadWay road : roads) {
                 for (int i = 1; i < road.points.size(); i++) {
                     Point a = road.points.get(i - 1);
                     Point b = road.points.get(i);
-                    int aId = nodeId(a, nodes, nodeIdsByPointKey);
-                    int bId = nodeId(b, nodes, nodeIdsByPointKey);
+                    int aId = nodeId(a, nodes, nodeIdsByPointKey, nodeIdsByGridCell);
+                    int bId = nodeId(b, nodes, nodeIdsByPointKey, nodeIdsByGridCell);
                     if (aId == bId) {
                         continue;
                     }
@@ -1419,10 +1767,15 @@ public class BusAccessibilityMapCacheJob {
                     edgesByNode.computeIfAbsent(bId, ignored -> new ArrayList<>()).add(new RoadEdge(aId, distance));
                 }
             }
-            return new RoadGraph(nodes, nodeIdsByPointKey, edgesByNode);
+            return new RoadGraph(nodes, nodeIdsByPointKey, edgesByNode, nodeIdsByGridCell);
         }
 
-        private static int nodeId(Point point, List<Point> nodes, Map<String, Integer> nodeIdsByPointKey) {
+        private static int nodeId(
+                Point point,
+                List<Point> nodes,
+                Map<String, Integer> nodeIdsByPointKey,
+                Map<String, List<Integer>> nodeIdsByGridCell
+        ) {
             String key = pointKey(point);
             Integer existing = nodeIdsByPointKey.get(key);
             if (existing != null) {
@@ -1431,22 +1784,30 @@ public class BusAccessibilityMapCacheJob {
             int id = nodes.size();
             nodes.add(point);
             nodeIdsByPointKey.put(key, id);
+            nodeIdsByGridCell.computeIfAbsent(gridCellKey(point.lat, point.lon), ignored -> new ArrayList<>()).add(id);
             return id;
         }
 
         private List<NodeDistance> closestNodes(double lat, double lon, double radiusMeters, int fallbackCount) {
             List<NodeDistance> withinRadius = new ArrayList<>();
             PriorityQueue<NodeDistance> nearest = new PriorityQueue<>((left, right) -> Double.compare(right.distanceMeters, left.distanceMeters));
-            for (int i = 0; i < nodes.size(); i++) {
-                Point node = nodes.get(i);
-                double distance = haversineMeters(lat, lon, node.lat, node.lon);
-                if (distance <= radiusMeters) {
-                    withinRadius.add(new NodeDistance(i, distance));
+            int centerLatCell = gridCell(lat);
+            int centerLonCell = gridCell(lon);
+            int radiusCells = Math.max(1, (int) Math.ceil(radiusMeters / 450.0) + 1);
+            Set<Integer> scannedNodeIds = new HashSet<>();
+            for (int latCell = centerLatCell - radiusCells; latCell <= centerLatCell + radiusCells; latCell++) {
+                for (int lonCell = centerLonCell - radiusCells; lonCell <= centerLonCell + radiusCells; lonCell++) {
+                    for (Integer nodeId : nodeIdsByGridCell.getOrDefault(gridCellKey(latCell, lonCell), List.of())) {
+                        if (scannedNodeIds.add(nodeId)) {
+                            addCandidateNode(lat, lon, radiusMeters, fallbackCount, withinRadius, nearest, nodeId);
+                        }
+                    }
                 }
-                if (fallbackCount > 0) {
-                    nearest.add(new NodeDistance(i, distance));
-                    if (nearest.size() > fallbackCount) {
-                        nearest.poll();
+            }
+            if (withinRadius.isEmpty() && nearest.size() < fallbackCount) {
+                for (int i = 0; i < nodes.size(); i++) {
+                    if (scannedNodeIds.add(i)) {
+                        addCandidateNode(lat, lon, radiusMeters, fallbackCount, withinRadius, nearest, i);
                     }
                 }
             }
@@ -1457,6 +1818,40 @@ public class BusAccessibilityMapCacheJob {
             List<NodeDistance> fallback = new ArrayList<>(nearest);
             fallback.sort(Comparator.comparingDouble(item -> item.distanceMeters));
             return fallback;
+        }
+
+        private void addCandidateNode(
+                double lat,
+                double lon,
+                double radiusMeters,
+                int fallbackCount,
+                List<NodeDistance> withinRadius,
+                PriorityQueue<NodeDistance> nearest,
+                int nodeId
+        ) {
+            Point node = nodes.get(nodeId);
+            double distance = haversineMeters(lat, lon, node.lat, node.lon);
+            if (distance <= radiusMeters) {
+                withinRadius.add(new NodeDistance(nodeId, distance));
+            }
+            if (fallbackCount > 0) {
+                nearest.add(new NodeDistance(nodeId, distance));
+                if (nearest.size() > fallbackCount) {
+                    nearest.poll();
+                }
+            }
+        }
+
+        private static int gridCell(double value) {
+            return (int) Math.floor(value / ROAD_NODE_GRID_DEGREES);
+        }
+
+        private static String gridCellKey(double lat, double lon) {
+            return gridCell(lat) + "|" + gridCell(lon);
+        }
+
+        private static String gridCellKey(int latCell, int lonCell) {
+            return latCell + "|" + lonCell;
         }
     }
 
@@ -1562,6 +1957,7 @@ public class BusAccessibilityMapCacheJob {
         private final LocalTime departureTime;
         private final Reachability reachability;
         private final int segmentCount;
+        private final ContourStats contourStats;
         private final ColorScale totalColorScale;
         private final ColorScale totalFullColorScale;
         private final ColorScale totalLogColorScale;
@@ -1574,6 +1970,7 @@ public class BusAccessibilityMapCacheJob {
                 LocalTime departureTime,
                 Reachability reachability,
                 int segmentCount,
+                ContourStats contourStats,
                 ColorScale totalColorScale,
                 ColorScale totalFullColorScale,
                 ColorScale totalLogColorScale,
@@ -1585,6 +1982,7 @@ public class BusAccessibilityMapCacheJob {
             this.departureTime = departureTime;
             this.reachability = reachability;
             this.segmentCount = segmentCount;
+            this.contourStats = contourStats;
             this.totalColorScale = totalColorScale;
             this.totalFullColorScale = totalFullColorScale;
             this.totalLogColorScale = totalLogColorScale;
@@ -1594,6 +1992,10 @@ public class BusAccessibilityMapCacheJob {
 
         private String tileOverlayTemplate() {
             return "./tiles/accessibility/" + id + "/total/{z}/{x}/{y}.png";
+        }
+
+        private String contourTileOverlayTemplate() {
+            return "./tiles/accessibility/" + id + "/contours/{z}/{x}/{y}.png";
         }
 
         private String totalFullTileOverlayTemplate() {
@@ -1628,6 +2030,18 @@ public class BusAccessibilityMapCacheJob {
                 modes.add("stopTransport");
             }
             return modes;
+        }
+    }
+
+    private static final class ContourStats {
+        private final double area15SquareKm;
+        private final double area30SquareKm;
+        private final double area60SquareKm;
+
+        private ContourStats(double area15SquareKm, double area30SquareKm, double area60SquareKm) {
+            this.area15SquareKm = area15SquareKm;
+            this.area30SquareKm = area30SquareKm;
+            this.area60SquareKm = area60SquareKm;
         }
     }
 
