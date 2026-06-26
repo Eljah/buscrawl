@@ -64,6 +64,7 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MIN_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MIN_MINUTES", "0"));
     private static final double COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_MINUTES", "0"));
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
+    private static final double TOTAL_LOG_COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_TOTAL_LOG_MAX_MINUTES", "800"));
     private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
     private static final double CONTOUR_ENVELOPE_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_ENVELOPE_METERS", "250"));
     private static final double CONTOUR_PROJECTION_LAT = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_PROJECTION_LAT", "55.8"));
@@ -185,6 +186,7 @@ public class BusAccessibilityMapCacheJob {
                     }
                     List<AccessibleSegment> segments = buildAccessibilitySegments(roadGraph, roads, reachability.stopTimes);
                     String snapshotId = snapshotId(snapshotDate, snapshotTime);
+                    debugTopTotalSegments(snapshotDate, snapshotTime, segments);
                     Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
                     Path totalTileRoot = snapshotRoot.resolve("total");
                     Path totalLogTileRoot = snapshotRoot.resolve("total-log");
@@ -1008,6 +1010,48 @@ public class BusAccessibilityMapCacheJob {
             return new BestAccess(access.stop, walkMeters, walkSeconds, totalSeconds);
         }
         return best;
+    }
+
+    private static void debugTopTotalSegments(LocalDate serviceDate, LocalTime departureTime, List<AccessibleSegment> segments) {
+        if (!Boolean.parseBoolean(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEBUG_TOP_TOTAL", "false"))) {
+            return;
+        }
+        String onlyTime = System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEBUG_DEPARTURE_TIME", "").trim();
+        if (!onlyTime.isEmpty() && !onlyTime.equals(departureTime.toString())) {
+            return;
+        }
+        double threshold = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEBUG_MIN_TOTAL_MINUTES", "700"));
+        int limit = Integer.parseInt(System.getenv().getOrDefault("BUS_ACCESSIBILITY_DEBUG_LIMIT", "20"));
+        System.out.printf(
+                Locale.ROOT,
+                "BusAccessibilityMapCacheJob: debug top total segments serviceDate=%s departureTime=%s threshold=%.1f limit=%d%n",
+                serviceDate,
+                departureTime,
+                threshold,
+                limit
+        );
+        segments.stream()
+                .filter(segment -> segment.totalMinutes >= threshold)
+                .sorted(Comparator.comparingDouble((AccessibleSegment segment) -> segment.totalMinutes).reversed())
+                .limit(limit)
+                .forEach(segment -> {
+                    double lat = (segment.from.lat + segment.to.lat) / 2.0;
+                    double lon = (segment.from.lon + segment.to.lon) / 2.0;
+                    System.out.printf(
+                            Locale.ROOT,
+                            "ACCESS_DEBUG_TOP serviceDate=%s departure=%s totalMin=%.1f transportMin=%.1f walkMin=%.1f walkMeters=%.0f stopId=%s stopName=%s lat=%.6f lon=%.6f%n",
+                            serviceDate,
+                            departureTime,
+                            segment.totalMinutes,
+                            segment.stopTransportMinutes,
+                            segment.walkMinutes,
+                            segment.walkDistanceMeters,
+                            segment.nearestStopId,
+                            segment.nearestStopName,
+                            lat,
+                            lon
+                    );
+                });
     }
 
     private static String pointKey(Point point) {
@@ -2165,6 +2209,9 @@ public class BusAccessibilityMapCacheJob {
         private static ColorScale fromSegments(List<AccessibleSegment> segments, ColorMetric metric) {
             if (metric == ColorMetric.WALK) {
                 return new ColorScale(metric, 0.0, EFFECTIVE_WALK_RADIUS_METERS / WALK_SPEED_MPS / 60.0);
+            }
+            if (metric == ColorMetric.TOTAL_LOG) {
+                return new ColorScale(metric, 0.0, TOTAL_LOG_COLOR_MAX_MINUTES, true);
             }
             if (COLOR_MAX_MINUTES > COLOR_MIN_MINUTES) {
                 return new ColorScale(metric, COLOR_MIN_MINUTES, COLOR_MAX_MINUTES);
