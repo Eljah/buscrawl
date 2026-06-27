@@ -21,6 +21,11 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.awt.image.IndexColorModel;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -44,12 +49,16 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.min;
 
 public class BusAccessibilityMapCacheJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int WALK_CACHE_MAGIC = 0x42415731; // BAW1
+    private static final int WALK_CACHE_VERSION = 1;
     private static final ZoneId CITY_ZONE = ZoneId.of(System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow"));
     private static final double WALK_SPEED_MPS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_WALK_SPEED_MPS", "1.3"));
     private static final double WALK_RADIUS_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_WALK_RADIUS_METERS", "2000"));
@@ -61,6 +70,22 @@ public class BusAccessibilityMapCacheJob {
     private static final int MAX_CANDIDATE_EVENTS_PER_STOP = Integer.parseInt(System.getenv().getOrDefault("BUS_ACCESSIBILITY_MAX_CANDIDATE_EVENTS_PER_STOP", "120"));
     private static final int MIN_ZOOM = Integer.parseInt(System.getenv().getOrDefault("BUS_ACCESSIBILITY_TILE_MIN_ZOOM", "10"));
     private static final int MAX_ZOOM = Integer.parseInt(System.getenv().getOrDefault("BUS_ACCESSIBILITY_TILE_MAX_ZOOM", "17"));
+    private static final int OVERLAY_MAX_ZOOM = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM",
+            String.valueOf(Math.min(MAX_ZOOM, 12))
+    ));
+    private static final boolean INDEXED_PNG = Boolean.parseBoolean(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_INDEXED_PNG",
+            "true"
+    ));
+    private static final boolean PARALLEL_SEGMENT_BUILD = Boolean.parseBoolean(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_PARALLEL_SEGMENT_BUILD",
+            "false"
+    ));
+    private static final float PNG_COMPRESSION_QUALITY = Float.parseFloat(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_PNG_COMPRESSION_QUALITY",
+            "0.0"
+    ));
     private static final double COLOR_MIN_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MIN_MINUTES", "0"));
     private static final double COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_MINUTES", "0"));
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
@@ -101,6 +126,10 @@ public class BusAccessibilityMapCacheJob {
                 "BUS_ACCESSIBILITY_TILE_BASE_ROOT",
                 tileRoot.getParent() == null ? tileRoot.toString() : tileRoot.getParent().toString()
         ));
+        String tileUrlPrefix = normalizeTileUrlPrefix(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_TILE_URL_PREFIX",
+                "accessibility"
+        ));
         Path contourStatsDir = Path.of(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_CONTOUR_STATS_DIR",
                 outputFile.getParent().resolve("accessibility-contour-stats").toString()
@@ -120,6 +149,17 @@ public class BusAccessibilityMapCacheJob {
                 "BUS_ACCESSIBILITY_SPARK_LOCAL_DIR",
                 "/home/eljah/data/buscrawl/accessibility-map-spark-temp"
         ));
+        Path walkCacheFile = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_WALK_CACHE_FILE",
+                outputFile.getParent().resolve("accessibility-walk-cache.bin.gz").toString()
+        ));
+        if (Boolean.parseBoolean(System.getenv().getOrDefault("BUS_ACCESSIBILITY_BUILD_WALK_CACHE", "false"))) {
+            Map<String, StopPoint> stopsById = loadStopsById();
+            List<RoadWay> roads = loadRoadWays(osmRoadsFile);
+            RoadGraph roadGraph = RoadGraph.build(roads);
+            buildAndWriteWalkCache(walkCacheFile, roadGraph, roads, stopsById);
+            return;
+        }
 
         Files.createDirectories(outputFile.getParent());
         Files.createDirectories(sparkLocalDir);
@@ -138,6 +178,7 @@ public class BusAccessibilityMapCacheJob {
             Map<String, StopPoint> stopsById = loadStopsById();
             List<RoadWay> roads = loadRoadWays(osmRoadsFile);
             RoadGraph roadGraph = RoadGraph.build(roads);
+            WalkCache walkCache = Files.exists(walkCacheFile) ? readWalkCache(walkCacheFile) : null;
             boolean useTransferPotential = "transfer-potential".equalsIgnoreCase(sourceMode);
             List<StopPoint> transferOriginStops = useTransferPotential
                     ? selectOriginStops(stopsById, originStopQuery)
@@ -185,7 +226,9 @@ public class BusAccessibilityMapCacheJob {
                         );
                         continue;
                     }
-                    List<AccessibleSegment> segments = buildAccessibilitySegments(roadGraph, roads, reachability.stopTimes);
+                    List<AccessibleSegment> segments = walkCache == null
+                            ? buildAccessibilitySegments(roadGraph, roads, reachability.stopTimes)
+                            : buildAccessibilitySegments(walkCache, reachability.stopTimes);
                     String snapshotId = snapshotId(snapshotDate, snapshotTime);
                     debugTopTotalSegments(snapshotDate, snapshotTime, segments);
                     Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
@@ -229,7 +272,8 @@ public class BusAccessibilityMapCacheJob {
                             totalColorScale,
                             totalLogColorScale,
                             walkColorScale,
-                            stopTransportColorScale
+                            stopTransportColorScale,
+                            tileUrlPrefix
                     ));
                     writeContourStats(spark, contourStatsDir, snapshots);
                     writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
@@ -414,6 +458,20 @@ public class BusAccessibilityMapCacheJob {
 
     private static String snapshotId(LocalDate serviceDate, LocalTime departureTime) {
         return serviceDate + "-" + String.format(Locale.ROOT, "%02d%02d", departureTime.getHour(), departureTime.getMinute());
+    }
+
+    private static String normalizeTileUrlPrefix(String prefix) {
+        String normalized = prefix == null ? "" : prefix.trim().replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.isBlank() || normalized.contains("..")) {
+            throw new IllegalArgumentException("Invalid BUS_ACCESSIBILITY_TILE_URL_PREFIX: " + prefix);
+        }
+        return normalized;
     }
 
     private static Map<String, StateNode> findBestJourneys(
@@ -804,6 +862,265 @@ public class BusAccessibilityMapCacheJob {
         return segments;
     }
 
+    private static void buildAndWriteWalkCache(
+            Path cacheFile,
+            RoadGraph graph,
+            List<RoadWay> roads,
+            Map<String, StopPoint> stopsById
+    ) throws Exception {
+        long started = System.currentTimeMillis();
+        Files.createDirectories(cacheFile.getParent());
+        List<CachedSegmentBuilder> builders = buildCachedSegmentBuilders(graph, roads);
+        Map<Integer, List<TemplateEndpoint>> endpointsByNode = new HashMap<>();
+        for (int i = 0; i < builders.size(); i++) {
+            CachedSegmentBuilder builder = builders.get(i);
+            endpointsByNode.computeIfAbsent(builder.aNodeId, ignored -> new ArrayList<>())
+                    .add(new TemplateEndpoint(i, builder.extraFromA));
+            endpointsByNode.computeIfAbsent(builder.bNodeId, ignored -> new ArrayList<>())
+                    .add(new TemplateEndpoint(i, builder.extraFromB));
+        }
+        List<StopPoint> stops = new ArrayList<>(stopsById.values());
+        stops.sort(Comparator.comparing(stop -> stop.stopId));
+        int index = 0;
+        long candidateUpdates = 0L;
+        for (StopPoint stop : stops) {
+            Map<Integer, Double> walkByNode = calculateWalkMetersByNode(graph, stop, EFFECTIVE_WALK_RADIUS_METERS);
+            for (Map.Entry<Integer, Double> entry : walkByNode.entrySet()) {
+                List<TemplateEndpoint> endpoints = endpointsByNode.get(entry.getKey());
+                if (endpoints == null) {
+                    continue;
+                }
+                double nodeWalkMeters = entry.getValue();
+                for (TemplateEndpoint endpoint : endpoints) {
+                    double walkMeters = nodeWalkMeters + endpoint.extraMeters;
+                    if (walkMeters <= EFFECTIVE_WALK_RADIUS_METERS) {
+                        builders.get(endpoint.templateIndex).addCandidate(stop.stopId, walkMeters);
+                        candidateUpdates++;
+                    }
+                }
+            }
+            index++;
+            if (index % 100 == 0) {
+                System.out.printf(
+                        Locale.ROOT,
+                        "BusAccessibilityMapCacheJob: walk-cache progress stops=%d/%d candidateUpdates=%d elapsedSec=%.1f%n",
+                        index,
+                        stops.size(),
+                        candidateUpdates,
+                        (System.currentTimeMillis() - started) / 1000.0
+                );
+            }
+        }
+        List<CachedSegmentTemplate> templates = builders.stream()
+                .map(CachedSegmentBuilder::build)
+                .filter(template -> !template.candidates.isEmpty())
+                .collect(Collectors.toList());
+        writeWalkCache(cacheFile, templates);
+        System.out.printf(
+                Locale.ROOT,
+                "BusAccessibilityMapCacheJob: wrote walk cache %s segments=%d/%d candidateUpdates=%d elapsedSec=%.1f%n",
+                cacheFile,
+                templates.size(),
+                builders.size(),
+                candidateUpdates,
+                (System.currentTimeMillis() - started) / 1000.0
+        );
+    }
+
+    private static List<CachedSegmentBuilder> buildCachedSegmentBuilders(RoadGraph graph, List<RoadWay> roads) {
+        List<CachedSegmentBuilder> builders = new ArrayList<>();
+        for (RoadWay road : roads) {
+            for (int i = 1; i < road.points.size(); i++) {
+                Point a = road.points.get(i - 1);
+                Point b = road.points.get(i);
+                int aNode = graph.nodeIdsByPointKey.getOrDefault(pointKey(a), -1);
+                int bNode = graph.nodeIdsByPointKey.getOrDefault(pointKey(b), -1);
+                if (aNode < 0 || bNode < 0) {
+                    continue;
+                }
+                double distance = haversineMeters(a.lat, a.lon, b.lat, b.lon);
+                int pieces = Math.max(1, (int) Math.ceil(distance / SAMPLE_METERS));
+                for (int piece = 0; piece < pieces; piece++) {
+                    double t0 = piece / (double) pieces;
+                    double t1 = (piece + 1) / (double) pieces;
+                    Point p0 = interpolate(a, b, t0);
+                    Point p1 = interpolate(a, b, t1);
+                    Point mid = interpolate(a, b, (t0 + t1) / 2.0);
+                    builders.add(new CachedSegmentBuilder(
+                            p0,
+                            p1,
+                            aNode,
+                            bNode,
+                            haversineMeters(a.lat, a.lon, mid.lat, mid.lon),
+                            Math.min(haversineMeters(b.lat, b.lon, mid.lat, mid.lon), distance),
+                            haversineMeters(p0.lat, p0.lon, p1.lat, p1.lon)
+                    ));
+                }
+            }
+        }
+        return builders;
+    }
+
+    private static Map<Integer, Double> calculateWalkMetersByNode(RoadGraph graph, StopPoint stop, double maxWalkMeters) {
+        PriorityQueue<WalkState> queue = new PriorityQueue<>(Comparator.comparingDouble(state -> state.walkMeters));
+        Map<Integer, Double> bestByNode = new HashMap<>();
+        List<NodeDistance> connectors = graph.closestNodes(stop.lat, stop.lon, STOP_CONNECT_RADIUS_METERS, STOP_CONNECT_FALLBACK_NODES);
+        for (NodeDistance connector : connectors) {
+            if (connector.distanceMeters > maxWalkMeters) {
+                continue;
+            }
+            Double previous = bestByNode.get(connector.nodeId);
+            if (previous == null || connector.distanceMeters < previous) {
+                bestByNode.put(connector.nodeId, connector.distanceMeters);
+                queue.add(new WalkState(connector.nodeId, connector.distanceMeters));
+            }
+        }
+        while (!queue.isEmpty()) {
+            WalkState current = queue.poll();
+            Double known = bestByNode.get(current.nodeId);
+            if (known == null || current.walkMeters > known + 0.001) {
+                continue;
+            }
+            for (RoadEdge edge : graph.edgesByNode.getOrDefault(current.nodeId, List.of())) {
+                double nextWalkMeters = current.walkMeters + edge.distanceMeters;
+                if (nextWalkMeters > maxWalkMeters) {
+                    continue;
+                }
+                Double previous = bestByNode.get(edge.toNodeId);
+                if (previous == null || nextWalkMeters < previous) {
+                    bestByNode.put(edge.toNodeId, nextWalkMeters);
+                    queue.add(new WalkState(edge.toNodeId, nextWalkMeters));
+                }
+            }
+        }
+        return bestByNode;
+    }
+
+    private static List<AccessibleSegment> buildAccessibilitySegments(WalkCache cache, List<StopTime> stops) {
+        Map<String, StopTime> transportByStopId = stops.stream()
+                .collect(Collectors.toMap(
+                        stop -> stop.stopId,
+                        stop -> stop,
+                        (left, right) -> left.transportSeconds <= right.transportSeconds ? left : right,
+                        HashMap::new
+                ));
+        if (PARALLEL_SEGMENT_BUILD) {
+            return cache.segments.parallelStream()
+                    .map(template -> buildAccessibleSegment(template, transportByStopId))
+                    .filter(segment -> segment != null)
+                    .collect(Collectors.toList());
+        }
+        List<AccessibleSegment> segments = new ArrayList<>(cache.segments.size());
+        for (CachedSegmentTemplate template : cache.segments) {
+            AccessibleSegment segment = buildAccessibleSegment(template, transportByStopId);
+            if (segment != null) {
+                segments.add(segment);
+            }
+        }
+        return segments;
+    }
+
+    private static AccessibleSegment buildAccessibleSegment(
+            CachedSegmentTemplate template,
+            Map<String, StopTime> transportByStopId
+    ) {
+        BestAccess best = null;
+        BestAccess nearest = null;
+        for (WalkCandidate candidate : template.candidates) {
+            StopTime stop = transportByStopId.get(candidate.stopId);
+            if (stop == null) {
+                continue;
+            }
+            double walkSeconds = candidate.walkMeters / WALK_SPEED_MPS;
+            double totalSeconds = stop.transportSeconds + walkSeconds;
+            if (best == null || totalSeconds < best.totalSeconds) {
+                best = new BestAccess(stop, candidate.walkMeters, walkSeconds, totalSeconds);
+            }
+            if (nearest == null || candidate.walkMeters < nearest.walkDistanceMeters) {
+                nearest = new BestAccess(stop, candidate.walkMeters, walkSeconds, totalSeconds);
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        if (nearest == null) {
+            nearest = best;
+        }
+        return new AccessibleSegment(
+                template.from,
+                template.to,
+                best.totalSeconds / 60.0,
+                best.walkSeconds / 60.0,
+                best.walkDistanceMeters,
+                best.stop.transportSeconds / 60.0,
+                nearest.stop.transportSeconds / 60.0,
+                nearest.walkDistanceMeters,
+                template.lengthMeters,
+                best.stop.stopId,
+                best.stop.stopName
+        );
+    }
+
+    private static void writeWalkCache(Path cacheFile, List<CachedSegmentTemplate> templates) throws Exception {
+        Path tempFile = Files.createTempFile(cacheFile.getParent(), cacheFile.getFileName().toString(), ".tmp");
+        try (DataOutputStream output = new DataOutputStream(new BufferedOutputStream(new GZIPOutputStream(Files.newOutputStream(tempFile))))) {
+            output.writeInt(WALK_CACHE_MAGIC);
+            output.writeInt(WALK_CACHE_VERSION);
+            output.writeDouble(WALK_SPEED_MPS);
+            output.writeDouble(EFFECTIVE_WALK_RADIUS_METERS);
+            output.writeDouble(SAMPLE_METERS);
+            output.writeInt(templates.size());
+            for (CachedSegmentTemplate template : templates) {
+                output.writeDouble(template.from.lat);
+                output.writeDouble(template.from.lon);
+                output.writeDouble(template.to.lat);
+                output.writeDouble(template.to.lon);
+                output.writeDouble(template.lengthMeters);
+                output.writeInt(template.candidates.size());
+                for (WalkCandidate candidate : template.candidates) {
+                    output.writeUTF(candidate.stopId);
+                    output.writeFloat((float) candidate.walkMeters);
+                }
+            }
+        }
+        Files.move(tempFile, cacheFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private static WalkCache readWalkCache(Path cacheFile) throws Exception {
+        long started = System.currentTimeMillis();
+        List<CachedSegmentTemplate> templates = new ArrayList<>();
+        try (DataInputStream input = new DataInputStream(new BufferedInputStream(new GZIPInputStream(Files.newInputStream(cacheFile))))) {
+            int magic = input.readInt();
+            int version = input.readInt();
+            if (magic != WALK_CACHE_MAGIC || version != WALK_CACHE_VERSION) {
+                throw new IllegalStateException("Unsupported accessibility walk cache: " + cacheFile);
+            }
+            input.readDouble(); // walk speed used for build; current runtime speed remains authoritative.
+            input.readDouble();
+            input.readDouble();
+            int segmentCount = input.readInt();
+            for (int i = 0; i < segmentCount; i++) {
+                Point from = new Point(input.readDouble(), input.readDouble());
+                Point to = new Point(input.readDouble(), input.readDouble());
+                double lengthMeters = input.readDouble();
+                int candidateCount = input.readInt();
+                List<WalkCandidate> candidates = new ArrayList<>(candidateCount);
+                for (int j = 0; j < candidateCount; j++) {
+                    candidates.add(new WalkCandidate(input.readUTF(), input.readFloat()));
+                }
+                templates.add(new CachedSegmentTemplate(from, to, lengthMeters, candidates));
+            }
+        }
+        System.out.printf(
+                Locale.ROOT,
+                "BusAccessibilityMapCacheJob: loaded walk cache %s segments=%d elapsedSec=%.1f%n",
+                cacheFile,
+                templates.size(),
+                (System.currentTimeMillis() - started) / 1000.0
+        );
+        return new WalkCache(templates);
+    }
+
     private static Map<String, AccessLabel> calculateRoadGraphAccess(RoadGraph graph, List<StopTime> stops, double maxWalkMeters) {
         PriorityQueue<AccessState> queue = new PriorityQueue<>(Comparator.comparingDouble(state -> state.totalSeconds));
         Map<String, AccessLabel> bestByNode = new HashMap<>();
@@ -1105,7 +1422,7 @@ public class BusAccessibilityMapCacheJob {
         Path tempRoot = tileRoot.resolveSibling(tileRoot.getFileName() + ".tmp-" + System.currentTimeMillis());
         Files.createDirectories(tempRoot);
         try {
-            for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
+            for (int zoom = MIN_ZOOM; zoom <= OVERLAY_MAX_ZOOM; zoom++) {
                 Map<String, List<AccessibleSegment>> segmentsByTile = tileIndexes.getOrDefault(zoom, Map.of());
                 segmentsByTile.entrySet().parallelStream().forEach(entry -> writeTileUnchecked(
                         tempRoot.resolve(entry.getKey() + ".png"),
@@ -1164,7 +1481,7 @@ public class BusAccessibilityMapCacheJob {
             double maxTotalMinutes
     ) {
         Map<Integer, Map<String, List<AccessibleSegment>>> indexes = new HashMap<>();
-        for (int zoom = MIN_ZOOM; zoom <= MAX_ZOOM; zoom++) {
+        for (int zoom = MIN_ZOOM; zoom <= OVERLAY_MAX_ZOOM; zoom++) {
             Map<String, List<AccessibleSegment>> segmentsByTile = new HashMap<>();
             for (AccessibleSegment segment : segments) {
                 if (segment.totalMinutes <= maxTotalMinutes) {
@@ -1195,7 +1512,7 @@ public class BusAccessibilityMapCacheJob {
         ImageWriteParam param = writer.getDefaultWriteParam();
         if (param.canWriteCompressed()) {
             param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(1.0f);
+            param.setCompressionQuality(Math.max(0.0f, Math.min(1.0f, PNG_COMPRESSION_QUALITY)));
         }
         try (ImageOutputStream output = ImageIO.createImageOutputStream(tilePath.toFile())) {
             writer.setOutput(output);
@@ -1230,7 +1547,7 @@ public class BusAccessibilityMapCacheJob {
         int tileY = Integer.parseInt(parts[2]);
         int offsetX = tileX * TILE_SIZE;
         int offsetY = tileY * TILE_SIZE;
-        BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+        BufferedImage image = createOverlayImage();
         int width = strokeWidth(zoom);
         for (AccessibleSegment segment : segments) {
             int ax = (int) Math.round(lonToPixelX(segment.from.lon, zoom) - offsetX);
@@ -1240,6 +1557,26 @@ public class BusAccessibilityMapCacheJob {
             drawRasterLine(image, ax, ay, bx, by, width, accessibilityColor(colorScale.metric.value(segment), colorScale).getRGB());
         }
         return image;
+    }
+
+    private static BufferedImage createOverlayImage() {
+        if (!INDEXED_PNG) {
+            return new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+        }
+        byte[] red = new byte[256];
+        byte[] green = new byte[256];
+        byte[] blue = new byte[256];
+        byte[] alpha = new byte[256];
+        alpha[0] = 0;
+        for (int i = 1; i < 256; i++) {
+            Color color = rampColor((i - 1) / 254.0);
+            red[i] = (byte) color.getRed();
+            green[i] = (byte) color.getGreen();
+            blue[i] = (byte) color.getBlue();
+            alpha[i] = (byte) 210;
+        }
+        IndexColorModel colorModel = new IndexColorModel(8, 256, red, green, blue, alpha);
+        return new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_BYTE_INDEXED, colorModel);
     }
 
     private static void drawRasterLine(BufferedImage image, int x0, int y0, int x1, int y1, int width, int rgb) {
@@ -1385,6 +1722,11 @@ public class BusAccessibilityMapCacheJob {
             n = (minutes - colorScale.minMinutes) / range;
         }
         n = Math.max(0, Math.min(1, n));
+        Color color = rampColor(n);
+        return new Color(color.getRed(), color.getGreen(), color.getBlue(), 210);
+    }
+
+    private static Color rampColor(double n) {
         int[] a;
         int[] b;
         double t;
@@ -1404,8 +1746,7 @@ public class BusAccessibilityMapCacheJob {
         return new Color(
                 (int) Math.round(a[0] + (b[0] - a[0]) * t),
                 (int) Math.round(a[1] + (b[1] - a[1]) * t),
-                (int) Math.round(a[2] + (b[2] - a[2]) * t),
-                210
+                (int) Math.round(a[2] + (b[2] - a[2]) * t)
         );
     }
 
@@ -1705,6 +2046,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("originStopName", reachability.originStops.stream().map(stop -> stop.stopName).distinct().collect(Collectors.joining(", ")));
         payload.put("originLatitude", reachability.originStops.stream().mapToDouble(stop -> stop.lat).average().orElse(55.79));
         payload.put("originLongitude", reachability.originStops.stream().mapToDouble(stop -> stop.lon).average().orElse(49.12));
+        payload.put("tileUrlPrefix", first.tileUrlPrefix);
         payload.put("walkSpeedMps", WALK_SPEED_MPS);
         payload.put("walkRadiusMeters", WALK_RADIUS_METERS);
         payload.put("effectiveWalkRadiusMeters", EFFECTIVE_WALK_RADIUS_METERS);
@@ -1717,6 +2059,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("segmentCount", first.segmentCount);
         payload.put("tileMinZoom", MIN_ZOOM);
         payload.put("tileMaxZoom", MAX_ZOOM);
+        payload.put("overlayTileMaxZoom", OVERLAY_MAX_ZOOM);
         payload.put("tileOverlayTemplate", first.tileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", first.totalLogColorScale == null ? null : first.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", first.walkColorScale == null ? null : first.walkTileOverlayTemplate());
@@ -1749,6 +2092,7 @@ public class BusAccessibilityMapCacheJob {
         payload.put("departureTime", snapshot.departureTime.toString());
         payload.put("reachableStops", snapshot.reachability.stopTimes.size());
         payload.put("segmentCount", snapshot.segmentCount);
+        payload.put("overlayTileMaxZoom", OVERLAY_MAX_ZOOM);
         payload.put("tileOverlayTemplate", snapshot.tileOverlayTemplate());
         payload.put("availableModes", snapshot.availableModes());
         payload.put("totalLogTileOverlayTemplate", snapshot.totalLogColorScale == null ? null : snapshot.totalLogTileOverlayTemplate());
@@ -2253,6 +2597,99 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
+    private static final class WalkState {
+        private final int nodeId;
+        private final double walkMeters;
+
+        private WalkState(int nodeId, double walkMeters) {
+            this.nodeId = nodeId;
+            this.walkMeters = walkMeters;
+        }
+    }
+
+    private static final class TemplateEndpoint {
+        private final int templateIndex;
+        private final double extraMeters;
+
+        private TemplateEndpoint(int templateIndex, double extraMeters) {
+            this.templateIndex = templateIndex;
+            this.extraMeters = extraMeters;
+        }
+    }
+
+    private static final class WalkCache {
+        private final List<CachedSegmentTemplate> segments;
+
+        private WalkCache(List<CachedSegmentTemplate> segments) {
+            this.segments = segments;
+        }
+    }
+
+    private static final class CachedSegmentTemplate {
+        private final Point from;
+        private final Point to;
+        private final double lengthMeters;
+        private final List<WalkCandidate> candidates;
+
+        private CachedSegmentTemplate(Point from, Point to, double lengthMeters, List<WalkCandidate> candidates) {
+            this.from = from;
+            this.to = to;
+            this.lengthMeters = lengthMeters;
+            this.candidates = candidates;
+        }
+    }
+
+    private static final class WalkCandidate {
+        private final String stopId;
+        private final double walkMeters;
+
+        private WalkCandidate(String stopId, double walkMeters) {
+            this.stopId = stopId;
+            this.walkMeters = walkMeters;
+        }
+    }
+
+    private static final class CachedSegmentBuilder {
+        private final Point from;
+        private final Point to;
+        private final int aNodeId;
+        private final int bNodeId;
+        private final double extraFromA;
+        private final double extraFromB;
+        private final double lengthMeters;
+        private final Map<String, Double> bestWalkMetersByStopId = new HashMap<>();
+
+        private CachedSegmentBuilder(
+                Point from,
+                Point to,
+                int aNodeId,
+                int bNodeId,
+                double extraFromA,
+                double extraFromB,
+                double lengthMeters
+        ) {
+            this.from = from;
+            this.to = to;
+            this.aNodeId = aNodeId;
+            this.bNodeId = bNodeId;
+            this.extraFromA = extraFromA;
+            this.extraFromB = extraFromB;
+            this.lengthMeters = lengthMeters;
+        }
+
+        private void addCandidate(String stopId, double walkMeters) {
+            bestWalkMetersByStopId.merge(stopId, walkMeters, Math::min);
+        }
+
+        private CachedSegmentTemplate build() {
+            List<WalkCandidate> candidates = bestWalkMetersByStopId.entrySet().stream()
+                    .map(entry -> new WalkCandidate(entry.getKey(), entry.getValue()))
+                    .sorted(Comparator.comparingDouble(candidate -> candidate.walkMeters))
+                    .collect(Collectors.toList());
+            return new CachedSegmentTemplate(from, to, lengthMeters, candidates);
+        }
+    }
+
     private static final class ColorScale {
         private final ColorMetric metric;
         private final double minMinutes;
@@ -2318,6 +2755,7 @@ public class BusAccessibilityMapCacheJob {
         private final ColorScale totalLogColorScale;
         private final ColorScale walkColorScale;
         private final ColorScale stopTransportColorScale;
+        private final String tileUrlPrefix;
 
         private SnapshotPayload(
                 String id,
@@ -2330,7 +2768,8 @@ public class BusAccessibilityMapCacheJob {
                 ColorScale totalColorScale,
                 ColorScale totalLogColorScale,
                 ColorScale walkColorScale,
-                ColorScale stopTransportColorScale
+                ColorScale stopTransportColorScale,
+                String tileUrlPrefix
         ) {
             this.id = id;
             this.serviceDate = serviceDate;
@@ -2343,22 +2782,23 @@ public class BusAccessibilityMapCacheJob {
             this.totalLogColorScale = totalLogColorScale;
             this.walkColorScale = walkColorScale;
             this.stopTransportColorScale = stopTransportColorScale;
+            this.tileUrlPrefix = tileUrlPrefix;
         }
 
         private String tileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/total/{z}/{x}/{y}.png";
+            return "./tiles/" + tileUrlPrefix + "/" + id + "/total/{z}/{x}/{y}.png";
         }
 
         private String totalLogTileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/total-log/{z}/{x}/{y}.png";
+            return "./tiles/" + tileUrlPrefix + "/" + id + "/total-log/{z}/{x}/{y}.png";
         }
 
         private String walkTileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/walk/{z}/{x}/{y}.png";
+            return "./tiles/" + tileUrlPrefix + "/" + id + "/walk/{z}/{x}/{y}.png";
         }
 
         private String stopTransportTileOverlayTemplate() {
-            return "./tiles/accessibility/" + id + "/stop-transport/{z}/{x}/{y}.png";
+            return "./tiles/" + tileUrlPrefix + "/" + id + "/stop-transport/{z}/{x}/{y}.png";
         }
 
         private List<String> availableModes() {

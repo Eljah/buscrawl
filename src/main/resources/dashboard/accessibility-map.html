@@ -56,7 +56,7 @@
     .area-legend span::before { content:""; display:inline-block; width:22px; height:3px; margin-right:6px; vertical-align:middle; border-radius:999px; background:var(--line); }
     .area-empty { display:grid; place-items:center; min-height:360px; color:var(--muted); text-align:center; padding:20px; }
     .time-probe { position:absolute; right:14px; top:108px; z-index:5; padding:8px 10px; border-radius:12px; background:rgba(255,255,255,.92); color:var(--ink); font-size:13px; box-shadow:0 10px 24px rgba(25,35,29,.12); pointer-events:none; }
-    .empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:22px; color:#fff; background:rgba(30,36,32,.25); z-index:6; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:22px; color:#fff; background:rgba(30,36,32,.25); z-index:4; pointer-events:none; }
   </style>
 </head>
 <body>
@@ -91,6 +91,7 @@
       <label><input type="radio" name="accessMode" value="stopTransport"> transport to nearest stop cluster</label>
     </div>
     <div class="selector-row">
+      <label id="originSelectLabel" style="display:none">Origin <select id="originSelect"></select></label>
       <label>Date <select id="dateSelect"></select></label>
       <label>Departure <select id="timeSelect"></select></label>
       <span class="snapshot-status" id="snapshotStatus"></span>
@@ -128,7 +129,7 @@ const contourSvg=document.getElementById('contourSvg');
 const emptyEl=document.getElementById('emptyState');
 const originLayer=document.getElementById('originLayer');
 const timeProbe=document.getElementById('timeProbe');
-const state={payload:null,config:null,currentSnapshot:null,centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
+const state={payload:null,config:null,originIndex:null,originSlug:'',currentSnapshot:null,centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
 const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const fullModeList=['total','totalLog','walk','stopTransport'];
 
@@ -148,6 +149,10 @@ function overlayTileUrl(z,x,y){
   if(state.overlayMode==='walk'&&snapshot.walkTileOverlayTemplate)template=snapshot.walkTileOverlayTemplate;
   if(state.overlayMode==='stopTransport'&&snapshot.stopTransportTileOverlayTemplate)template=snapshot.stopTransportTileOverlayTemplate;
   return applyTemplate(template,z,x,y)+suffix;
+}
+function overlaySourceZoom(){
+  const maxOverlay=Number(currentSnapshot().overlayTileMaxZoom||state.payload?.overlayTileMaxZoom||state.payload?.tileMaxZoom||state.zoom);
+  return Math.min(state.zoom,maxOverlay);
 }
 function currentSnapshot(){
   return state.currentSnapshot||state.payload||{};
@@ -311,6 +316,19 @@ function renderTileLayer(target,templateFn){
   for(let x=sx;x<=ex;x++)for(let y=sy;y<=ey;y++)html+=`<img src="${templateFn(z,x,y)}" style="left:${x*256-o.left}px;top:${y*256-o.top}px" loading="lazy" alt="">`;
   target.innerHTML=html;
 }
+function renderOverlayLayer(){
+  const displayZoom=state.zoom,sourceZoom=overlaySourceZoom(),scale=Math.pow(2,displayZoom-sourceZoom);
+  const o=origin();
+  const sourceLeft=o.left/scale,sourceTop=o.top/scale;
+  const sx=Math.floor(sourceLeft/256),ex=Math.floor((sourceLeft+mapEl.clientWidth/scale)/256);
+  const sy=Math.floor(sourceTop/256),ey=Math.floor((sourceTop+mapEl.clientHeight/scale)/256);
+  let html='';
+  const size=256*scale;
+  for(let x=sx;x<=ex;x++)for(let y=sy;y<=ey;y++){
+    html+=`<img src="${overlayTileUrl(sourceZoom,x,y)}" data-source-zoom="${sourceZoom}" style="left:${x*size-o.left}px;top:${y*size-o.top}px;width:${size}px;height:${size}px" loading="lazy" alt="">`;
+  }
+  overlayEl.innerHTML=html;
+}
 function renderOrigin(){
   const p=state.payload,o=origin();
   const origins=Array.isArray(p.originStops)?p.originStops:[];
@@ -345,22 +363,50 @@ function renderContours(){
 function renderAll(){
   if(!state.config||!state.payload)return;
   renderTileLayer(tilesEl,baseTileUrl);
-  renderTileLayer(overlayEl,overlayTileUrl);
+  renderOverlayLayer();
   renderContours();
   renderOrigin();
 }
 async function boot(){
-  const [config,payload]=await Promise.all([fetch('./api/map-config').then(r=>r.json()),fetch('./api/accessibility-map').then(r=>r.json())]);
-  state.config=config;state.payload=payload;
+  const [config,index]=await Promise.all([
+    fetch('./api/map-config').then(r=>r.json()),
+    fetch('./api/accessibility-map-index').then(r=>r.json()).catch(()=>({origins:[]}))
+  ]);
+  state.config=config;state.originIndex=index;
+  initOriginSelector(index);
+  await loadAccessibilityPayload(state.originSlug);
+}
+async function loadAccessibilityPayload(originSlug){
+  emptyEl.style.display='grid';
+  emptyEl.textContent='Loading...';
+  const url=originSlug?`./api/accessibility-map?origin=${encodeURIComponent(originSlug)}`:'./api/accessibility-map';
+  const response=await fetch(url);
+  const payload=await response.json();
+  state.payload=payload;
   if(payload.status==='empty'){emptyEl.textContent=payload.message||'No data';return;}
   initSnapshotSelectors(payload);
   state.centerLat=Number(payload.originLatitude||55.79);
   state.centerLon=Number(payload.originLongitude||49.12);
-  state.zoom=Math.min(Number(payload.tileMaxZoom||17),Math.max(Number(payload.tileMinZoom||10),Number(config.initialZoom||12)));
+  state.zoom=Math.min(Number(payload.tileMaxZoom||17),Math.max(Number(payload.tileMinZoom||10),Number(state.config.initialZoom||12)));
   updateSnapshotMeta();
   updateRangeMeta();
   emptyEl.style.display='none';
   renderAll();
+}
+function initOriginSelector(index){
+  const origins=Array.isArray(index?.origins)?index.origins:[];
+  const label=document.getElementById('originSelectLabel');
+  const select=document.getElementById('originSelect');
+  if(!origins.length){label.style.display='none';state.originSlug='';return;}
+  label.style.display='inline-flex';
+  select.innerHTML=origins.map(origin=>`<option value="${origin.slug||''}">${origin.label||origin.slug||'origin'}</option>`).join('');
+  const defaultOrigin=origins.find(origin=>origin.default)||origins[0];
+  state.originSlug=defaultOrigin?.slug||'';
+  select.value=state.originSlug;
+  select.onchange=async()=>{
+    state.originSlug=select.value;
+    await loadAccessibilityPayload(state.originSlug);
+  };
 }
 function initSnapshotSelectors(payload){
   const readySnapshots=Array.isArray(payload.snapshots)&&payload.snapshots.length?payload.snapshots:[payload];
@@ -415,14 +461,15 @@ function generateDefaultTimes(){
 }
 function pendingSnapshot(payload,serviceDate,departureTime){
   const id=`${serviceDate}-${departureTime.replace(':','')}`;
+  const tileUrlPrefix=payload.tileUrlPrefix||'accessibility';
   return {
     id,serviceDate,departureTime,pending:true,
     reachableStops:0,segmentCount:0,
     availableModes:payload.availableModes||fullModeList,
-    tileOverlayTemplate:`./tiles/accessibility/${id}/total/{z}/{x}/{y}.png`,
-    totalLogTileOverlayTemplate:`./tiles/accessibility/${id}/total-log/{z}/{x}/{y}.png`,
-    walkTileOverlayTemplate:`./tiles/accessibility/${id}/walk/{z}/{x}/{y}.png`,
-    stopTransportTileOverlayTemplate:`./tiles/accessibility/${id}/stop-transport/{z}/{x}/{y}.png`,
+    tileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/total/{z}/{x}/{y}.png`,
+    totalLogTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/total-log/{z}/{x}/{y}.png`,
+    walkTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/walk/{z}/{x}/{y}.png`,
+    stopTransportTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/stop-transport/{z}/{x}/{y}.png`,
     contourPolygons:[],
     totalColorMinMinutes:payload.totalColorMinMinutes,
     totalColorMaxMinutes:payload.totalColorMaxMinutes,
@@ -439,7 +486,8 @@ function sampleOverlayMinutes(e){
   const x=e.clientX-rect.left,y=e.clientY-rect.top;
   const img=[...overlayEl.querySelectorAll('img')].find(node=>{
     const l=parseFloat(node.style.left),t=parseFloat(node.style.top);
-    return x>=l&&x<l+256&&y>=t&&y<t+256&&node.complete&&node.naturalWidth>0;
+    const w=parseFloat(node.style.width)||256,h=parseFloat(node.style.height)||256;
+    return x>=l&&x<l+w&&y>=t&&y<t+h&&node.complete&&node.naturalWidth>0;
   });
   if(!img){timeProbe.textContent='no heatmap pixel';return;}
   try{
@@ -447,7 +495,11 @@ function sampleOverlayMinutes(e){
     canvas.width=256;canvas.height=256;
     const ctx=canvas.getContext('2d',{willReadFrequently:true});
     ctx.clearRect(0,0,256,256);ctx.drawImage(img,0,0,256,256);
-    const px=ctx.getImageData(Math.floor(x-parseFloat(img.style.left)),Math.floor(y-parseFloat(img.style.top)),1,1).data;
+    const renderedWidth=parseFloat(img.style.width)||256;
+    const renderedHeight=parseFloat(img.style.height)||256;
+    const sampleX=Math.floor((x-parseFloat(img.style.left))*256/renderedWidth);
+    const sampleY=Math.floor((y-parseFloat(img.style.top))*256/renderedHeight);
+    const px=ctx.getImageData(sampleX,sampleY,1,1).data;
     if(px[3]<10){timeProbe.textContent='no heatmap pixel';return;}
     const minutes=minutesFromColor(px[0],px[1],px[2],currentColorScale());
     timeProbe.textContent=Number.isFinite(minutes)?`${minutes.toFixed(minutes>=10?0:1)} min at cursor`:'unknown heatmap color';
@@ -482,6 +534,10 @@ mapEl.addEventListener('mousedown',e=>{state.dragging=true;mapEl.classList.add('
 window.addEventListener('mousemove',e=>{if(!state.dragging)return;const cx=state.startCenterX-(e.clientX-state.startX),cy=state.startCenterY-(e.clientY-state.startY);state.centerLon=worldToLon(cx,state.zoom);state.centerLat=worldToLat(cy,state.zoom);renderAll();});
 window.addEventListener('mouseup',()=>{state.dragging=false;mapEl.classList.remove('dragging');});
 mapEl.addEventListener('mousemove',sampleOverlayMinutes);
+document.querySelectorAll('.map-zoom button').forEach(button=>{
+  button.addEventListener('mousedown',event=>event.stopPropagation());
+  button.addEventListener('click',event=>event.stopPropagation());
+});
 document.getElementById('zoomIn').onclick=()=>{state.zoom=Math.min(Number(state.payload?.tileMaxZoom||17),state.zoom+1);renderAll();};
 document.getElementById('zoomOut').onclick=()=>{state.zoom=Math.max(Number(state.payload?.tileMinZoom||10),state.zoom-1);renderAll();};
 document.getElementById('modeRow').addEventListener('change',e=>{if(e.target?.name!=='accessMode')return;state.overlayMode=e.target.value;updateRangeMeta();renderAll();});

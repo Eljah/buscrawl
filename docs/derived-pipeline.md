@@ -128,6 +128,34 @@ After this cutover, incremental compacted writes must keep the same layout. `Bus
 
 This is an additive layer. Existing `segment-trips`, overtake, dwell, speed-map, stop-last-pass, and dashboard calculations must not depend on transfer-potential outputs.
 
+## Accessibility Map Tile Cache
+
+Accessibility PNG overlays are intentionally a UI cache, not a factual data layer. The factual input is `transfer-potential`; tiles can be deleted and regenerated.
+
+Current production rendering policy:
+
+```text
+BUS_ACCESSIBILITY_TILE_MIN_ZOOM=10
+BUS_ACCESSIBILITY_TILE_MAX_ZOOM=15
+BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM=12
+BUS_ACCESSIBILITY_INDEXED_PNG=true
+BUS_ACCESSIBILITY_PNG_COMPRESSION_QUALITY=0.0
+```
+
+The base map may still zoom past `12`; the accessibility overlay reuses and stretches the `z=12` PNG tiles for higher zooms. This preserves the color signal while avoiding the explosive `z=13..15` overlay tile count.
+
+Measured benchmark on `2026-06-21 08:00`, origin `Tasma` (`12078,12112`), all four overlay modes (`total,totalLog,walk,stopTransport`), transfer-potential source `/home/eljah/data/buscrawl/transfer-potential-tasma-20260621`:
+
+```text
+Cold one-snapshot job elapsed: 2m10s
+In-process render+contour stages for one snapshot: ~17s
+Output PNG files for one snapshot: 240
+Output tile size for one snapshot: 2.8M
+Max RSS: ~3.8G
+```
+
+The cold elapsed time includes JVM/Spark startup and loading the transfer reachability cache. A full-day run for one origin should amortize that startup across all 15-minute snapshots, so per-snapshot steady-state time should be judged from the stage logs rather than the cold one-snapshot wall time.
+
 ## Operational Rule
 
 Backlog health should be judged by the critical chain, not by slow UI caches:

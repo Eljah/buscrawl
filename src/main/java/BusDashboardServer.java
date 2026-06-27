@@ -58,6 +58,8 @@ public class BusDashboardServer {
     private final Path rubberinessCacheFile;
     private final Path speedMapCacheFile;
     private final Path accessibilityMapCacheFile;
+    private final Path accessibilityMapIndexFile;
+    private final Path accessibilityMapDir;
     private final Path mapConfigFile;
     private final Path tileRoot;
     private final Path trafficBehaviorDir;
@@ -72,6 +74,8 @@ public class BusDashboardServer {
             Path rubberinessCacheFile,
             Path speedMapCacheFile,
             Path accessibilityMapCacheFile,
+            Path accessibilityMapIndexFile,
+            Path accessibilityMapDir,
             Path mapConfigFile,
             Path tileRoot,
             Path trafficBehaviorDir,
@@ -85,6 +89,8 @@ public class BusDashboardServer {
         this.rubberinessCacheFile = rubberinessCacheFile;
         this.speedMapCacheFile = speedMapCacheFile;
         this.accessibilityMapCacheFile = accessibilityMapCacheFile;
+        this.accessibilityMapIndexFile = accessibilityMapIndexFile;
+        this.accessibilityMapDir = accessibilityMapDir;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
         this.trafficBehaviorDir = trafficBehaviorDir;
@@ -124,6 +130,14 @@ public class BusDashboardServer {
                 "BUS_DASHBOARD_ACCESSIBILITY_MAP_CACHE_FILE",
                 statsCacheFile.resolveSibling("accessibility-map.json").toString()
         ));
+        Path accessibilityMapIndexFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_ACCESSIBILITY_MAP_INDEX_FILE",
+                statsCacheFile.resolveSibling("accessibility-map-index.json").toString()
+        ));
+        Path accessibilityMapDir = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_ACCESSIBILITY_MAP_DIR",
+                statsCacheFile.resolveSibling("accessibility-map-origins").toString()
+        ));
         Path mapConfigFile = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_MAP_CONFIG_FILE",
                 statsCacheFile.resolveSibling("map-config.json").toString()
@@ -147,6 +161,8 @@ public class BusDashboardServer {
                 rubberinessCacheFile,
                 speedMapCacheFile,
                 accessibilityMapCacheFile,
+                accessibilityMapIndexFile,
+                accessibilityMapDir,
                 mapConfigFile,
                 tileRoot,
                 trafficBehaviorDir,
@@ -180,7 +196,8 @@ public class BusDashboardServer {
         server.createContext("/api/rubberiness", this::handleRubberinessRequest);
         server.createContext("/api/rubberiness-details", this::handleRubberinessDetailsRequest);
         server.createContext("/api/speed-map", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedSpeedMapJson.get()));
-        server.createContext("/api/accessibility-map", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedAccessibilityMapJson.get()));
+        server.createContext("/api/accessibility-map", this::handleAccessibilityMapRequest);
+        server.createContext("/api/accessibility-map-index", this::handleAccessibilityMapIndexRequest);
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
@@ -305,6 +322,14 @@ public class BusDashboardServer {
         payload.put("reachableStops", 0);
         payload.put("roadWays", 0);
         payload.put("segments", List.of());
+        return payload;
+    }
+
+    private static Map<String, Object> emptyAccessibilityMapIndexPayload() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        payload.put("status", "empty");
+        payload.put("origins", List.of());
         return payload;
     }
 
@@ -960,6 +985,36 @@ public class BusDashboardServer {
         payload.put("status", "error");
         payload.put("message", message == null ? "Unexpected error" : message);
         return MAPPER.writeValueAsBytes(payload);
+    }
+
+    private void handleAccessibilityMapRequest(HttpExchange exchange) throws IOException {
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        if (rawQuery == null || rawQuery.isBlank()) {
+            writeResponse(exchange, 200, "application/json; charset=utf-8", cachedAccessibilityMapJson.get());
+            return;
+        }
+        String origin = parseQuery(rawQuery).getOrDefault("origin", "").trim();
+        if (origin.isEmpty()) {
+            writeResponse(exchange, 200, "application/json; charset=utf-8", cachedAccessibilityMapJson.get());
+            return;
+        }
+        if (!origin.matches("[a-zA-Z0-9_-]+")) {
+            writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Invalid accessibility origin"));
+            return;
+        }
+        Path originFile = accessibilityMapDir.resolve(origin + ".json").normalize();
+        if (!originFile.startsWith(accessibilityMapDir) || !Files.isRegularFile(originFile)) {
+            writeResponse(exchange, 404, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(emptyAccessibilityMapPayload(
+                    "Accessibility map cache file not found for origin: " + origin
+            )));
+            return;
+        }
+        writeResponse(exchange, 200, "application/json; charset=utf-8", Files.readAllBytes(originFile));
+    }
+
+    private void handleAccessibilityMapIndexRequest(HttpExchange exchange) throws IOException {
+        byte[] body = loadJsonCache(accessibilityMapIndexFile, emptyAccessibilityMapIndexPayload());
+        writeResponse(exchange, 200, "application/json; charset=utf-8", body);
     }
 
     private static String parquetGlob(Path dir) {
