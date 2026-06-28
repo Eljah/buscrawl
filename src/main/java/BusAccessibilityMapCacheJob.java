@@ -98,6 +98,7 @@ public class BusAccessibilityMapCacheJob {
     private static final double COLOR_MIN_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MIN_MINUTES", "0"));
     private static final double COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_MINUTES", "0"));
     private static final double COLOR_MAX_PERCENTILE = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_COLOR_MAX_PERCENTILE", "0.90"));
+    private static final double TOTAL_NORMALIZED_COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_TOTAL_NORMALIZED_MAX_MINUTES", "800"));
     private static final double TOTAL_LOG_COLOR_MAX_MINUTES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_TOTAL_LOG_MAX_MINUTES", "800"));
     private static final double[] CONTOUR_THRESHOLDS_MINUTES = new double[]{15.0, 30.0, 60.0};
     private static final double CONTOUR_ENVELOPE_METERS = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_CONTOUR_ENVELOPE_METERS", "250"));
@@ -260,6 +261,7 @@ public class BusAccessibilityMapCacheJob {
                     debugTopTotalSegments(snapshotDate, snapshotTime, segments);
                     Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
                     Path totalTileRoot = snapshotRoot.resolve("total");
+                    Path totalNormalizedTileRoot = snapshotRoot.resolve("total-normalized");
                     Path totalLogTileRoot = snapshotRoot.resolve("total-log");
                     Path walkTileRoot = snapshotRoot.resolve("walk");
                     Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
@@ -269,6 +271,12 @@ public class BusAccessibilityMapCacheJob {
                     logSnapshotStage(snapshotId, "render total tiles start");
                     ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes, renderCache);
                     logSnapshotStage(snapshotId, "render total tiles done");
+                    ColorScale totalNormalizedColorScale = null;
+                    if (renderModes.contains("totalNormalized")) {
+                        logSnapshotStage(snapshotId, "render totalNormalized tiles start");
+                        totalNormalizedColorScale = renderTiles(segments, totalNormalizedTileRoot, ColorMetric.TOTAL_NORMALIZED, tileIndexes, renderCache);
+                        logSnapshotStage(snapshotId, "render totalNormalized tiles done");
+                    }
                     ColorScale totalLogColorScale = null;
                     if (renderModes.contains("totalLog")) {
                         logSnapshotStage(snapshotId, "render totalLog tiles start");
@@ -299,6 +307,7 @@ public class BusAccessibilityMapCacheJob {
                             contourResult.stats,
                             contourResult.polygons,
                             totalColorScale,
+                            totalNormalizedColorScale,
                             totalLogColorScale,
                             walkColorScale,
                             stopTransportColorScale,
@@ -473,7 +482,7 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static Set<String> parseRenderModes() {
-        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_RENDER_MODES", "total,totalLog,walk,stopTransport").trim();
+        String text = System.getenv().getOrDefault("BUS_ACCESSIBILITY_RENDER_MODES", "total,totalNormalized,totalLog,walk,stopTransport").trim();
         Set<String> modes = new HashSet<>();
         for (String part : text.split(",")) {
             String mode = part.trim();
@@ -2778,16 +2787,19 @@ public class BusAccessibilityMapCacheJob {
         payload.put("tileMaxZoom", MAX_ZOOM);
         payload.put("overlayTileMaxZoom", OVERLAY_MAX_ZOOM);
         payload.put("tileOverlayTemplate", first.tileOverlayTemplate());
+        payload.put("totalNormalizedTileOverlayTemplate", first.totalNormalizedColorScale == null ? null : first.totalNormalizedTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", first.totalLogColorScale == null ? null : first.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", first.walkColorScale == null ? null : first.walkTileOverlayTemplate());
         payload.put("stopTransportTileOverlayTemplate", first.stopTransportColorScale == null ? null : first.stopTransportTileOverlayTemplate());
         payload.put("tileRoot", tileBaseRoot.resolve(first.id).resolve("total").toString());
+        payload.put("totalNormalizedTileRoot", tileBaseRoot.resolve(first.id).resolve("total-normalized").toString());
         payload.put("totalLogTileRoot", tileBaseRoot.resolve(first.id).resolve("total-log").toString());
         payload.put("walkTileRoot", tileBaseRoot.resolve(first.id).resolve("walk").toString());
         payload.put("stopTransportTileRoot", tileBaseRoot.resolve(first.id).resolve("stop-transport").toString());
         payload.put("contourThresholdMinutes", List.of(15, 30, 60));
         payload.put("totalColorMinMinutes", round1(first.totalColorScale.minMinutes));
         payload.put("totalColorMaxMinutes", round1(first.totalColorScale.maxMinutes));
+        putScale(payload, "totalNormalized", first.totalNormalizedColorScale);
         putScale(payload, "totalLog", first.totalLogColorScale);
         putScale(payload, "walk", first.walkColorScale);
         putScale(payload, "stopTransport", first.stopTransportColorScale);
@@ -2812,11 +2824,13 @@ public class BusAccessibilityMapCacheJob {
         payload.put("overlayTileMaxZoom", OVERLAY_MAX_ZOOM);
         payload.put("tileOverlayTemplate", snapshot.tileOverlayTemplate());
         payload.put("availableModes", snapshot.availableModes());
+        payload.put("totalNormalizedTileOverlayTemplate", snapshot.totalNormalizedColorScale == null ? null : snapshot.totalNormalizedTileOverlayTemplate());
         payload.put("totalLogTileOverlayTemplate", snapshot.totalLogColorScale == null ? null : snapshot.totalLogTileOverlayTemplate());
         payload.put("walkTileOverlayTemplate", snapshot.walkColorScale == null ? null : snapshot.walkTileOverlayTemplate());
         payload.put("stopTransportTileOverlayTemplate", snapshot.stopTransportColorScale == null ? null : snapshot.stopTransportTileOverlayTemplate());
         payload.put("totalColorMinMinutes", round1(snapshot.totalColorScale.minMinutes));
         payload.put("totalColorMaxMinutes", round1(snapshot.totalColorScale.maxMinutes));
+        putScale(payload, "totalNormalized", snapshot.totalNormalizedColorScale);
         putScale(payload, "totalLog", snapshot.totalLogColorScale);
         putScale(payload, "walk", snapshot.walkColorScale);
         putScale(payload, "stopTransport", snapshot.stopTransportColorScale);
@@ -3604,6 +3618,9 @@ public class BusAccessibilityMapCacheJob {
             if (metric == ColorMetric.WALK) {
                 return new ColorScale(metric, 0.0, EFFECTIVE_WALK_RADIUS_METERS / WALK_SPEED_MPS / 60.0);
             }
+            if (metric == ColorMetric.TOTAL_NORMALIZED) {
+                return new ColorScale(metric, 0.0, TOTAL_NORMALIZED_COLOR_MAX_MINUTES);
+            }
             if (metric == ColorMetric.TOTAL_LOG) {
                 return new ColorScale(metric, 0.0, TOTAL_LOG_COLOR_MAX_MINUTES, true);
             }
@@ -3645,6 +3662,7 @@ public class BusAccessibilityMapCacheJob {
         private final ContourStats contourStats;
         private final ColorScale totalColorScale;
         private final List<ContourPolygon> contourPolygons;
+        private final ColorScale totalNormalizedColorScale;
         private final ColorScale totalLogColorScale;
         private final ColorScale walkColorScale;
         private final ColorScale stopTransportColorScale;
@@ -3659,6 +3677,7 @@ public class BusAccessibilityMapCacheJob {
                 ContourStats contourStats,
                 List<ContourPolygon> contourPolygons,
                 ColorScale totalColorScale,
+                ColorScale totalNormalizedColorScale,
                 ColorScale totalLogColorScale,
                 ColorScale walkColorScale,
                 ColorScale stopTransportColorScale,
@@ -3672,6 +3691,7 @@ public class BusAccessibilityMapCacheJob {
             this.contourStats = contourStats;
             this.contourPolygons = contourPolygons;
             this.totalColorScale = totalColorScale;
+            this.totalNormalizedColorScale = totalNormalizedColorScale;
             this.totalLogColorScale = totalLogColorScale;
             this.walkColorScale = walkColorScale;
             this.stopTransportColorScale = stopTransportColorScale;
@@ -3686,6 +3706,10 @@ public class BusAccessibilityMapCacheJob {
             return "./tiles/" + tileUrlPrefix + "/" + id + "/total-log/{z}/{x}/{y}.png";
         }
 
+        private String totalNormalizedTileOverlayTemplate() {
+            return "./tiles/" + tileUrlPrefix + "/" + id + "/total-normalized/{z}/{x}/{y}.png";
+        }
+
         private String walkTileOverlayTemplate() {
             return "./tiles/" + tileUrlPrefix + "/" + id + "/walk/{z}/{x}/{y}.png";
         }
@@ -3697,6 +3721,9 @@ public class BusAccessibilityMapCacheJob {
         private List<String> availableModes() {
             List<String> modes = new ArrayList<>();
             modes.add("total");
+            if (totalNormalizedColorScale != null) {
+                modes.add("totalNormalized");
+            }
             if (totalLogColorScale != null) {
                 modes.add("totalLog");
             }
@@ -3779,6 +3806,12 @@ public class BusAccessibilityMapCacheJob {
 
     private enum ColorMetric {
         TOTAL {
+            @Override
+            double value(AccessibleSegment segment) {
+                return segment.totalMinutes;
+            }
+        },
+        TOTAL_NORMALIZED {
             @Override
             double value(AccessibleSegment segment) {
                 return segment.totalMinutes;

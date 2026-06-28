@@ -13,6 +13,7 @@ export BUS_DASHBOARD_OVERTAKE_CACHE_FILE=${BUS_DASHBOARD_OVERTAKE_CACHE_FILE:-/h
 export BUS_DASHBOARD_RUBBERINESS_CACHE_FILE=${BUS_DASHBOARD_RUBBERINESS_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/rubberiness.json}
 export BUS_DASHBOARD_SPEED_MAP_CACHE_FILE=${BUS_DASHBOARD_SPEED_MAP_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/speed-map.json}
 export BUS_DASHBOARD_ACCESSIBILITY_MAP_CACHE_FILE=${BUS_DASHBOARD_ACCESSIBILITY_MAP_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-map.json}
+export BUS_DASHBOARD_ACCESSIBILITY_AGGREGATE_DIR=${BUS_DASHBOARD_ACCESSIBILITY_AGGREGATE_DIR:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-map-aggregates}
 export BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE=${BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-origins-config.json}
 export BUS_DASHBOARD_MAP_CONFIG_FILE=${BUS_DASHBOARD_MAP_CONFIG_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/map-config.json}
 export BUS_TILE_DIR=${BUS_TILE_DIR:-/home/eljah/apps/buscrawl/dashboard-cache/tiles/base}

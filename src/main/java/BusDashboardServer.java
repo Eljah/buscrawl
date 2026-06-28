@@ -21,9 +21,14 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -64,6 +69,7 @@ public class BusDashboardServer {
     private final Path accessibilityMapIndexFile;
     private final Path accessibilityMapDir;
     private final Path accessibilityOriginConfigFile;
+    private final Path accessibilityAggregateDir;
     private final Path mapConfigFile;
     private final Path tileRoot;
     private final Path trafficBehaviorDir;
@@ -81,6 +87,7 @@ public class BusDashboardServer {
             Path accessibilityMapIndexFile,
             Path accessibilityMapDir,
             Path accessibilityOriginConfigFile,
+            Path accessibilityAggregateDir,
             Path mapConfigFile,
             Path tileRoot,
             Path trafficBehaviorDir,
@@ -97,6 +104,7 @@ public class BusDashboardServer {
         this.accessibilityMapIndexFile = accessibilityMapIndexFile;
         this.accessibilityMapDir = accessibilityMapDir;
         this.accessibilityOriginConfigFile = accessibilityOriginConfigFile;
+        this.accessibilityAggregateDir = accessibilityAggregateDir;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
         this.trafficBehaviorDir = trafficBehaviorDir;
@@ -148,6 +156,10 @@ public class BusDashboardServer {
                 "BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE",
                 statsCacheFile.resolveSibling("accessibility-origins-config.json").toString()
         ));
+        Path accessibilityAggregateDir = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_ACCESSIBILITY_AGGREGATE_DIR",
+                statsCacheFile.resolveSibling("accessibility-map-aggregates").toString()
+        ));
         Path mapConfigFile = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_MAP_CONFIG_FILE",
                 statsCacheFile.resolveSibling("map-config.json").toString()
@@ -174,6 +186,7 @@ public class BusDashboardServer {
                 accessibilityMapIndexFile,
                 accessibilityMapDir,
                 accessibilityOriginConfigFile,
+                accessibilityAggregateDir,
                 mapConfigFile,
                 tileRoot,
                 trafficBehaviorDir,
@@ -1023,7 +1036,30 @@ public class BusDashboardServer {
             )));
             return;
         }
-        writeResponse(exchange, 200, "application/json; charset=utf-8", Files.readAllBytes(originFile));
+        writeResponse(exchange, 200, "application/json; charset=utf-8", accessibilityMapPayloadWithAggregates(origin, originFile));
+    }
+
+    @SuppressWarnings("unchecked")
+    private byte[] accessibilityMapPayloadWithAggregates(String origin, Path originFile) throws IOException {
+        Map<String, Object> payload = MAPPER.readValue(originFile.toFile(), new TypeReference<>() {
+        });
+        Path aggregateFile = accessibilityAggregateDir.resolve(origin + ".json").normalize();
+        if (aggregateFile.startsWith(accessibilityAggregateDir) && Files.isRegularFile(aggregateFile)) {
+            try {
+                Map<String, Object> aggregatePayload = MAPPER.readValue(aggregateFile.toFile(), new TypeReference<>() {
+                });
+                Object aggregateSnapshots = aggregatePayload.get("aggregateSnapshots");
+                if (aggregateSnapshots instanceof List<?>) {
+                    payload.put("aggregateSnapshots", aggregateSnapshots);
+                    payload.put("aggregateUpdatedAt", aggregatePayload.get("updatedAt"));
+                }
+            } catch (Exception ignored) {
+                payload.put("aggregateSnapshots", List.of());
+            }
+        } else {
+            payload.put("aggregateSnapshots", List.of());
+        }
+        return MAPPER.writeValueAsBytes(payload);
     }
 
     private void handleAccessibilityMapIndexRequest(HttpExchange exchange) throws IOException {
@@ -1068,20 +1104,9 @@ public class BusDashboardServer {
                 })
                 : Map.of();
         Map<String, Boolean> enabledBySlug = enabledOriginsBySlug(config);
+        List<Map<String, Object>> indexOriginsList = indexedAccessibilityOrigins(index, enabledBySlug);
         List<Map<String, Object>> origins = new ArrayList<>();
-        Object indexOrigins = index.get("origins");
-        if (indexOrigins instanceof List<?>) {
-            for (Object item : (List<?>) indexOrigins) {
-                if (!(item instanceof Map<?, ?>)) {
-                    continue;
-                }
-                Map<?, ?> origin = (Map<?, ?>) item;
-                String slug = String.valueOf(origin.get("slug") == null ? "" : origin.get("slug"));
-                Map<String, Object> normalized = enrichAccessibilityOrigin(slug, origin);
-                normalized.put("enabled", enabledBySlug.getOrDefault(slug, true));
-                origins.add(normalized);
-            }
-        }
+        origins.addAll(indexOriginsList);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("status", "ok");
         payload.put("updatedAt", config.getOrDefault("updatedAt", index.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString())));
@@ -1098,6 +1123,41 @@ public class BusDashboardServer {
                 })
                 : Map.of();
         Map<String, Boolean> enabledBySlug = enabledOriginsBySlug(config);
+        List<Map<String, Object>> indexOriginsList = indexedAccessibilityOrigins(index, enabledBySlug);
+        List<Map<String, Object>> origins = new ArrayList<>();
+        origins.addAll(indexOriginsList);
+        origins.addAll(generatedAccessibilityOrigins(indexOriginsList, enabledBySlug));
+        Map<String, Map<String, Object>> configBySlug = configuredOriginsBySlug(config);
+        for (Map<String, Object> origin : origins) {
+            Map<String, Object> configured = configBySlug.get(String.valueOf(origin.get("slug")));
+            if (configured != null && configured.get("enabled") != null) {
+                origin.put("enabled", Boolean.TRUE.equals(configured.get("enabled")));
+            }
+        }
+        for (Map.Entry<String, Map<String, Object>> entry : configBySlug.entrySet()) {
+            boolean exists = origins.stream().anyMatch(origin -> entry.getKey().equals(String.valueOf(origin.get("slug"))));
+            if (!exists) {
+                Map<String, Object> configured = new LinkedHashMap<>(entry.getValue());
+                configured.putIfAbsent("label", entry.getKey());
+                configured.putIfAbsent("stopIds", List.of());
+                configured.putIfAbsent("stopNames", List.of());
+                origins.add(configured);
+            }
+        }
+        origins.sort(Comparator.comparing(origin -> String.valueOf(origin.get("label")).toLowerCase(Locale.ROOT)));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", config.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString()));
+        payload.put("status", "ok");
+        payload.put("originRoot", System.getenv().getOrDefault(
+                "BUS_TRANSFER_POTENTIAL_ORIGIN_ROOT",
+                "/home/eljah/data/buscrawl/transfer-potential-accessibility-origins"
+        ));
+        payload.put("clusterRadiusMeters", accessibilityStopClusterRadiusMeters());
+        payload.put("origins", origins);
+        return MAPPER.writeValueAsBytes(payload);
+    }
+
+    private List<Map<String, Object>> indexedAccessibilityOrigins(Map<String, Object> index, Map<String, Boolean> enabledBySlug) {
         List<Map<String, Object>> origins = new ArrayList<>();
         Object indexOrigins = index.get("origins");
         if (indexOrigins instanceof List<?>) {
@@ -1109,18 +1169,11 @@ public class BusDashboardServer {
                 String slug = String.valueOf(origin.get("slug") == null ? "" : origin.get("slug"));
                 Map<String, Object> normalized = enrichAccessibilityOrigin(slug, origin);
                 normalized.put("enabled", enabledBySlug.getOrDefault(slug, true));
+                normalized.put("source", "index");
                 origins.add(normalized);
             }
         }
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("updatedAt", config.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString()));
-        payload.put("status", "ok");
-        payload.put("originRoot", System.getenv().getOrDefault(
-                "BUS_TRANSFER_POTENTIAL_ORIGIN_ROOT",
-                "/home/eljah/data/buscrawl/transfer-potential-accessibility-origins"
-        ));
-        payload.put("origins", origins);
-        return MAPPER.writeValueAsBytes(payload);
+        return origins;
     }
 
     private static Map<String, Boolean> enabledOriginsBySlug(Map<String, Object> config) {
@@ -1138,6 +1191,197 @@ public class BusDashboardServer {
             }
         }
         return enabledBySlug;
+    }
+
+    private static Map<String, Map<String, Object>> configuredOriginsBySlug(Map<String, Object> config) {
+        Map<String, Map<String, Object>> bySlug = new LinkedHashMap<>();
+        Object configuredOrigins = config.get("origins");
+        if (configuredOrigins instanceof List<?>) {
+            for (Object item : (List<?>) configuredOrigins) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> raw = (Map<?, ?>) item;
+                String slug = String.valueOf(raw.get("slug") == null ? "" : raw.get("slug")).trim();
+                if (slug.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> origin = new LinkedHashMap<>();
+                origin.put("slug", slug);
+                origin.put("label", raw.get("label") == null ? slug : raw.get("label"));
+                origin.put("stopIds", raw.get("stopIds") instanceof List<?> ? raw.get("stopIds") : List.of());
+                origin.put("stopNames", raw.get("stopNames") instanceof List<?> ? raw.get("stopNames") : List.of());
+                origin.put("enabled", Boolean.TRUE.equals(raw.get("enabled")));
+                origin.put("source", raw.get("source") == null ? "config" : raw.get("source"));
+                bySlug.put(slug, origin);
+            }
+        }
+        return bySlug;
+    }
+
+    private List<Map<String, Object>> generatedAccessibilityOrigins(
+            List<Map<String, Object>> indexedOrigins,
+            Map<String, Boolean> enabledBySlug
+    ) {
+        Set<String> knownStopSets = new HashSet<>();
+        Set<String> knownSlugs = new HashSet<>();
+        for (Map<String, Object> origin : indexedOrigins) {
+            knownSlugs.add(String.valueOf(origin.get("slug")));
+            knownStopSets.add(canonicalStopIds(origin.get("stopIds")));
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        try {
+            RouteTopology topology = RouteTopology.load(System.getenv().getOrDefault("BUS_ROUTE_TOPOLOGY_FILE", ""));
+            List<StopCluster> clusters = buildStopClusters(topology.buildStops(), accessibilityStopClusterRadiusMeters());
+            for (StopCluster cluster : clusters) {
+                if (knownStopSets.contains(canonicalStopIds(cluster.stopIds))) {
+                    continue;
+                }
+                String slug = uniqueSlug("stop-" + cluster.stopIds.get(0), knownSlugs);
+                knownSlugs.add(slug);
+                Map<String, Object> origin = new LinkedHashMap<>();
+                origin.put("slug", slug);
+                origin.put("label", cluster.label);
+                origin.put("stopIds", cluster.stopIds);
+                origin.put("stopNames", cluster.stopNames);
+                origin.put("enabled", enabledBySlug.getOrDefault(slug, false));
+                origin.put("source", "generated");
+                result.add(origin);
+            }
+        } catch (Exception ignored) {
+            return result;
+        }
+        return result;
+    }
+
+    private static List<StopCluster> buildStopClusters(List<Map<String, Object>> rawStops, double radiusMeters) {
+        List<SimpleStop> stops = new ArrayList<>();
+        for (Map<String, Object> raw : rawStops) {
+            Object id = raw.get("stopId");
+            Object name = raw.get("stopName");
+            Object lat = raw.get("latitude");
+            Object lon = raw.get("longitude");
+            if (id == null || name == null || !(lat instanceof Number) || !(lon instanceof Number)) {
+                continue;
+            }
+            stops.add(new SimpleStop(
+                    String.valueOf(id),
+                    String.valueOf(name),
+                    ((Number) lat).doubleValue(),
+                    ((Number) lon).doubleValue()
+            ));
+        }
+        Map<String, List<SimpleStop>> byName = new HashMap<>();
+        for (SimpleStop stop : stops) {
+            byName.computeIfAbsent(normalizeStopName(stop.name), ignored -> new ArrayList<>()).add(stop);
+        }
+        List<StopCluster> clusters = new ArrayList<>();
+        for (List<SimpleStop> sameNameStops : byName.values()) {
+            sameNameStops.sort(Comparator.comparing(stop -> stop.id));
+            Set<String> visited = new HashSet<>();
+            for (SimpleStop start : sameNameStops) {
+                if (!visited.add(start.id)) {
+                    continue;
+                }
+                List<SimpleStop> component = new ArrayList<>();
+                List<SimpleStop> queue = new ArrayList<>();
+                queue.add(start);
+                for (int i = 0; i < queue.size(); i++) {
+                    SimpleStop current = queue.get(i);
+                    component.add(current);
+                    for (SimpleStop candidate : sameNameStops) {
+                        if (visited.contains(candidate.id)) {
+                            continue;
+                        }
+                        if (haversineMeters(current.lat, current.lon, candidate.lat, candidate.lon) <= radiusMeters) {
+                            visited.add(candidate.id);
+                            queue.add(candidate);
+                        }
+                    }
+                }
+                component.sort(Comparator.comparing(stop -> stop.id));
+                clusters.add(new StopCluster(
+                        component.stream().map(stop -> stop.name).distinct().collect(java.util.stream.Collectors.toList()).get(0),
+                        component.stream().map(stop -> stop.id).collect(java.util.stream.Collectors.toList()),
+                        component.stream().map(stop -> stop.name).distinct().collect(java.util.stream.Collectors.toList())
+                ));
+            }
+        }
+        clusters.sort(Comparator
+                .comparing((StopCluster cluster) -> cluster.label.toLowerCase(Locale.ROOT))
+                .thenComparing(cluster -> cluster.stopIds.get(0)));
+        return clusters;
+    }
+
+    private static String uniqueSlug(String base, Set<String> knownSlugs) {
+        String slug = base.replaceAll("[^a-zA-Z0-9_-]", "-").replaceAll("-+", "-");
+        if (slug.isBlank()) {
+            slug = "stop";
+        }
+        String candidate = slug;
+        int suffix = 2;
+        while (knownSlugs.contains(candidate)) {
+            candidate = slug + "-" + suffix++;
+        }
+        return candidate;
+    }
+
+    private static String canonicalStopIds(Object stopIdsValue) {
+        if (!(stopIdsValue instanceof List<?>)) {
+            return "";
+        }
+        List<String> ids = new ArrayList<>();
+        for (Object value : (List<?>) stopIdsValue) {
+            if (value != null) {
+                ids.add(String.valueOf(value));
+            }
+        }
+        ids.sort(String::compareTo);
+        return String.join(",", ids);
+    }
+
+    private static double accessibilityStopClusterRadiusMeters() {
+        return Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_STOP_CLUSTER_RADIUS_METERS", "180"));
+    }
+
+    private static String normalizeStopName(String stopName) {
+        return stopName == null ? "" : stopName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+        double earthRadius = 6_371_000.0;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    private static final class SimpleStop {
+        private final String id;
+        private final String name;
+        private final double lat;
+        private final double lon;
+
+        private SimpleStop(String id, String name, double lat, double lon) {
+            this.id = id;
+            this.name = name;
+            this.lat = lat;
+            this.lon = lon;
+        }
+    }
+
+    private static final class StopCluster {
+        private final String label;
+        private final List<String> stopIds;
+        private final List<String> stopNames;
+
+        private StopCluster(String label, List<String> stopIds, List<String> stopNames) {
+            this.label = label;
+            this.stopIds = stopIds;
+            this.stopNames = stopNames;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -1210,7 +1454,10 @@ public class BusDashboardServer {
                 normalized.put("label", String.valueOf(origin.get("label") == null ? slug : origin.get("label")));
                 Object stopIds = origin.get("stopIds");
                 normalized.put("stopIds", stopIds instanceof List<?> ? stopIds : List.of());
+                Object stopNames = origin.get("stopNames");
+                normalized.put("stopNames", stopNames instanceof List<?> ? stopNames : List.of());
                 normalized.put("enabled", Boolean.TRUE.equals(origin.get("enabled")));
+                normalized.put("source", String.valueOf(origin.get("source") == null ? "config" : origin.get("source")));
                 origins.add(normalized);
             }
         }

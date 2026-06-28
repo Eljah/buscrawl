@@ -90,13 +90,16 @@
     </div>
     <div class="mode-row" id="modeRow">
       <label><input type="radio" name="accessMode" value="total" checked> total time balanced</label>
+      <label><input type="radio" name="accessMode" value="totalNormalized"> total time normalized</label>
       <label><input type="radio" name="accessMode" value="totalLog"> total time log scale</label>
       <label><input type="radio" name="accessMode" value="walk"> walk part of best total route</label>
       <label><input type="radio" name="accessMode" value="stopTransport"> transport to nearest stop cluster</label>
     </div>
     <div class="selector-row">
       <label id="originSelectLabel" style="display:none">Origin <select id="originSelect"></select></label>
+      <label id="datasetSelectLabel" style="display:none">Dataset <select id="datasetSelect"></select></label>
       <label>Date <select id="dateSelect"></select></label>
+      <label id="weekdaySelectLabel" style="display:none">Weekday <select id="weekdaySelect"></select></label>
       <label>Departure <select id="timeSelect"></select></label>
       <span class="snapshot-status" id="snapshotStatus"></span>
     </div>
@@ -149,9 +152,9 @@ const contourSvg=document.getElementById('contourSvg');
 const emptyEl=document.getElementById('emptyState');
 const originLayer=document.getElementById('originLayer');
 const timeProbe=document.getElementById('timeProbe');
-const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,currentSnapshot:null,centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
+const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,currentSnapshot:null,dailySnapshots:[],aggregateSnapshots:[],dataset:'daily',centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
 const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-const fullModeList=['total','totalLog','walk','stopTransport'];
+const fullModeList=['total','totalNormalized','totalLog','walk','stopTransport'];
 
 function lonToWorldX(lon,z){return ((lon+180)/360)*256*Math.pow(2,z);}
 function latToWorldY(lat,z){const s=Math.sin(lat*Math.PI/180);return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*256*Math.pow(2,z);}
@@ -165,6 +168,7 @@ function overlayTileUrl(z,x,y){
   const snapshot=currentSnapshot();
   const suffix=state.payload.updatedAt?`?v=${encodeURIComponent(state.payload.updatedAt)}-${snapshot.id||'single'}-${state.overlayMode}`:'';
   let template=snapshot.tileOverlayTemplate;
+  if(state.overlayMode==='totalNormalized'&&snapshot.totalNormalizedTileOverlayTemplate)template=snapshot.totalNormalizedTileOverlayTemplate;
   if(state.overlayMode==='totalLog'&&snapshot.totalLogTileOverlayTemplate)template=snapshot.totalLogTileOverlayTemplate;
   if(state.overlayMode==='walk'&&snapshot.walkTileOverlayTemplate)template=snapshot.walkTileOverlayTemplate;
   if(state.overlayMode==='stopTransport'&&snapshot.stopTransportTileOverlayTemplate)template=snapshot.stopTransportTileOverlayTemplate;
@@ -178,22 +182,30 @@ function currentSnapshot(){
   return state.currentSnapshot||state.payload||{};
 }
 function isTotalMode(){
-  return state.overlayMode==='total'||state.overlayMode==='totalLog';
+  return state.overlayMode==='total'||state.overlayMode==='totalNormalized'||state.overlayMode==='totalLog';
 }
 function updateSnapshotMeta(){
   const p=state.payload,s=currentSnapshot();
-  document.getElementById('mainMeta').textContent=`${p.originStopName} · ${s.serviceDate||p.serviceDate} ${s.departureTime||p.departureTime} MSK · updated ${dtf.format(new Date(p.updatedAt))} MSK`;
+  const period=s.aggregate
+    ? `${s.type==='yearWeekday'?'year':'month'} ${s.periodKey}, weekday ${s.weekdayIso}`
+    : `${s.serviceDate||p.serviceDate}`;
+  document.getElementById('mainMeta').textContent=`${p.originStopName} · ${period} ${s.departureTime||p.departureTime} MSK · updated ${dtf.format(new Date(p.updatedAt))} MSK`;
   document.getElementById('countMeta').textContent=s.pending
     ? 'tiles are not generated for this departure yet'
-    : `${Number(s.segmentCount||p.segmentCount||0).toLocaleString('ru-RU')} road fragments; ${s.reachableStops||p.reachableStops||0} reachable stops`;
+    : s.aggregate
+      ? `${Number(s.tileCount||0).toLocaleString('ru-RU')} averaged tiles; ${s.sampleCount||0} source heatmaps`
+      : `${Number(s.segmentCount||p.segmentCount||0).toLocaleString('ru-RU')} road fragments; ${s.reachableStops||p.reachableStops||0} reachable stops`;
   const status=document.getElementById('snapshotStatus');
   status.className=`snapshot-status ${s.pending?'pending':'ready'}`;
-  status.textContent=s.pending?'not generated yet; tile requests will be empty until the cache job reaches this time':'generated';
+  status.textContent=s.pending?'not generated yet; tile requests will be empty until the cache job reaches this time':(s.aggregate?'aggregated':'generated');
   updateModeAvailability();
   renderAreaChart();
 }
 function updateModeAvailability(){
   const modes=new Set(currentSnapshot().availableModes||state.payload?.availableModes||['total']);
+  if(currentSnapshot().aggregate){
+    state.overlayMode='totalNormalized';
+  }
   if(!modes.has(state.overlayMode))state.overlayMode='total';
   document.querySelectorAll('#modeRow label').forEach(label=>{
     const input=label.querySelector('input');
@@ -225,6 +237,14 @@ function updateRangeMeta(){
       range.textContent=`${min}-${max} min; transport + walk; logarithmic color scale`;
       labels.innerHTML=logScaleLabels(Number(p.totalLogColorMinMinutes||0),Number(p.totalLogColorMaxMinutes||0),'min');
       document.getElementById('scaleTicks').innerHTML=thresholdTicks(Number(p.totalLogColorMinMinutes||0),Number(p.totalLogColorMaxMinutes||0),true);
+      return;
+    }
+    if(state.overlayMode==='totalNormalized'){
+      const min=Number(p.totalNormalizedColorMinMinutes||0).toFixed(1);
+      const max=Number(p.totalNormalizedColorMaxMinutes||800).toFixed(1);
+      range.textContent=`${min}-${max}+ min; fixed transport + walk scale for averaging`;
+      labels.innerHTML=scaleLabels(Number(p.totalNormalizedColorMinMinutes||0),Number(p.totalNormalizedColorMaxMinutes||800),'total');
+      document.getElementById('scaleTicks').innerHTML=thresholdTicks(Number(p.totalNormalizedColorMinMinutes||0),Number(p.totalNormalizedColorMaxMinutes||800),false);
       return;
     }
     if(state.overlayMode==='stopTransport'){
@@ -542,34 +562,69 @@ function initOriginSelector(index){
 }
 function initSnapshotSelectors(payload){
   const readySnapshots=Array.isArray(payload.snapshots)&&payload.snapshots.length?payload.snapshots:[payload];
-  const snapshots=buildSnapshotGrid(payload,readySnapshots);
-  state.currentSnapshot=snapshots.find(s=>!s.pending)||snapshots[0];
-  const dates=[...new Set(snapshots.map(s=>s.serviceDate).filter(Boolean))];
+  state.dailySnapshots=buildSnapshotGrid(payload,readySnapshots);
+  state.aggregateSnapshots=Array.isArray(payload.aggregateSnapshots)?payload.aggregateSnapshots:[];
+  state.currentSnapshot=state.dailySnapshots.find(s=>!s.pending)||state.dailySnapshots[0];
+  const datasetLabel=document.getElementById('datasetSelectLabel');
+  const datasetSelect=document.getElementById('datasetSelect');
   const dateSelect=document.getElementById('dateSelect');
+  const weekdayLabel=document.getElementById('weekdaySelectLabel');
+  const weekdaySelect=document.getElementById('weekdaySelect');
   const timeSelect=document.getElementById('timeSelect');
-  dateSelect.innerHTML=dates.map(d=>`<option value="${d}">${d}</option>`).join('');
-  function renderTimes(){
-    const date=dateSelect.value||dates[0];
-    const times=snapshots.filter(s=>s.serviceDate===date).map(s=>s.departureTime).filter(Boolean);
-    timeSelect.innerHTML=times.map(t=>{
-      const snapshot=snapshots.find(s=>s.serviceDate===date&&s.departureTime===t);
-      return `<option value="${t}">${t}${snapshot?.pending?' (pending)':''}</option>`;
-    }).join('');
-    const selected=snapshots.find(s=>s.serviceDate===date&&s.departureTime===timeSelect.value)||snapshots.find(s=>s.serviceDate===date)||snapshots[0];
-    state.currentSnapshot=selected;
+  const types=new Set(state.aggregateSnapshots.map(s=>s.type));
+  const datasets=[{value:'daily',label:'daily snapshots'}];
+  if(types.has('monthWeekday'))datasets.push({value:'monthWeekday',label:'monthly weekday average'});
+  if(types.has('yearWeekday'))datasets.push({value:'yearWeekday',label:'year weekday average'});
+  datasetSelect.innerHTML=datasets.map(item=>`<option value="${item.value}">${item.label}</option>`).join('');
+  datasetLabel.style.display=datasets.length>1?'inline-flex':'none';
+  if(!datasets.some(item=>item.value===state.dataset))state.dataset='daily';
+  datasetSelect.value=state.dataset;
+  function renderSelectors(){
+    state.dataset=datasetSelect.value||'daily';
+    const previousDate=dateSelect.value;
+    const previousWeekday=weekdaySelect.value;
+    const previousTime=timeSelect.value;
+    if(state.dataset==='daily'){
+      weekdayLabel.style.display='none';
+      const dates=[...new Set(state.dailySnapshots.map(s=>s.serviceDate).filter(Boolean))];
+      dateSelect.innerHTML=dates.map(d=>`<option value="${d}">${d}</option>`).join('');
+      const date=dates.includes(previousDate)?previousDate:dates[0];
+      dateSelect.value=date||'';
+      const times=state.dailySnapshots.filter(s=>s.serviceDate===date).map(s=>s.departureTime).filter(Boolean);
+      timeSelect.innerHTML=times.map(t=>{
+        const snapshot=state.dailySnapshots.find(s=>s.serviceDate===date&&s.departureTime===t);
+        return `<option value="${t}">${t}${snapshot?.pending?' (pending)':''}</option>`;
+      }).join('');
+      timeSelect.value=times.includes(previousTime)?previousTime:(times[0]||'');
+      state.currentSnapshot=state.dailySnapshots.find(s=>s.serviceDate===date&&s.departureTime===timeSelect.value)||state.dailySnapshots.find(s=>s.serviceDate===date)||state.dailySnapshots[0];
+    }else{
+      weekdayLabel.style.display='inline-flex';
+      const pool=state.aggregateSnapshots.filter(s=>s.type===state.dataset);
+      const periods=[...new Set(pool.map(s=>s.periodKey).filter(Boolean))].sort();
+      dateSelect.innerHTML=periods.map(d=>`<option value="${d}">${d}</option>`).join('');
+      const period=periods.includes(previousDate)?previousDate:periods[0];
+      dateSelect.value=period||'';
+      const weekdays=[...new Set(pool.filter(s=>s.periodKey===period).map(s=>Number(s.weekdayIso)).filter(Boolean))].sort((a,b)=>a-b);
+      weekdaySelect.innerHTML=weekdays.map(w=>`<option value="${w}">${weekdayLabelText(w)}</option>`).join('');
+      const weekday=weekdays.includes(Number(previousWeekday))?Number(previousWeekday):weekdays[0];
+      weekdaySelect.value=Number.isFinite(weekday)?String(weekday):'';
+      const times=[...new Set(pool.filter(s=>s.periodKey===period&&Number(s.weekdayIso)===weekday).map(s=>s.departureTime).filter(Boolean))].sort();
+      timeSelect.innerHTML=times.map(t=>`<option value="${t}">${t}</option>`).join('');
+      timeSelect.value=times.includes(previousTime)?previousTime:(times[0]||'');
+      state.currentSnapshot=pool.find(s=>s.periodKey===period&&Number(s.weekdayIso)===weekday&&s.departureTime===timeSelect.value)||pool.find(s=>s.periodKey===period&&Number(s.weekdayIso)===weekday)||pool[0];
+    }
     updateSnapshotMeta();
     updateRangeMeta();
     renderAll();
   }
-  dateSelect.addEventListener('change',renderTimes);
-  timeSelect.addEventListener('change',()=>{
-    const selected=snapshots.find(s=>s.serviceDate===dateSelect.value&&s.departureTime===timeSelect.value)||snapshots[0];
-    state.currentSnapshot=selected;
-    updateSnapshotMeta();
-    updateRangeMeta();
-    renderAll();
-  });
-  renderTimes();
+  datasetSelect.onchange=renderSelectors;
+  dateSelect.onchange=renderSelectors;
+  weekdaySelect.onchange=renderSelectors;
+  timeSelect.onchange=renderSelectors;
+  renderSelectors();
+}
+function weekdayLabelText(weekdayIso){
+  return ['','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][weekdayIso]||String(weekdayIso);
 }
 function buildSnapshotGrid(payload,readySnapshots){
   const byKey=new Map(readySnapshots.filter(s=>s.serviceDate&&s.departureTime).map(s=>[`${s.serviceDate}|${s.departureTime}`,s]));
@@ -599,12 +654,15 @@ function pendingSnapshot(payload,serviceDate,departureTime){
     reachableStops:0,segmentCount:0,
     availableModes:payload.availableModes||fullModeList,
     tileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/total/{z}/{x}/{y}.png`,
+    totalNormalizedTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/total-normalized/{z}/{x}/{y}.png`,
     totalLogTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/total-log/{z}/{x}/{y}.png`,
     walkTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/walk/{z}/{x}/{y}.png`,
     stopTransportTileOverlayTemplate:`./tiles/${tileUrlPrefix}/${id}/stop-transport/{z}/{x}/{y}.png`,
     contourPolygons:[],
     totalColorMinMinutes:payload.totalColorMinMinutes,
     totalColorMaxMinutes:payload.totalColorMaxMinutes,
+    totalNormalizedColorMinMinutes:payload.totalNormalizedColorMinMinutes,
+    totalNormalizedColorMaxMinutes:payload.totalNormalizedColorMaxMinutes,
     totalLogColorMinMinutes:payload.totalLogColorMinMinutes,
     totalLogColorMaxMinutes:payload.totalLogColorMaxMinutes,
     walkColorMaxMinutes:payload.walkColorMaxMinutes,
@@ -641,6 +699,7 @@ function sampleOverlayMinutes(e){
 }
 function currentColorScale(){
   const p=currentSnapshot();
+  if(state.overlayMode==='totalNormalized')return {min:Number(p.totalNormalizedColorMinMinutes||0),max:Number(p.totalNormalizedColorMaxMinutes||800),log:false};
   if(state.overlayMode==='totalLog')return {min:Number(p.totalLogColorMinMinutes||0),max:Number(p.totalLogColorMaxMinutes||120),log:true};
   return {min:Number(p.totalColorMinMinutes||0),max:Number(p.totalColorMaxMinutes||120),log:false};
 }

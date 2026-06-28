@@ -93,7 +93,7 @@ function render(){
       <input type="checkbox" data-slug="${escapeHtml(origin.slug)}" ${origin.enabled?'checked':''}>
       <span>
         <span class="title">${escapeHtml(origin.label||origin.slug)}</span>
-        <span class="stops">${escapeHtml([...(origin.stopNames||[]),...(origin.stopIds||[])].join(', '))}</span>
+        <span class="stops">${escapeHtml(origin.source||'config')} · ${escapeHtml([...(origin.stopNames||[]),...(origin.stopIds||[])].join(', '))}</span>
       </span>
     </label>
   `).join(''):'<div class="empty">No stop clusters match the filter.</div>';

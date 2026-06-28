@@ -1,0 +1,13 @@
+[Unit]
+Description=Build Buscrawl normalized accessibility monthly/yearly aggregates
+After=buscrawl-transfer-potential-nightly.service buscrawl-dashboard.service
+Wants=buscrawl-dashboard.service
+
+[Service]
+Type=oneshot
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-accessibility-normalized-aggregate.sh
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/accessibility-normalized-aggregate.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/accessibility-normalized-aggregate.log

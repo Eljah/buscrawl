@@ -94,7 +94,7 @@ and writes one independent parquet tree per origin under:
 /home/eljah/data/buscrawl/transfer-potential-accessibility-origins/<origin-slug>
 ```
 
-The config is managed from `/buscrawl/accessibility-admin`. It is based on `accessibility-map-index.json`: each item has `slug`, `label`, `stopIds`, and `enabled`. Keep the enabled set to a practical 20-30 clusters unless server capacity changes.
+The config is managed from `/buscrawl/accessibility-admin`. It starts with already rendered origins from `accessibility-map-index.json` and also exposes a generated catalog of all same-name stop clusters from `RouteTopology`: stops with the same normalized name are connected into one cluster when they are within `BUS_ACCESSIBILITY_STOP_CLUSTER_RADIUS_METERS` walking distance, default `180` meters. Each item has `slug`, `label`, `stopIds`, `stopNames`, `source`, and `enabled`. Keep the enabled set to a practical 20-30 clusters unless server capacity changes.
 
 The legacy all-to-all output tree still exists and can be used manually for diagnostics/backfill experiments:
 
@@ -158,9 +158,32 @@ BUS_ACCESSIBILITY_TILE_MAX_ZOOM=15
 BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM=12
 BUS_ACCESSIBILITY_INDEXED_PNG=true
 BUS_ACCESSIBILITY_PNG_COMPRESSION_QUALITY=0.0
+BUS_ACCESSIBILITY_TOTAL_NORMALIZED_MAX_MINUTES=800
 ```
 
 The base map may still zoom past `12`; the accessibility overlay reuses and stretches the `z=12` PNG tiles for higher zooms. This preserves the color signal while avoiding the explosive `z=13..15` overlay tile count.
+
+`total time normalized` is rendered as a separate `total-normalized` tile layer with a fixed `0..800` minute scale. This layer is the correct visual basis for future cross-day/month/year raster averaging. `total time balanced` is intentionally per-snapshot and should not be averaged as PNG because the same color can mean different minute values. For exact monthly/yearly products, store or derive a numeric raster/time cache first and render PNG as an output artifact; averaging already-paletted PNG should be treated as an approximation only.
+
+Monthly normalized aggregates are produced by `BusAccessibilityNormalizedAggregateJob`, launched by `buscrawl-accessibility-normalized-aggregate.timer` on the first calendar day of the month at `06:30` MSK. The delay is deliberate: the previous day's transfer/accessibility calculations still belong to the previous calendar month and should finish first. The job reads rendered origin JSON from `BUS_ACCESSIBILITY_AGGREGATE_ORIGIN_DIR`, uses only `totalNormalizedTileOverlayTemplate`, averages non-transparent PNG pixels by `month + weekday + 15-minute departure`, and writes aggregate tiles under:
+
+```text
+dashboard-cache/tiles/accessibility-aggregates/<origin>/month/<YYYY-MM>/weekday-<1..7>/<HHmm>/total-normalized
+```
+
+It then rebuilds year-to-date weekday aggregates for the same year by averaging the monthly aggregate PNGs:
+
+```text
+dashboard-cache/tiles/accessibility-aggregates/<origin>/year/<YYYY>/weekday-<1..7>/<HHmm>/total-normalized
+```
+
+Per-origin aggregate metadata is stored separately from daily render JSON:
+
+```text
+dashboard-cache/accessibility-map-aggregates/<origin>.json
+```
+
+`BusDashboardServer` merges this metadata into `/api/accessibility-map?origin=...` as `aggregateSnapshots`; the UI exposes the aggregate datasets only when those records exist.
 
 Measured benchmark on `2026-06-21 08:00`, origin `Tasma` (`12078,12112`), all four overlay modes (`total,totalLog,walk,stopTransport`), transfer-potential source `/home/eljah/data/buscrawl/transfer-potential-tasma-20260621`:
 
