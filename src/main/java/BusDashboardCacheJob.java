@@ -82,6 +82,14 @@ public class BusDashboardCacheJob {
                 "BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE",
                 statsCacheFile.resolveSibling("accessibility-origins-config.json").toString()
         ));
+        boolean derivedSeriesEnabled = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_DERIVED_SERIES_ENABLED",
+                "true"
+        ));
+        boolean forceRebuild = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_FORCE_REBUILD",
+                "false"
+        ));
         String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
 
         Files.createDirectories(statsCacheFile.getParent());
@@ -106,10 +114,13 @@ public class BusDashboardCacheJob {
 
         List<ParquetFileInfo> candidateFiles = listRecentParquetFiles(parquetDir, fileCutoff);
         DashboardState state = loadState(stateFile, fileCutoff, statsCacheFile, routeMovementCacheFile);
+        if (forceRebuild) {
+            state = emptyState();
+        }
         List<ParquetFileInfo> newFiles = selectNewFiles(candidateFiles, state.lastProcessedModifiedAt);
 
-        Map<Instant, Long> statsBuckets = loadStatsBuckets(statsCacheFile, statsStart);
-        RouteCache routeCache = loadRouteCache(routeMovementCacheFile, today, yesterday);
+        Map<Instant, Long> statsBuckets = forceRebuild ? new TreeMap<>() : loadStatsBuckets(statsCacheFile, statsStart);
+        RouteCache routeCache = forceRebuild ? new RouteCache() : loadRouteCache(routeMovementCacheFile, today, yesterday);
         RouteMapper routeMapper = new RouteMapper(null);
 
         System.out.printf(
@@ -142,15 +153,17 @@ public class BusDashboardCacheJob {
                     mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
                     mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
                 }
-                derivedStats = computeDerivedStats(
-                        spark,
-                        trafficBehaviorDir,
-                        transferPotentialDir,
-                        transferPotentialOriginRoot,
-                        accessibilityOriginConfigFile,
-                        statsStart,
-                        now
-                );
+                if (derivedSeriesEnabled) {
+                    derivedStats = computeDerivedStats(
+                            spark,
+                            trafficBehaviorDir,
+                            transferPotentialDir,
+                            transferPotentialOriginRoot,
+                            accessibilityOriginConfigFile,
+                            statsStart,
+                            now
+                    );
+                }
             } finally {
                 spark.stop();
             }
@@ -224,6 +237,10 @@ public class BusDashboardCacheJob {
 
         Map<String, List<Map<String, Object>>> series = new LinkedHashMap<>();
         List<Path> transferRoots = selectTransferPotentialRoots(transferPotentialDir, transferPotentialOriginRoot, accessibilityOriginConfigFile);
+        boolean transferSeriesEnabled = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_TRANSFER_SERIES_ENABLED",
+                "true"
+        ));
         putDerivedSeries(series, "segmentTrips", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("segment-trips"),
@@ -264,34 +281,36 @@ public class BusDashboardCacheJob {
                 rangeEnd,
                 "dwellTimeSeconds > 60"
         ));
-        putDerivedSeries(series, "transferPotentialRequests", () -> collectDerivedSeries(
-                spark,
-                transferRoots,
-                "request-grid-counts",
-                "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
-                null,
-                "possibleRequestCount"
-        ));
-        putDerivedSeries(series, "transferPotentialJourneys", () -> collectDerivedSeries(
-                spark,
-                transferRoots,
-                "journeys",
-                "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
-                null
-        ));
-        putDerivedSeries(series, "transferPotentialFragments", () -> collectDerivedSeries(
-                spark,
-                transferRoots,
-                "journey-fragments",
-                "requestedDepartureAt",
-                rangeStart,
-                rangeEnd,
-                null
-        ));
+        if (transferSeriesEnabled) {
+            putDerivedSeries(series, "transferPotentialRequests", () -> collectDerivedSeries(
+                    spark,
+                    transferRoots,
+                    "request-grid-counts",
+                    "requestedDepartureAt",
+                    rangeStart,
+                    rangeEnd,
+                    null,
+                    "possibleRequestCount"
+            ));
+            putDerivedSeries(series, "transferPotentialJourneys", () -> collectDerivedSeries(
+                    spark,
+                    transferRoots,
+                    "journeys",
+                    "requestedDepartureAt",
+                    rangeStart,
+                    rangeEnd,
+                    null
+            ));
+            putDerivedSeries(series, "transferPotentialFragments", () -> collectDerivedSeries(
+                    spark,
+                    transferRoots,
+                    "journey-fragments",
+                    "requestedDepartureAt",
+                    rangeStart,
+                    rangeEnd,
+                    null
+            ));
+        }
 
         Map<String, Long> totals = new LinkedHashMap<>();
         for (Map.Entry<String, List<Map<String, Object>>> entry : series.entrySet()) {
@@ -443,8 +462,7 @@ public class BusDashboardCacheJob {
     ) {
         Timestamp rangeStartTs = Timestamp.from(rangeStart);
         Timestamp rangeEndTs = Timestamp.from(rangeEnd);
-        Dataset<Row> filtered = spark.read()
-                .parquet(parquetDirs.stream().map(path -> path.toAbsolutePath().toString()).toArray(String[]::new))
+        Dataset<Row> filtered = readParquetUnion(spark, parquetDirs)
                 .filter(col(timestampColumn).isNotNull())
                 .filter(col(timestampColumn).geq(rangeStartTs).and(col(timestampColumn).leq(rangeEndTs)));
         if (filterExpression != null && !filterExpression.isBlank()) {
@@ -477,6 +495,18 @@ public class BusDashboardCacheJob {
             item.put("label", BUCKET_LABEL.format(bucket.atZone(CITY_ZONE)));
             item.put("points", points);
             result.add(item);
+        }
+        return result;
+    }
+
+    private static Dataset<Row> readParquetUnion(SparkSession spark, List<Path> parquetDirs) {
+        Dataset<Row> result = null;
+        for (Path parquetDir : parquetDirs) {
+            Dataset<Row> next = spark.read().parquet(parquetDir.toAbsolutePath().toString());
+            result = result == null ? next : result.unionByName(next, true);
+        }
+        if (result == null) {
+            throw new IllegalArgumentException("No parquet directories to read");
         }
         return result;
     }
