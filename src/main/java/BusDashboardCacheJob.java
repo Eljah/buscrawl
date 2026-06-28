@@ -163,6 +163,8 @@ public class BusDashboardCacheJob {
                             statsStart,
                             now
                     );
+                } else {
+                    derivedStats = loadPreviousDerivedStats(statsCacheFile);
                 }
             } finally {
                 spark.stop();
@@ -623,6 +625,27 @@ public class BusDashboardCacheJob {
         payload.put("derivedSeries", derivedStats.series);
         payload.put("derivedTotals", derivedStats.totals);
         return payload;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static DerivedStats loadPreviousDerivedStats(Path statsCacheFile) {
+        if (!Files.isRegularFile(statsCacheFile)) {
+            return DerivedStats.empty();
+        }
+        try {
+            Map<String, Object> payload = MAPPER.readValue(statsCacheFile.toFile(), MAP_TYPE);
+            Object series = payload.get("derivedSeries");
+            Object totals = payload.get("derivedTotals");
+            if (series instanceof Map && totals instanceof Map) {
+                return new DerivedStats(
+                        (Map<String, List<Map<String, Object>>>) series,
+                        (Map<String, Long>) totals
+                );
+            }
+        } catch (Exception e) {
+            System.err.println("BusDashboardCacheJob: failed to load previous derived stats: " + e.getMessage());
+        }
+        return DerivedStats.empty();
     }
 
     private static Instant floorToBucket(Instant instant) {
