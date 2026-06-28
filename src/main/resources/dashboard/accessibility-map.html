@@ -176,7 +176,9 @@ function overlayTileUrl(z,x,y){
 }
 function overlaySourceZoom(){
   const maxOverlay=Number(currentSnapshot().overlayTileMaxZoom||state.payload?.overlayTileMaxZoom||state.payload?.tileMaxZoom||state.zoom);
-  return Math.min(state.zoom,maxOverlay);
+  const template=currentSnapshot().tileOverlayTemplate||'';
+  const renderCacheMax=template.includes('accessibility-v4-render-cache')?11:maxOverlay;
+  return Math.min(state.zoom,maxOverlay,renderCacheMax);
 }
 function currentSnapshot(){
   return state.currentSnapshot||state.payload||{};
