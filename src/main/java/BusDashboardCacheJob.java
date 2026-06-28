@@ -74,6 +74,14 @@ public class BusDashboardCacheJob {
                 "BUS_TRANSFER_POTENTIAL_DIR",
                 trafficBehaviorDir.resolveSibling("transfer-potential").toString()
         ));
+        Path transferPotentialOriginRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_TRANSFER_POTENTIAL_ORIGIN_ROOT",
+                transferPotentialDir.resolveSibling("transfer-potential-accessibility-origins").toString()
+        ));
+        Path accessibilityOriginConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE",
+                statsCacheFile.resolveSibling("accessibility-origins-config.json").toString()
+        ));
         String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
 
         Files.createDirectories(statsCacheFile.getParent());
@@ -134,7 +142,15 @@ public class BusDashboardCacheJob {
                     mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
                     mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
                 }
-                derivedStats = computeDerivedStats(spark, trafficBehaviorDir, transferPotentialDir, statsStart, now);
+                derivedStats = computeDerivedStats(
+                        spark,
+                        trafficBehaviorDir,
+                        transferPotentialDir,
+                        transferPotentialOriginRoot,
+                        accessibilityOriginConfigFile,
+                        statsStart,
+                        now
+                );
             } finally {
                 spark.stop();
             }
@@ -193,12 +209,21 @@ public class BusDashboardCacheJob {
         previousDayMap.forEach((routeNumber, instant) -> routeCache.previousDay.merge(routeNumber, instant, BusDashboardCacheJob::maxInstant));
     }
 
-    private static DerivedStats computeDerivedStats(SparkSession spark, Path trafficBehaviorDir, Path transferPotentialDir, Instant rangeStart, Instant rangeEnd) {
+    private static DerivedStats computeDerivedStats(
+            SparkSession spark,
+            Path trafficBehaviorDir,
+            Path transferPotentialDir,
+            Path transferPotentialOriginRoot,
+            Path accessibilityOriginConfigFile,
+            Instant rangeStart,
+            Instant rangeEnd
+    ) {
         if (!Files.exists(trafficBehaviorDir) && !Files.exists(transferPotentialDir)) {
             return DerivedStats.empty();
         }
 
         Map<String, List<Map<String, Object>>> series = new LinkedHashMap<>();
+        List<Path> transferRoots = selectTransferPotentialRoots(transferPotentialDir, transferPotentialOriginRoot, accessibilityOriginConfigFile);
         putDerivedSeries(series, "segmentTrips", () -> collectDerivedSeries(
                 spark,
                 trafficBehaviorDir.resolve("segment-trips"),
@@ -241,7 +266,8 @@ public class BusDashboardCacheJob {
         ));
         putDerivedSeries(series, "transferPotentialRequests", () -> collectDerivedSeries(
                 spark,
-                transferPotentialDir.resolve("request-grid-counts"),
+                transferRoots,
+                "request-grid-counts",
                 "requestedDepartureAt",
                 rangeStart,
                 rangeEnd,
@@ -250,7 +276,8 @@ public class BusDashboardCacheJob {
         ));
         putDerivedSeries(series, "transferPotentialJourneys", () -> collectDerivedSeries(
                 spark,
-                transferPotentialDir.resolve("journeys"),
+                transferRoots,
+                "journeys",
                 "requestedDepartureAt",
                 rangeStart,
                 rangeEnd,
@@ -258,7 +285,8 @@ public class BusDashboardCacheJob {
         ));
         putDerivedSeries(series, "transferPotentialFragments", () -> collectDerivedSeries(
                 spark,
-                transferPotentialDir.resolve("journey-fragments"),
+                transferRoots,
+                "journey-fragments",
                 "requestedDepartureAt",
                 rangeStart,
                 rangeEnd,
@@ -311,6 +339,38 @@ public class BusDashboardCacheJob {
             String filterExpression
     ) {
         return collectDerivedSeries(spark, parquetDir, timestampColumn, rangeStart, rangeEnd, filterExpression, null);
+    }
+
+    private static List<Map<String, Object>> collectDerivedSeries(
+            SparkSession spark,
+            List<Path> roots,
+            String childDir,
+            String timestampColumn,
+            Instant rangeStart,
+            Instant rangeEnd,
+            String filterExpression
+    ) {
+        return collectDerivedSeries(spark, roots, childDir, timestampColumn, rangeStart, rangeEnd, filterExpression, null);
+    }
+
+    private static List<Map<String, Object>> collectDerivedSeries(
+            SparkSession spark,
+            List<Path> roots,
+            String childDir,
+            String timestampColumn,
+            Instant rangeStart,
+            Instant rangeEnd,
+            String filterExpression,
+            String sumColumn
+    ) {
+        List<Path> readable = roots.stream()
+                .map(root -> root.resolve(childDir))
+                .filter(BusDashboardCacheJob::hasReadableParquetFiles)
+                .collect(Collectors.toList());
+        if (readable.isEmpty()) {
+            return List.of();
+        }
+        return collectDerivedSeries(spark, readable, timestampColumn, rangeStart, rangeEnd, filterExpression, sumColumn);
     }
 
     private static List<Map<String, Object>> collectLatestDerivedSeries(
@@ -369,11 +429,22 @@ public class BusDashboardCacheJob {
         if (!hasReadableParquetFiles(parquetDir)) {
             return List.of();
         }
+        return collectDerivedSeries(spark, List.of(parquetDir), timestampColumn, rangeStart, rangeEnd, filterExpression, sumColumn);
+    }
 
+    private static List<Map<String, Object>> collectDerivedSeries(
+            SparkSession spark,
+            List<Path> parquetDirs,
+            String timestampColumn,
+            Instant rangeStart,
+            Instant rangeEnd,
+            String filterExpression,
+            String sumColumn
+    ) {
         Timestamp rangeStartTs = Timestamp.from(rangeStart);
         Timestamp rangeEndTs = Timestamp.from(rangeEnd);
         Dataset<Row> filtered = spark.read()
-                .parquet(parquetDir.toAbsolutePath().toString())
+                .parquet(parquetDirs.stream().map(path -> path.toAbsolutePath().toString()).toArray(String[]::new))
                 .filter(col(timestampColumn).isNotNull())
                 .filter(col(timestampColumn).geq(rangeStartTs).and(col(timestampColumn).leq(rangeEndTs)));
         if (filterExpression != null && !filterExpression.isBlank()) {
@@ -408,6 +479,57 @@ public class BusDashboardCacheJob {
             result.add(item);
         }
         return result;
+    }
+
+    private static List<Path> selectTransferPotentialRoots(
+            Path transferPotentialDir,
+            Path transferPotentialOriginRoot,
+            Path accessibilityOriginConfigFile
+    ) {
+        List<String> enabledSlugs = loadEnabledOriginSlugs(accessibilityOriginConfigFile);
+        List<Path> roots = new ArrayList<>();
+        if (!enabledSlugs.isEmpty() && Files.isDirectory(transferPotentialOriginRoot)) {
+            for (String slug : enabledSlugs) {
+                Path root = transferPotentialOriginRoot.resolve(slug);
+                if (Files.isDirectory(root)) {
+                    roots.add(root);
+                }
+            }
+        }
+        if (!roots.isEmpty()) {
+            return roots;
+        }
+        return Files.isDirectory(transferPotentialDir) ? List.of(transferPotentialDir) : List.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> loadEnabledOriginSlugs(Path configFile) {
+        if (!Files.isRegularFile(configFile)) {
+            return List.of();
+        }
+        try {
+            Map<String, Object> payload = MAPPER.readValue(configFile.toFile(), MAP_TYPE);
+            Object originsValue = payload.get("origins");
+            if (!(originsValue instanceof List<?>)) {
+                return List.of();
+            }
+            List<String> result = new ArrayList<>();
+            for (Object item : (List<?>) originsValue) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<String, Object> origin = (Map<String, Object>) item;
+                Object slug = origin.get("slug");
+                Object enabled = origin.get("enabled");
+                if (slug != null && Boolean.TRUE.equals(enabled)) {
+                    result.add(String.valueOf(slug));
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            System.err.printf("BusDashboardCacheJob: failed to read accessibility origin config %s: %s%n", configFile, e);
+            return List.of();
+        }
     }
 
     private static boolean hasReadableParquetFiles(Path parquetDir) {

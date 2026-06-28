@@ -11,6 +11,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class BusDashboardServer {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final ZoneId CITY_ZONE = ZoneId.of(System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow"));
+    private static final String ACCESSIBILITY_ADMIN_PASSWORD = "Tatarstan1920";
 
     private final AtomicReference<byte[]> cachedStatsJson = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedRouteMovementJson = new AtomicReference<>();
@@ -50,6 +52,7 @@ public class BusDashboardServer {
     private final AtomicReference<byte[]> cachedRubberinessHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedSpeedMapHtml = new AtomicReference<>();
     private final AtomicReference<byte[]> cachedAccessibilityMapHtml = new AtomicReference<>();
+    private final AtomicReference<byte[]> cachedAccessibilityAdminHtml = new AtomicReference<>();
     private final Path statsCacheFile;
     private final Path routeMovementCacheFile;
     private final Path traceCacheFile;
@@ -60,6 +63,7 @@ public class BusDashboardServer {
     private final Path accessibilityMapCacheFile;
     private final Path accessibilityMapIndexFile;
     private final Path accessibilityMapDir;
+    private final Path accessibilityOriginConfigFile;
     private final Path mapConfigFile;
     private final Path tileRoot;
     private final Path trafficBehaviorDir;
@@ -76,6 +80,7 @@ public class BusDashboardServer {
             Path accessibilityMapCacheFile,
             Path accessibilityMapIndexFile,
             Path accessibilityMapDir,
+            Path accessibilityOriginConfigFile,
             Path mapConfigFile,
             Path tileRoot,
             Path trafficBehaviorDir,
@@ -91,6 +96,7 @@ public class BusDashboardServer {
         this.accessibilityMapCacheFile = accessibilityMapCacheFile;
         this.accessibilityMapIndexFile = accessibilityMapIndexFile;
         this.accessibilityMapDir = accessibilityMapDir;
+        this.accessibilityOriginConfigFile = accessibilityOriginConfigFile;
         this.mapConfigFile = mapConfigFile;
         this.tileRoot = tileRoot;
         this.trafficBehaviorDir = trafficBehaviorDir;
@@ -138,6 +144,10 @@ public class BusDashboardServer {
                 "BUS_DASHBOARD_ACCESSIBILITY_MAP_DIR",
                 statsCacheFile.resolveSibling("accessibility-map-origins").toString()
         ));
+        Path accessibilityOriginConfigFile = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_ORIGIN_CONFIG_FILE",
+                statsCacheFile.resolveSibling("accessibility-origins-config.json").toString()
+        ));
         Path mapConfigFile = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_MAP_CONFIG_FILE",
                 statsCacheFile.resolveSibling("map-config.json").toString()
@@ -163,6 +173,7 @@ public class BusDashboardServer {
                 accessibilityMapCacheFile,
                 accessibilityMapIndexFile,
                 accessibilityMapDir,
+                accessibilityOriginConfigFile,
                 mapConfigFile,
                 tileRoot,
                 trafficBehaviorDir,
@@ -180,6 +191,7 @@ public class BusDashboardServer {
         cachedRubberinessHtml.set(loadResourceBytes("dashboard/rubberiness.html"));
         cachedSpeedMapHtml.set(loadResourceBytes("dashboard/speed-map.html"));
         cachedAccessibilityMapHtml.set(loadResourceBytes("dashboard/accessibility-map.html"));
+        cachedAccessibilityAdminHtml.set(loadResourceBytes("dashboard/accessibility-admin.html"));
         refreshCache();
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -198,6 +210,7 @@ public class BusDashboardServer {
         server.createContext("/api/speed-map", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedSpeedMapJson.get()));
         server.createContext("/api/accessibility-map", this::handleAccessibilityMapRequest);
         server.createContext("/api/accessibility-map-index", this::handleAccessibilityMapIndexRequest);
+        server.createContext("/api/accessibility-origins-config", this::handleAccessibilityOriginConfigRequest);
         server.createContext("/api/map-config", exchange -> writeResponse(exchange, 200, "application/json; charset=utf-8", cachedMapConfigJson.get()));
         server.createContext("/routes-last-movement", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRouteMovementHtml.get()));
         server.createContext("/bus-traces-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedTraceMapHtml.get()));
@@ -206,6 +219,7 @@ public class BusDashboardServer {
         server.createContext("/rubberiness", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedRubberinessHtml.get()));
         server.createContext("/speed-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedSpeedMapHtml.get()));
         server.createContext("/accessibility-map", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedAccessibilityMapHtml.get()));
+        server.createContext("/accessibility-admin", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedAccessibilityAdminHtml.get()));
         server.createContext("/tiles", this::handleTileRequest);
         server.createContext("/", exchange -> writeResponse(exchange, 200, "text/html; charset=utf-8", cachedIndexHtml.get()));
         server.setExecutor(Executors.newCachedThreadPool());
@@ -1013,8 +1027,202 @@ public class BusDashboardServer {
     }
 
     private void handleAccessibilityMapIndexRequest(HttpExchange exchange) throws IOException {
-        byte[] body = loadJsonCache(accessibilityMapIndexFile, emptyAccessibilityMapIndexPayload());
-        writeResponse(exchange, 200, "application/json; charset=utf-8", body);
+        writeResponse(exchange, 200, "application/json; charset=utf-8", accessibilityMapIndexPayload());
+    }
+
+    private void handleAccessibilityOriginConfigRequest(HttpExchange exchange) throws IOException {
+        String method = exchange.getRequestMethod();
+        if ("GET".equalsIgnoreCase(method)) {
+            writeResponse(exchange, 200, "application/json; charset=utf-8", accessibilityOriginConfigPayload());
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(method)) {
+            writeResponse(exchange, 405, "application/json; charset=utf-8", errorPayload("Method not allowed"));
+            return;
+        }
+        byte[] requestBody = exchange.getRequestBody().readAllBytes();
+        Map<String, Object> incoming;
+        try {
+            incoming = MAPPER.readValue(requestBody, new TypeReference<>() {
+            });
+        } catch (Exception e) {
+            writeResponse(exchange, 400, "application/json; charset=utf-8", errorPayload("Invalid JSON payload"));
+            return;
+        }
+        if (!ACCESSIBILITY_ADMIN_PASSWORD.equals(String.valueOf(incoming.get("password")))) {
+            writeResponse(exchange, 403, "application/json; charset=utf-8", errorPayload("Forbidden"));
+            return;
+        }
+        Map<String, Object> payload = normalizeAccessibilityOriginConfig(incoming);
+        payload.put("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        writeJsonAtomic(accessibilityOriginConfigFile, payload);
+        writeResponse(exchange, 200, "application/json; charset=utf-8", MAPPER.writeValueAsBytes(payload));
+    }
+
+    @SuppressWarnings("unchecked")
+    private byte[] accessibilityMapIndexPayload() throws IOException {
+        Map<String, Object> index = MAPPER.readValue(loadJsonCache(accessibilityMapIndexFile, emptyAccessibilityMapIndexPayload()), new TypeReference<>() {
+        });
+        Map<String, Object> config = Files.isRegularFile(accessibilityOriginConfigFile)
+                ? MAPPER.readValue(accessibilityOriginConfigFile.toFile(), new TypeReference<>() {
+                })
+                : Map.of();
+        Map<String, Boolean> enabledBySlug = enabledOriginsBySlug(config);
+        List<Map<String, Object>> origins = new ArrayList<>();
+        Object indexOrigins = index.get("origins");
+        if (indexOrigins instanceof List<?>) {
+            for (Object item : (List<?>) indexOrigins) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> origin = (Map<?, ?>) item;
+                String slug = String.valueOf(origin.get("slug") == null ? "" : origin.get("slug"));
+                Map<String, Object> normalized = enrichAccessibilityOrigin(slug, origin);
+                normalized.put("enabled", enabledBySlug.getOrDefault(slug, true));
+                origins.add(normalized);
+            }
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("status", "ok");
+        payload.put("updatedAt", config.getOrDefault("updatedAt", index.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString())));
+        payload.put("origins", origins);
+        return MAPPER.writeValueAsBytes(payload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private byte[] accessibilityOriginConfigPayload() throws IOException {
+        Map<String, Object> index = MAPPER.readValue(loadJsonCache(accessibilityMapIndexFile, emptyAccessibilityMapIndexPayload()), new TypeReference<>() {
+        });
+        Map<String, Object> config = Files.isRegularFile(accessibilityOriginConfigFile)
+                ? MAPPER.readValue(accessibilityOriginConfigFile.toFile(), new TypeReference<>() {
+                })
+                : Map.of();
+        Map<String, Boolean> enabledBySlug = enabledOriginsBySlug(config);
+        List<Map<String, Object>> origins = new ArrayList<>();
+        Object indexOrigins = index.get("origins");
+        if (indexOrigins instanceof List<?>) {
+            for (Object item : (List<?>) indexOrigins) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> origin = (Map<?, ?>) item;
+                String slug = String.valueOf(origin.get("slug") == null ? "" : origin.get("slug"));
+                Map<String, Object> normalized = enrichAccessibilityOrigin(slug, origin);
+                normalized.put("enabled", enabledBySlug.getOrDefault(slug, true));
+                origins.add(normalized);
+            }
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updatedAt", config.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString()));
+        payload.put("status", "ok");
+        payload.put("originRoot", System.getenv().getOrDefault(
+                "BUS_TRANSFER_POTENTIAL_ORIGIN_ROOT",
+                "/home/eljah/data/buscrawl/transfer-potential-accessibility-origins"
+        ));
+        payload.put("origins", origins);
+        return MAPPER.writeValueAsBytes(payload);
+    }
+
+    private static Map<String, Boolean> enabledOriginsBySlug(Map<String, Object> config) {
+        Map<String, Boolean> enabledBySlug = new LinkedHashMap<>();
+        Object configuredOrigins = config.get("origins");
+        if (configuredOrigins instanceof List<?>) {
+            for (Object item : (List<?>) configuredOrigins) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> origin = (Map<?, ?>) item;
+                if (origin.get("slug") != null) {
+                    enabledBySlug.put(String.valueOf(origin.get("slug")), Boolean.TRUE.equals(origin.get("enabled")));
+                }
+            }
+        }
+        return enabledBySlug;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> enrichAccessibilityOrigin(String slug, Map<?, ?> indexOrigin) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        normalized.put("slug", slug);
+        Object defaultLabel = indexOrigin.get("label") == null ? slug : indexOrigin.get("label");
+        Object stopIds = indexOrigin.get("stopIds") == null ? List.of() : indexOrigin.get("stopIds");
+        normalized.put("label", defaultLabel);
+        normalized.put("stopIds", stopIds);
+        normalized.put("stopNames", List.of());
+        Path originFile = accessibilityMapDir.resolve(slug + ".json").normalize();
+        if (!originFile.startsWith(accessibilityMapDir) || !Files.isRegularFile(originFile)) {
+            return normalized;
+        }
+        try {
+            Map<String, Object> originPayload = MAPPER.readValue(originFile.toFile(), new TypeReference<>() {
+            });
+            Object originStopName = originPayload.get("originStopName");
+            if (originStopName != null && !String.valueOf(originStopName).isBlank()) {
+                normalized.put("label", originStopName);
+            }
+            Object originStops = originPayload.get("originStops");
+            if (originStops instanceof List<?>) {
+                List<String> ids = new ArrayList<>();
+                List<String> names = new ArrayList<>();
+                for (Object stopValue : (List<?>) originStops) {
+                    if (!(stopValue instanceof Map<?, ?>)) {
+                        continue;
+                    }
+                    Map<?, ?> stop = (Map<?, ?>) stopValue;
+                    if (stop.get("stopId") != null) {
+                        ids.add(String.valueOf(stop.get("stopId")));
+                    }
+                    if (stop.get("stopName") != null) {
+                        names.add(String.valueOf(stop.get("stopName")));
+                    }
+                }
+                if (!ids.isEmpty()) {
+                    normalized.put("stopIds", ids);
+                }
+                if (!names.isEmpty()) {
+                    normalized.put("stopNames", names);
+                }
+            }
+        } catch (Exception ignored) {
+            return normalized;
+        }
+        return normalized;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> normalizeAccessibilityOriginConfig(Map<String, Object> incoming) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("status", "ok");
+        List<Map<String, Object>> origins = new ArrayList<>();
+        Object originsValue = incoming.get("origins");
+        if (originsValue instanceof List<?>) {
+            for (Object item : (List<?>) originsValue) {
+                if (!(item instanceof Map<?, ?>)) {
+                    continue;
+                }
+                Map<?, ?> origin = (Map<?, ?>) item;
+                String slug = String.valueOf(origin.get("slug") == null ? "" : origin.get("slug")).trim();
+                if (!slug.matches("[a-zA-Z0-9_-]+")) {
+                    continue;
+                }
+                Map<String, Object> normalized = new LinkedHashMap<>();
+                normalized.put("slug", slug);
+                normalized.put("label", String.valueOf(origin.get("label") == null ? slug : origin.get("label")));
+                Object stopIds = origin.get("stopIds");
+                normalized.put("stopIds", stopIds instanceof List<?> ? stopIds : List.of());
+                normalized.put("enabled", Boolean.TRUE.equals(origin.get("enabled")));
+                origins.add(normalized);
+            }
+        }
+        payload.put("origins", origins);
+        return payload;
+    }
+
+    private static void writeJsonAtomic(Path targetFile, Object payload) throws IOException {
+        Files.createDirectories(targetFile.getParent());
+        Path tempFile = Files.createTempFile(targetFile.getParent(), targetFile.getFileName().toString(), ".tmp");
+        MAPPER.writeValue(tempFile.toFile(), payload);
+        Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
     }
 
     private static String parquetGlob(Path dir) {

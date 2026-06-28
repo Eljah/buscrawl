@@ -166,6 +166,10 @@ public class BusAccessibilityMapCacheJob {
                 "BUS_ACCESSIBILITY_RENDER_CACHE_FILE",
                 outputFile.getParent().resolve("accessibility-render-cache.bin.gz").toString()
         ));
+        Path householdsFile = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_HOUSEHOLDS_FILE",
+                "/home/kazanparking/kazan-parking-local/osm-cache/codificator-geo.json.bak.20260617082853"
+        ));
         if (Boolean.parseBoolean(System.getenv().getOrDefault("BUS_ACCESSIBILITY_BUILD_WALK_CACHE", "false"))) {
             Map<String, StopPoint> stopsById = loadStopsById();
             List<RoadWay> roads = loadRoadWays(osmRoadsFile);
@@ -201,6 +205,7 @@ public class BusAccessibilityMapCacheJob {
             RoadGraph roadGraph = RoadGraph.build(roads);
             WalkCache walkCache = Files.exists(walkCacheFile) ? readWalkCache(walkCacheFile) : null;
             RenderCache renderCache = Files.exists(renderCacheFile) ? readRenderCache(renderCacheFile) : null;
+            HouseholdIndex householdIndex = loadHouseholdIndex(householdsFile);
             boolean useTransferPotential = "transfer-potential".equalsIgnoreCase(sourceMode);
             List<StopPoint> transferOriginStops = useTransferPotential
                     ? selectOriginStops(stopsById, originStopQuery)
@@ -283,7 +288,7 @@ public class BusAccessibilityMapCacheJob {
                         logSnapshotStage(snapshotId, "render stopTransport tiles done");
                     }
                     logSnapshotStage(snapshotId, "calculate contours start");
-                    ContourResult contourResult = calculateContourResult(segments, renderCache);
+                    ContourResult contourResult = calculateContourResult(segments, renderCache, householdIndex);
                     logSnapshotStage(snapshotId, "calculate contours done");
                     snapshots.add(new SnapshotPayload(
                             snapshotId,
@@ -1453,6 +1458,65 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
+    private static HouseholdIndex loadHouseholdIndex(Path householdsFile) {
+        if (householdsFile == null || !Files.isRegularFile(householdsFile)) {
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusAccessibilityMapCacheJob: household file is not available, household contour stats disabled: %s%n",
+                    householdsFile
+            );
+            return HouseholdIndex.empty();
+        }
+        long started = System.currentTimeMillis();
+        try {
+            String json = Files.readString(householdsFile);
+            if (!json.isEmpty() && json.charAt(0) == '\ufeff') {
+                json = json.substring(1);
+            }
+            JSONArray array = new JSONArray(json);
+            Map<Long, Double> householdsByCell = new HashMap<>();
+            int accepted = 0;
+            double totalHouseholds = 0.0;
+            double cellMeters = Math.max(25.0, SAMPLE_METERS);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject object = array.optJSONObject(i);
+                if (object == null) {
+                    continue;
+                }
+                double lat = object.optDouble("lat", Double.NaN);
+                double lon = object.optDouble("lon", Double.NaN);
+                if (!Double.isFinite(lat) || !Double.isFinite(lon)) {
+                    continue;
+                }
+                double flats = object.optDouble("flats", 0.0);
+                double households = Math.max(1.0, flats);
+                Point point = new Point(lat, lon);
+                long key = contourCellKey(contourAreaCellX(point, cellMeters), contourAreaCellY(point, cellMeters));
+                householdsByCell.merge(key, households, Double::sum);
+                totalHouseholds += households;
+                accepted++;
+            }
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusAccessibilityMapCacheJob: loaded households %s rows=%d cells=%d households=%.1f elapsedSec=%.1f%n",
+                    householdsFile,
+                    accepted,
+                    householdsByCell.size(),
+                    totalHouseholds,
+                    (System.currentTimeMillis() - started) / 1000.0
+            );
+            return new HouseholdIndex(householdsByCell, accepted, totalHouseholds);
+        } catch (Exception e) {
+            System.err.printf(
+                    Locale.ROOT,
+                    "BusAccessibilityMapCacheJob: failed to load households from %s: %s%n",
+                    householdsFile,
+                    e
+            );
+            return HouseholdIndex.empty();
+        }
+    }
+
     private static WalkCache readWalkCache(Path cacheFile) throws Exception {
         long started = System.currentTimeMillis();
         List<CachedSegmentTemplate> templates = new ArrayList<>();
@@ -2278,38 +2342,53 @@ public class BusAccessibilityMapCacheJob {
     }
 
     private static ContourStats calculateContourStats(List<AccessibleSegment> segments) {
-        return calculateContourResult(segments, null).stats;
+        return calculateContourResult(segments, null, HouseholdIndex.empty()).stats;
     }
 
     private static ContourResult calculateContourResult(List<AccessibleSegment> segments, RenderCache renderCache) {
+        return calculateContourResult(segments, renderCache, HouseholdIndex.empty());
+    }
+
+    private static ContourResult calculateContourResult(
+            List<AccessibleSegment> segments,
+            RenderCache renderCache,
+            HouseholdIndex householdIndex
+    ) {
         List<ContourPolygon> polygons = new ArrayList<>();
         double area15 = 0.0;
         double area30 = 0.0;
         double area60 = 0.0;
+        double households15 = 0.0;
+        double households30 = 0.0;
+        double households60 = 0.0;
         for (double threshold : CONTOUR_THRESHOLDS_MINUTES) {
             ContourThresholdResult thresholdResult = renderCache == null
-                    ? contourThresholdResult(segments, threshold)
-                    : contourThresholdResult(segments, threshold, renderCache);
+                    ? contourThresholdResult(segments, threshold, householdIndex)
+                    : contourThresholdResult(segments, threshold, renderCache, householdIndex);
             polygons.addAll(thresholdResult.polygons);
             if (threshold <= 15.0) {
                 area15 = thresholdResult.areaSquareKm;
+                households15 = thresholdResult.households;
             } else if (threshold <= 30.0) {
                 area30 = thresholdResult.areaSquareKm;
+                households30 = thresholdResult.households;
             } else if (threshold <= 60.0) {
                 area60 = thresholdResult.areaSquareKm;
+                households60 = thresholdResult.households;
             }
         }
-        return new ContourResult(new ContourStats(area15, area30, area60), polygons);
+        return new ContourResult(new ContourStats(area15, area30, area60, households15, households30, households60), polygons);
     }
 
     private static ContourThresholdResult contourThresholdResult(
             List<AccessibleSegment> segments,
             double thresholdMinutes,
-            RenderCache renderCache
+            RenderCache renderCache,
+            HouseholdIndex householdIndex
     ) {
         if (segments.stream().anyMatch(segment -> segment.segmentIndex < 0)
                 || renderCache.contourCellOffsets.length < renderCache.segmentCount + 1) {
-            return contourThresholdResult(segments, thresholdMinutes);
+            return contourThresholdResult(segments, thresholdMinutes, householdIndex);
         }
         Set<Long> occupiedCells = new HashSet<>();
         double cellMeters = Math.max(25.0, SAMPLE_METERS);
@@ -2339,11 +2418,16 @@ public class BusAccessibilityMapCacheJob {
                     .map(BusAccessibilityMapCacheJob::meterPointToGeoPoint)
                     .collect(Collectors.toList())));
         }
-        return new ContourThresholdResult(areaSquareMeters / 1_000_000.0, polygons);
+        return new ContourThresholdResult(areaSquareMeters / 1_000_000.0, householdIndex.sumHouseholds(occupiedCells), polygons);
     }
 
-    private static ContourThresholdResult contourThresholdResult(List<AccessibleSegment> segments, double thresholdMinutes) {
+    private static ContourThresholdResult contourThresholdResult(
+            List<AccessibleSegment> segments,
+            double thresholdMinutes,
+            HouseholdIndex householdIndex
+    ) {
         Set<String> occupiedCells = new HashSet<>();
+        Set<Long> occupiedCellKeys = new HashSet<>();
         double cellMeters = Math.max(25.0, SAMPLE_METERS);
         int radiusCells = Math.max(0, (int) Math.ceil(CONTOUR_ENVELOPE_METERS / cellMeters));
         for (AccessibleSegment segment : segments) {
@@ -2355,6 +2439,7 @@ public class BusAccessibilityMapCacheJob {
                 double t = step / (double) steps;
                 Point point = interpolate(segment.from, segment.to, t);
                 addContourAreaCells(occupiedCells, point, cellMeters, radiusCells);
+                addContourAreaCellKeys(occupiedCellKeys, point, cellMeters, radiusCells);
             }
         }
         List<ContourPolygon> polygons = new ArrayList<>();
@@ -2373,7 +2458,7 @@ public class BusAccessibilityMapCacheJob {
                     .map(BusAccessibilityMapCacheJob::meterPointToGeoPoint)
                     .collect(Collectors.toList())));
         }
-        return new ContourThresholdResult(areaSquareMeters / 1_000_000.0, polygons);
+        return new ContourThresholdResult(areaSquareMeters / 1_000_000.0, householdIndex.sumHouseholds(occupiedCellKeys), polygons);
     }
 
     private static void addContourAreaCells(Set<String> occupiedCells, Point point, double cellMeters, int radiusCells) {
@@ -2620,7 +2705,10 @@ public class BusAccessibilityMapCacheJob {
                             snapshot.segmentCount,
                             snapshot.contourStats.area15SquareKm,
                             snapshot.contourStats.area30SquareKm,
-                            snapshot.contourStats.area60SquareKm
+                            snapshot.contourStats.area60SquareKm,
+                            snapshot.contourStats.households15,
+                            snapshot.contourStats.households30,
+                            snapshot.contourStats.households60
                     ))
                     .collect(Collectors.toList());
             spark.createDataFrame(rows, contourStatsSchema())
@@ -2643,7 +2731,10 @@ public class BusAccessibilityMapCacheJob {
                 new StructField("segmentCount", DataTypes.IntegerType, false, Metadata.empty()),
                 new StructField("area15SquareKm", DataTypes.DoubleType, false, Metadata.empty()),
                 new StructField("area30SquareKm", DataTypes.DoubleType, false, Metadata.empty()),
-                new StructField("area60SquareKm", DataTypes.DoubleType, false, Metadata.empty())
+                new StructField("area60SquareKm", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("households15", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("households30", DataTypes.DoubleType, false, Metadata.empty()),
+                new StructField("households60", DataTypes.DoubleType, false, Metadata.empty())
         });
     }
 
@@ -2756,6 +2847,9 @@ public class BusAccessibilityMapCacheJob {
         payload.put("area15SquareKm", round2(snapshot.contourStats.area15SquareKm));
         payload.put("area30SquareKm", round2(snapshot.contourStats.area30SquareKm));
         payload.put("area60SquareKm", round2(snapshot.contourStats.area60SquareKm));
+        payload.put("households15", round1(snapshot.contourStats.households15));
+        payload.put("households30", round1(snapshot.contourStats.households30));
+        payload.put("households60", round1(snapshot.contourStats.households60));
         return payload;
     }
 
@@ -3298,6 +3392,35 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
+    private static final class HouseholdIndex {
+        private static final HouseholdIndex EMPTY = new HouseholdIndex(Map.of(), 0, 0.0);
+
+        private final Map<Long, Double> householdsByCell;
+        private final int sourceRows;
+        private final double totalHouseholds;
+
+        private HouseholdIndex(Map<Long, Double> householdsByCell, int sourceRows, double totalHouseholds) {
+            this.householdsByCell = householdsByCell;
+            this.sourceRows = sourceRows;
+            this.totalHouseholds = totalHouseholds;
+        }
+
+        private static HouseholdIndex empty() {
+            return EMPTY;
+        }
+
+        private double sumHouseholds(Set<Long> occupiedCells) {
+            if (householdsByCell.isEmpty() || occupiedCells.isEmpty()) {
+                return 0.0;
+            }
+            double sum = 0.0;
+            for (Long cell : occupiedCells) {
+                sum += householdsByCell.getOrDefault(cell, 0.0);
+            }
+            return sum;
+        }
+    }
+
     private static final class RenderCache {
         private final int segmentCount;
         private final List<CachedTile> tiles;
@@ -3591,11 +3714,24 @@ public class BusAccessibilityMapCacheJob {
         private final double area15SquareKm;
         private final double area30SquareKm;
         private final double area60SquareKm;
+        private final double households15;
+        private final double households30;
+        private final double households60;
 
-        private ContourStats(double area15SquareKm, double area30SquareKm, double area60SquareKm) {
+        private ContourStats(
+                double area15SquareKm,
+                double area30SquareKm,
+                double area60SquareKm,
+                double households15,
+                double households30,
+                double households60
+        ) {
             this.area15SquareKm = area15SquareKm;
             this.area30SquareKm = area30SquareKm;
             this.area60SquareKm = area60SquareKm;
+            this.households15 = households15;
+            this.households30 = households30;
+            this.households60 = households60;
         }
     }
 
@@ -3611,10 +3747,12 @@ public class BusAccessibilityMapCacheJob {
 
     private static final class ContourThresholdResult {
         private final double areaSquareKm;
+        private final double households;
         private final List<ContourPolygon> polygons;
 
-        private ContourThresholdResult(double areaSquareKm, List<ContourPolygon> polygons) {
+        private ContourThresholdResult(double areaSquareKm, double households, List<ContourPolygon> polygons) {
             this.areaSquareKm = areaSquareKm;
+            this.households = households;
             this.polygons = polygons;
         }
     }

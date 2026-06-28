@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accessibility Origins</title>
+  <style>
+    :root { --bg:#eef1e5; --panel:#fffdf6; --ink:#19231d; --muted:#657267; --line:rgba(25,35,29,.12); --accent:#0d6b66; --danger:#9b2f1f; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Georgia,"Times New Roman",serif; color:var(--ink); background:linear-gradient(180deg,#f6f0df,var(--bg)); }
+    .wrap { max-width:1100px; margin:0 auto; padding:28px 18px 48px; }
+    .topline { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+    h1 { margin:0; font-size:clamp(32px,5vw,58px); line-height:.95; letter-spacing:-.04em; }
+    a { color:var(--ink); text-decoration:none; border-bottom:1px solid rgba(25,35,29,.28); }
+    .subtitle,.meta,.status { color:var(--muted); line-height:1.45; }
+    .card { margin-top:18px; background:var(--panel); border:1px solid var(--line); border-radius:22px; box-shadow:0 18px 46px rgba(25,35,29,.12); padding:18px; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:14px 0; }
+    button,input { border:1px solid rgba(25,35,29,.18); background:#fff; color:var(--ink); border-radius:12px; padding:9px 13px; font:inherit; }
+    button { cursor:pointer; }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    button.subtle { background:rgba(255,255,255,.58); }
+    input[type="search"] { width:min(100%,440px); }
+    input[type="password"] { width:190px; }
+    .picker { border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.56); overflow:hidden; }
+    .picker-head { display:flex; justify-content:space-between; gap:12px; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--muted); }
+    .list { max-height:520px; overflow:auto; }
+    .origin { display:grid; grid-template-columns:auto 1fr; gap:10px; padding:11px 14px; border-bottom:1px solid rgba(25,35,29,.08); align-items:start; }
+    .origin:last-child { border-bottom:0; }
+    .origin:hover { background:rgba(13,107,102,.06); }
+    .origin input { margin-top:3px; }
+    .title { font-size:18px; }
+    .stops { color:var(--muted); font-size:13px; word-break:break-word; margin-top:3px; }
+    .empty { padding:22px; color:var(--muted); text-align:center; }
+    .status.error { color:var(--danger); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topline">
+    <div>
+      <h1>Accessibility Origins</h1>
+      <p class="subtitle">Choose stop clusters for origin-specific transfer and accessibility calculations. Saved changes are picked up by the next midnight run.</p>
+    </div>
+    <div><a href="./">Dashboard</a> / <a href="./accessibility-map">Accessibility Map</a></div>
+  </div>
+  <section class="card">
+    <div class="meta" id="meta">Loading...</div>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search stop cluster, stop name, or id">
+      <button id="allBtn" class="subtle" type="button">Select visible</button>
+      <button id="noneBtn" class="subtle" type="button">Clear visible</button>
+      <input id="password" type="password" placeholder="Password">
+      <button id="saveBtn" class="primary" type="button">Save for next 00:00</button>
+      <span class="status" id="status"></span>
+    </div>
+    <div class="picker">
+      <div class="picker-head">
+        <span>Stop clusters</span>
+        <span id="visibleMeta"></span>
+      </div>
+      <div class="list" id="list"></div>
+    </div>
+  </section>
+</div>
+<script>
+const list=document.getElementById('list');
+const meta=document.getElementById('meta');
+const visibleMeta=document.getElementById('visibleMeta');
+const statusEl=document.getElementById('status');
+const searchEl=document.getElementById('search');
+const passwordEl=document.getElementById('password');
+let payload=null;
+let visibleSlugs=[];
+function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function originSearchText(origin){
+  return [origin.slug,origin.label,...(origin.stopIds||[]),...(origin.stopNames||[])].join(' ').toLowerCase();
+}
+async function load(){
+  const response=await fetch('./api/accessibility-origins-config');
+  payload=await response.json();
+  render();
+}
+function render(){
+  const origins=Array.isArray(payload?.origins)?payload.origins:[];
+  const enabled=origins.filter(origin=>origin.enabled).length;
+  const query=searchEl.value.trim().toLowerCase();
+  const filtered=origins.filter(origin=>!query||originSearchText(origin).includes(query));
+  visibleSlugs=filtered.map(origin=>origin.slug);
+  meta.textContent=`${enabled}/${origins.length} clusters enabled. Origin parquet root: ${payload.originRoot||''}`;
+  visibleMeta.textContent=`${filtered.length} visible`;
+  list.innerHTML=filtered.length?filtered.map(origin=>`
+    <label class="origin">
+      <input type="checkbox" data-slug="${escapeHtml(origin.slug)}" ${origin.enabled?'checked':''}>
+      <span>
+        <span class="title">${escapeHtml(origin.label||origin.slug)}</span>
+        <span class="stops">${escapeHtml([...(origin.stopNames||[]),...(origin.stopIds||[])].join(', '))}</span>
+      </span>
+    </label>
+  `).join(''):'<div class="empty">No stop clusters match the filter.</div>';
+  list.querySelectorAll('input[type=checkbox]').forEach(input=>input.addEventListener('change',event=>{
+    const origin=origins.find(item=>item.slug===event.target.dataset.slug);
+    if(origin)origin.enabled=event.target.checked;
+    render();
+  }));
+}
+function setVisible(value){
+  const selected=new Set(visibleSlugs);
+  for(const origin of payload.origins||[])if(selected.has(origin.slug))origin.enabled=value;
+  render();
+}
+searchEl.addEventListener('input',render);
+document.getElementById('allBtn').onclick=()=>setVisible(true);
+document.getElementById('noneBtn').onclick=()=>setVisible(false);
+document.getElementById('saveBtn').onclick=async()=>{
+  statusEl.textContent='Saving...';
+  statusEl.className='status';
+  const body={...payload,password:passwordEl.value};
+  const response=await fetch('./api/accessibility-origins-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result=await response.json().catch(()=>({message:'Save failed'}));
+  if(response.ok){
+    payload=result;
+    statusEl.textContent='Saved. The next run starts at 00:00 MSK and will finish without a 04:00 forced stop.';
+    passwordEl.value='';
+  }else{
+    statusEl.textContent=result.message||'Save failed';
+    statusEl.className='status error';
+  }
+  render();
+};
+load().catch(error=>{meta.textContent='Failed to load configuration: '+error.message;});
+</script>
+</body>
+</html>
