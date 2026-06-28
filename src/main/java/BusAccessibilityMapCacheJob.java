@@ -144,6 +144,7 @@ public class BusAccessibilityMapCacheJob {
                 "BUS_ACCESSIBILITY_CONTOUR_STATS_DIR",
                 outputFile.getParent().resolve("accessibility-contour-stats").toString()
         ));
+        String originSlug = System.getenv().getOrDefault("BUS_ACCESSIBILITY_ORIGIN_SLUG", "").trim();
         String originStopQuery = System.getenv().getOrDefault("BUS_ACCESSIBILITY_ORIGIN_STOP", "ПО Тасма");
         String sourceMode = System.getenv().getOrDefault("BUS_ACCESSIBILITY_SOURCE", "transfer-potential").trim();
         LocalDate serviceDate = LocalDate.parse(System.getenv().getOrDefault(
@@ -313,7 +314,7 @@ public class BusAccessibilityMapCacheJob {
                             stopTransportColorScale,
                             tileUrlPrefix
                     ));
-                    writeContourStats(spark, contourStatsDir, snapshots);
+                    writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
                     writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
                     System.out.printf(
                             Locale.ROOT,
@@ -2701,11 +2702,19 @@ public class BusAccessibilityMapCacheJob {
         return new Point(lat, lon);
     }
 
-    private static void writeContourStats(SparkSession spark, Path outputDir, List<SnapshotPayload> snapshots) {
+    private static void writeContourStats(
+            SparkSession spark,
+            Path outputDir,
+            String originSlug,
+            String originLabel,
+            List<SnapshotPayload> snapshots
+    ) {
         try {
             Files.createDirectories(outputDir);
             List<Row> rows = snapshots.stream()
                     .map(snapshot -> RowFactory.create(
+                            originSlug,
+                            originLabel,
                             java.sql.Date.valueOf(snapshot.serviceDate),
                             snapshot.departureTime.toString(),
                             Timestamp.from(snapshot.serviceDate.atTime(snapshot.departureTime).atZone(CITY_ZONE).toInstant()),
@@ -2732,6 +2741,8 @@ public class BusAccessibilityMapCacheJob {
 
     private static StructType contourStatsSchema() {
         return new StructType(new StructField[]{
+                new StructField("originSlug", DataTypes.StringType, false, Metadata.empty()),
+                new StructField("originLabel", DataTypes.StringType, false, Metadata.empty()),
                 new StructField("serviceDate", DataTypes.DateType, false, Metadata.empty()),
                 new StructField("departureTime", DataTypes.StringType, false, Metadata.empty()),
                 new StructField("departureAt", DataTypes.TimestampType, false, Metadata.empty()),

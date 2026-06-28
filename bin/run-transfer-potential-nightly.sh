@@ -14,7 +14,8 @@ if ! flock -n 9; then
 fi
 
 TARGET_DATE=${BUS_TRANSFER_TARGET_DATE:-$(TZ="$CITY_TZ" date -d 'yesterday' +%F)}
-echo "$(date -Is) origin-specific transfer potential nightly started targetDate=$TARGET_DATE"
-BUS_TRANSFER_TARGET_DATE="$TARGET_DATE" \
-./bin/run-transfer-potential-origins-nightly.sh
-echo "$(date -Is) origin-specific transfer potential nightly finished"
+echo "$(date -Is) origin-specific accessibility nightly started targetDate=$TARGET_DATE"
+BUS_ACCESSIBILITY_TARGET_DATE="$TARGET_DATE" \
+BUS_ACCESSIBILITY_LOG_PREFIX="accessibility-nightly" \
+./bin/run-accessibility-origin-day.sh
+echo "$(date -Is) origin-specific accessibility nightly finished"

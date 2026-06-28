@@ -102,7 +102,17 @@ The legacy all-to-all output tree still exists and can be used manually for diag
 /home/eljah/data/buscrawl/transfer-potential
 ```
 
-The job is scheduled by `buscrawl-transfer-potential-nightly.timer` and guarded by `bin/run-transfer-potential-nightly.sh`. Production starts once at `00:00` local city time, targets the previous service date, reads the enabled origin list, and then runs until the selected origins for that service date are finished. There is no forced `04:00` stop in production: the important boundary is start time, not killing an already consistent parquet write. The nightly wrapper delegates to `bin/run-transfer-potential-origins-nightly.sh`. For each enabled origin it sets `BUS_TRANSFER_ORIGIN_STOP_IDS`, `BUS_TRANSFER_POTENTIAL_DIR`, and `BUS_TRANSFER_POTENTIAL_STATE_FILE` to origin-specific values before running `BusTransferPotentialJob`. `BUS_TRANSFER_MAX_BUCKETS_PER_ORIGIN_RUN` defaults high enough to cover the full previous day; lower values should be used only for manual diagnostics.
+The job is scheduled by `buscrawl-transfer-potential-nightly.timer` and guarded by `bin/run-transfer-potential-nightly.sh`. Production starts once at `00:00` local city time, targets the previous service date, reads the enabled origin list, and then runs until the selected origins for that service date are finished. There is no forced `04:00` stop in production: the important boundary is start time, not killing an already consistent parquet write.
+
+The nightly wrapper delegates to `bin/run-accessibility-origin-day.sh`, not to transfer calculation alone. One service date is the consistency unit:
+
+1. Build `transfer-potential` parquet for every enabled origin.
+2. Render PNG tiles and JSON cache for every enabled origin for that same service date.
+3. Write daily reachability contour parquet with `area15SquareKm`, `area30SquareKm`, `area60SquareKm`, `households15`, `households30`, and `households60`.
+4. If the service date closes a non-current calendar month, run normalized monthly aggregate generation.
+5. Remove origin-specific `transfer-potential` partitions older than `BUS_TRANSFER_POTENTIAL_RETENTION_DAYS`, default `92`.
+
+For each enabled origin the day wrapper sets `BUS_TRANSFER_ORIGIN_STOP_IDS`, `BUS_TRANSFER_POTENTIAL_DIR`, and `BUS_TRANSFER_POTENTIAL_STATE_FILE` to origin-specific values before running `BusTransferPotentialJob`. `BUS_TRANSFER_MAX_BUCKETS_PER_ORIGIN_RUN` defaults high enough to cover the full previous day; lower values should be used only for manual diagnostics.
 
 The static transfer graph is intentionally topological, not time-based. It stores several route candidates per origin-destination pair, ordered by fewer rides first and then by geometric route distance along stop-to-stop route geometry. Candidates that are clearly worse than the best geometry are pruned by `BUS_TRANSFER_STATIC_ALTERNATIVE_DISTANCE_RATIO` (default `1.5`), while a lower-ride candidate is kept even when a shorter multi-transfer geometry exists. Same-name stops inside `BUS_TRANSFER_STATIC_STOP_CLUSTER_RADIUS_METERS` (default `180`) are treated as one stop cluster at write time: if the opposite-direction stop has a simpler route graph, the candidate is written for the requested stop with a short walk edge inside the cluster. The production cache is split by origin stop (`paths-max-transfers-N-by-origin/<originStopId>.bin`) so `BusTransferPotentialJob` can lazily read only the origin currently being evaluated instead of loading a city-wide graph into memory. `BUS_TRANSFER_STATIC_ORIGIN_CACHE_SIZE` controls the small LRU cache of recently read origin files, default `16`. JSONL export is disabled by default and can be enabled with `BUS_TRANSFER_STATIC_WRITE_JSONL=true` only for diagnostics. Day-specific travel time is applied later by `BusTransferPotentialJob` from actual `segment-trips`; the project does not currently maintain stable morning/day/evening average segment-speed profiles suitable for static routing.
 
@@ -128,7 +138,15 @@ transfer-potential/summary-od-route-pattern-by-weekday-bucket
 
 For an origin-specific run, the request grid is every selected origin stop to every other route stop for every 10-minute bucket that has observed movement on the service date. Storing one explicit unreachable row for every OD pair and time bucket would create excessive rows, so unreachable demand is represented exactly in `request-grid-counts` as `possibleRequestCount - reachableRequestCount`; detailed `journeys` and `journey-fragments` are stored for reachable shortest journeys. Most frequent transfer variants are represented by the `*route-pattern*` summaries: select the highest `sampleCount` for the requested OD scope, then use the average wait/ride/journey fields for that pattern.
 
-The job stores progress per `serviceDate|departureBucketMinute` and writes `journeys`, `journey-fragments`, and `request-grid-counts` partitioned by `serviceDate/departureBucketMinute`. This is deliberate: a full service day is too large to treat as one all-or-nothing write. The nightly service starts in the quiet window and may finish after `04:00`; raw ingestion remains disk-first and is not allowed to depend on transfer-potential completion.
+The transfer job stores progress per `serviceDate|departureBucketMinute` and writes `journeys`, `journey-fragments`, and `request-grid-counts` partitioned by `serviceDate/departureBucketMinute`. This is deliberate: a full service day is too large to treat as one all-or-nothing write. The orchestration layer still treats one service date as the publication unit: all selected origins get transfer parquet first, then rendered accessibility caches and contour stats are generated for that date before the next date is started. The nightly service starts in the quiet window and may finish after `04:00`; raw ingestion remains disk-first and is not allowed to depend on transfer-potential completion.
+
+Daily contour stats are durable derived facts, not just UI metadata. They are written under:
+
+```text
+/home/eljah/data/buscrawl/accessibility-contour-stats/originSlug=<origin-slug>/serviceDate=<YYYY-MM-DD>
+```
+
+These parquet rows power multi-day area/household graphs without rereading rendered PNGs.
 
 The default search mode is `BUS_TRANSFER_SEARCH_MODE=static-graph-cache`. It reads the precomputed static transfer graph from `BUS_TRANSFER_STATIC_GRAPH_DIR`, preferring per-origin binary files (`paths-max-transfers-N-by-origin/<originStopId>.bin`) and falling back to older monolithic binary/JSONL files only for compatibility. The transfer job then tests only those route/transfer candidates against the observed segment trips for each departure bucket. This keeps the expensive spatial/route branching outside the nightly factual timing calculation. The static cache must contain ordered `edges`; older cache files without `edges` are still readable, but they can only replay ride legs and cannot charge ordered walking transfer time correctly.
 
