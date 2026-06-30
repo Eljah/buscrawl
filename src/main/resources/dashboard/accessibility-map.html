@@ -661,11 +661,20 @@ function weekdayLabelText(weekdayIso){
 }
 function buildSnapshotGrid(payload,readySnapshots){
   const byKey=new Map(readySnapshots.filter(s=>s.serviceDate&&s.departureTime).map(s=>[`${s.serviceDate}|${s.departureTime}`,s]));
-  const dates=(Array.isArray(payload.requestedServiceDates)&&payload.requestedServiceDates.length?payload.requestedServiceDates:payload.serviceDates)||readySnapshots.map(s=>s.serviceDate).filter(Boolean);
-  const times=Array.isArray(payload.requestedDepartureTimes)&&payload.requestedDepartureTimes.length?payload.requestedDepartureTimes:generateDefaultTimes();
+  const dates=[
+    ...(Array.isArray(payload.serviceDates)?payload.serviceDates:[]),
+    ...(Array.isArray(payload.requestedServiceDates)?payload.requestedServiceDates:[]),
+    ...readySnapshots.map(s=>s.serviceDate).filter(Boolean)
+  ].filter(Boolean);
+  const times=[
+    ...(Array.isArray(payload.departureTimes)?payload.departureTimes:[]),
+    ...(Array.isArray(payload.requestedDepartureTimes)?payload.requestedDepartureTimes:[])
+  ].filter(Boolean);
+  const gridDates=dates.length?dates:readySnapshots.map(s=>s.serviceDate).filter(Boolean);
+  const gridTimes=times.length?times:generateDefaultTimes();
   const result=[];
-  for(const date of [...new Set(dates)]){
-    for(const time of [...new Set(times)]){
+  for(const date of [...new Set(gridDates)].sort()){
+    for(const time of [...new Set(gridTimes)].sort()){
       const key=`${date}|${time}`;
       result.push(byKey.get(key)||pendingSnapshot(payload,date,time));
     }
