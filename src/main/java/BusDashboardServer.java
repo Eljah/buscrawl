@@ -1107,6 +1107,21 @@ public class BusDashboardServer {
         List<Map<String, Object>> indexOriginsList = indexedAccessibilityOrigins(index, enabledBySlug);
         List<Map<String, Object>> origins = new ArrayList<>();
         origins.addAll(indexOriginsList);
+        Map<String, Map<String, Object>> configBySlug = configuredOriginsBySlug(config);
+        for (Map.Entry<String, Map<String, Object>> entry : configBySlug.entrySet()) {
+            if (!Boolean.TRUE.equals(entry.getValue().get("enabled"))) {
+                continue;
+            }
+            boolean exists = origins.stream().anyMatch(origin -> entry.getKey().equals(String.valueOf(origin.get("slug"))));
+            if (!exists) {
+                Map<String, Object> configured = new LinkedHashMap<>(entry.getValue());
+                configured.putIfAbsent("label", entry.getKey());
+                configured.putIfAbsent("stopIds", List.of());
+                configured.putIfAbsent("stopNames", List.of());
+                origins.add(configured);
+            }
+        }
+        origins.sort(Comparator.comparing(origin -> String.valueOf(origin.get("label")).toLowerCase(Locale.ROOT)));
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("status", "ok");
         payload.put("updatedAt", config.getOrDefault("updatedAt", index.getOrDefault("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString())));

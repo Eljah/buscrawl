@@ -70,7 +70,7 @@ for line in "${ORIGINS[@]}"; do
   BUS_TRANSFER_ORIGIN_STOP_IDS="$stop_ids" \
   BUS_TRANSFER_TARGET_DATE="$TARGET_DATE" \
   BUS_TRANSFER_MAX_BUCKETS_PER_RUN="${BUS_TRANSFER_MAX_BUCKETS_PER_ORIGIN_RUN:-100000}" \
-  BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME="${BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME:-23:59}" \
+  BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME="${BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME-23:59}" \
   ./bin/run-transfer-potential.sh
   echo "$(date -Is) $LOG_PREFIX transfer finish date=$TARGET_DATE slug=$slug"
 done
@@ -80,6 +80,10 @@ echo "$(date -Is) $LOG_PREFIX transfer stage done targetDate=$TARGET_DATE"
 echo "$(date -Is) $LOG_PREFIX render stage start targetDate=$TARGET_DATE"
 for line in "${ORIGINS[@]}"; do
   IFS=$'\t' read -r slug label stop_ids <<< "$line"
+  if [ ! -d "$ORIGIN_ROOT/$slug/journeys" ]; then
+    echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: transfer journeys are not available"
+    continue
+  fi
   echo "$(date -Is) $LOG_PREFIX render start date=$TARGET_DATE slug=$slug label=$label stopIds=$stop_ids"
   BUS_TRANSFER_POTENTIAL_DIR="$ORIGIN_ROOT/$slug" \
   BUS_ACCESSIBILITY_MAP_CACHE_FILE="$RENDER_JSON_DIR/$slug.json" \

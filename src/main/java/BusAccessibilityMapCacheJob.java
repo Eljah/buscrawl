@@ -1,3 +1,4 @@
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -2815,14 +2816,72 @@ public class BusAccessibilityMapCacheJob {
         putScale(payload, "walk", first.walkColorScale);
         putScale(payload, "stopTransport", first.stopTransportColorScale);
         payload.put("stops", reachability.stopTimes.stream().map(BusAccessibilityMapCacheJob::stopTimePayload).collect(Collectors.toList()));
-        payload.put("serviceDates", snapshots.stream().map(snapshot -> snapshot.serviceDate.toString()).distinct().collect(Collectors.toList()));
-        payload.put("departureTimes", snapshots.stream().map(snapshot -> snapshot.departureTime.toString()).distinct().collect(Collectors.toList()));
+        List<Map<String, Object>> snapshotPayloads = snapshots.stream().map(BusAccessibilityMapCacheJob::snapshotPayload).collect(Collectors.toList());
+        List<Map<String, Object>> contourAreaSeries = snapshots.stream().map(BusAccessibilityMapCacheJob::contourAreaPayload).collect(Collectors.toList());
+        if (Files.isRegularFile(outputFile)) {
+            Map<String, Object> existing = MAPPER.readValue(outputFile.toFile(), new TypeReference<>() {
+            });
+            snapshotPayloads = mergePayloadRows(asMapList(existing.get("snapshots")), snapshotPayloads, "id");
+            contourAreaSeries = mergePayloadRows(asMapList(existing.get("contourAreaSeries")), contourAreaSeries, "snapshotId");
+        }
+        payload.put("serviceDates", snapshotPayloads.stream()
+                .map(snapshot -> String.valueOf(snapshot.get("serviceDate")))
+                .filter(value -> !value.isBlank() && !"null".equals(value))
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList()));
+        payload.put("departureTimes", snapshotPayloads.stream()
+                .map(snapshot -> String.valueOf(snapshot.get("departureTime")))
+                .filter(value -> !value.isBlank() && !"null".equals(value))
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList()));
         payload.put("requestedServiceDates", requestedServiceDates.stream().map(LocalDate::toString).collect(Collectors.toList()));
         payload.put("requestedDepartureTimes", requestedDepartureTimes.stream().map(LocalTime::toString).collect(Collectors.toList()));
         payload.put("availableModes", first.availableModes());
-        payload.put("contourAreaSeries", snapshots.stream().map(BusAccessibilityMapCacheJob::contourAreaPayload).collect(Collectors.toList()));
-        payload.put("snapshots", snapshots.stream().map(BusAccessibilityMapCacheJob::snapshotPayload).collect(Collectors.toList()));
+        payload.put("contourAreaSeries", contourAreaSeries);
+        payload.put("snapshots", snapshotPayloads);
         writeJsonAtomic(outputFile, payload);
+    }
+
+    private static List<Map<String, Object>> mergePayloadRows(List<Map<String, Object>> existingRows, List<Map<String, Object>> newRows, String idField) {
+        Map<String, Map<String, Object>> byKey = new LinkedHashMap<>();
+        for (Map<String, Object> row : existingRows) {
+            byKey.put(payloadRowKey(row, idField), row);
+        }
+        for (Map<String, Object> row : newRows) {
+            byKey.put(payloadRowKey(row, idField), row);
+        }
+        return byKey.values().stream()
+                .sorted(Comparator
+                        .comparing((Map<String, Object> row) -> String.valueOf(row.getOrDefault("serviceDate", "")))
+                        .thenComparing(row -> String.valueOf(row.getOrDefault("departureTime", ""))))
+                .collect(Collectors.toList());
+    }
+
+    private static String payloadRowKey(Map<String, Object> row, String idField) {
+        Object id = row.get(idField);
+        if (id != null && !String.valueOf(id).isBlank()) {
+            return String.valueOf(id);
+        }
+        return String.valueOf(row.getOrDefault("serviceDate", "")) + "-" + String.valueOf(row.getOrDefault("departureTime", ""));
+    }
+
+    private static List<Map<String, Object>> asMapList(Object raw) {
+        if (!(raw instanceof List<?>)) {
+            return List.of();
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Object item : (List<?>) raw) {
+            if (item instanceof Map<?, ?>) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : ((Map<?, ?>) item).entrySet()) {
+                    row.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private static Map<String, Object> snapshotPayload(SnapshotPayload snapshot) {

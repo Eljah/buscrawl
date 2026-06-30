@@ -43,6 +43,9 @@
     .mode-row label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
     .selector-row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:12px 0 2px; color:var(--muted); font-size:14px; }
     .selector-row select { border:1px solid rgba(25,35,29,.16); border-radius:12px; background:#fffdf6; color:var(--ink); padding:8px 10px; font:inherit; }
+    .weekday-filter { display:none; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0 2px; color:var(--muted); font-size:13px; }
+    .weekday-filter label { display:inline-flex; gap:5px; align-items:center; padding:6px 9px; border:1px solid rgba(25,35,29,.12); border-radius:999px; background:rgba(255,253,246,.72); cursor:pointer; }
+    .weekday-filter input { margin:0; }
     .snapshot-status { color:var(--muted); font-size:13px; }
     .snapshot-status.ready { color:#207349; }
     .snapshot-status.pending { color:#9b5b1c; }
@@ -103,6 +106,7 @@
       <label>Departure <select id="timeSelect"></select></label>
       <span class="snapshot-status" id="snapshotStatus"></span>
     </div>
+    <div class="weekday-filter" id="weekdayFilter" aria-label="Filter daily dates by weekday"></div>
     <div class="map-shell" id="map">
       <div class="map-zoom"><button id="zoomIn" type="button">+</button><button id="zoomOut" type="button">-</button></div>
       <div class="time-probe" id="timeProbe">hover heatmap for minutes</div>
@@ -152,7 +156,7 @@ const contourSvg=document.getElementById('contourSvg');
 const emptyEl=document.getElementById('emptyState');
 const originLayer=document.getElementById('originLayer');
 const timeProbe=document.getElementById('timeProbe');
-const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,currentSnapshot:null,dailySnapshots:[],aggregateSnapshots:[],dataset:'daily',centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
+const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,currentSnapshot:null,dailySnapshots:[],aggregateSnapshots:[],weekdayFilters:new Set(),dataset:'daily',centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
 const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const fullModeList=['total','totalNormalized','totalLog','walk','stopTransport'];
 
@@ -572,6 +576,7 @@ function initSnapshotSelectors(payload){
   const dateSelect=document.getElementById('dateSelect');
   const weekdayLabel=document.getElementById('weekdaySelectLabel');
   const weekdaySelect=document.getElementById('weekdaySelect');
+  const weekdayFilter=document.getElementById('weekdayFilter');
   const timeSelect=document.getElementById('timeSelect');
   const types=new Set(state.aggregateSnapshots.map(s=>s.type));
   const datasets=[{value:'daily',label:'daily snapshots'}];
@@ -581,6 +586,19 @@ function initSnapshotSelectors(payload){
   datasetLabel.style.display=datasets.length>1?'inline-flex':'none';
   if(!datasets.some(item=>item.value===state.dataset))state.dataset='daily';
   datasetSelect.value=state.dataset;
+  function renderWeekdayFilter(){
+    const days=[1,2,3,4,5,6,7];
+    weekdayFilter.innerHTML=days.map(day=>`<label><input type="checkbox" value="${day}" ${state.weekdayFilters.has(day)?'checked':''}> ${weekdayShortLabel(day)}</label>`).join('');
+    weekdayFilter.querySelectorAll('input[type="checkbox"]').forEach(input=>{
+      input.onchange=()=>{
+        const day=Number(input.value);
+        if(input.checked)state.weekdayFilters.add(day);
+        else state.weekdayFilters.delete(day);
+        renderSelectors();
+      };
+    });
+  }
+  renderWeekdayFilter();
   function renderSelectors(){
     state.dataset=datasetSelect.value||'daily';
     const previousDate=dateSelect.value;
@@ -588,7 +606,11 @@ function initSnapshotSelectors(payload){
     const previousTime=timeSelect.value;
     if(state.dataset==='daily'){
       weekdayLabel.style.display='none';
-      const dates=[...new Set(state.dailySnapshots.map(s=>s.serviceDate).filter(Boolean))];
+      weekdayFilter.style.display='flex';
+      const dates=[...new Set(state.dailySnapshots
+        .map(s=>s.serviceDate)
+        .filter(Boolean)
+        .filter(date=>!state.weekdayFilters.size||state.weekdayFilters.has(dateWeekdayIso(date))))];
       dateSelect.innerHTML=dates.map(d=>`<option value="${d}">${d}</option>`).join('');
       const date=dates.includes(previousDate)?previousDate:dates[0];
       dateSelect.value=date||'';
@@ -601,6 +623,7 @@ function initSnapshotSelectors(payload){
       state.currentSnapshot=state.dailySnapshots.find(s=>s.serviceDate===date&&s.departureTime===timeSelect.value)||state.dailySnapshots.find(s=>s.serviceDate===date)||state.dailySnapshots[0];
     }else{
       weekdayLabel.style.display='inline-flex';
+      weekdayFilter.style.display='none';
       const pool=state.aggregateSnapshots.filter(s=>s.type===state.dataset);
       const periods=[...new Set(pool.map(s=>s.periodKey).filter(Boolean))].sort();
       dateSelect.innerHTML=periods.map(d=>`<option value="${d}">${d}</option>`).join('');
@@ -624,6 +647,14 @@ function initSnapshotSelectors(payload){
   weekdaySelect.onchange=renderSelectors;
   timeSelect.onchange=renderSelectors;
   renderSelectors();
+}
+function dateWeekdayIso(date){
+  const d=new Date(`${date}T12:00:00Z`);
+  const day=d.getUTCDay();
+  return day===0?7:day;
+}
+function weekdayShortLabel(weekdayIso){
+  return ['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][weekdayIso]||String(weekdayIso);
 }
 function weekdayLabelText(weekdayIso){
   return ['','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][weekdayIso]||String(weekdayIso);
@@ -673,7 +704,7 @@ function pendingSnapshot(payload,serviceDate,departureTime){
   };
 }
 function sampleOverlayMinutes(e){
-  if(!isTotalMode()||!state.payload){timeProbe.textContent='hover heatmap for minutes';return;}
+  if(!state.payload){timeProbe.textContent='hover heatmap for minutes';return;}
   const rect=mapEl.getBoundingClientRect();
   const x=e.clientX-rect.left,y=e.clientY-rect.top;
   const img=[...overlayEl.querySelectorAll('img')].find(node=>{
@@ -703,6 +734,8 @@ function currentColorScale(){
   const p=currentSnapshot();
   if(state.overlayMode==='totalNormalized')return {min:Number(p.totalNormalizedColorMinMinutes||0),max:Number(p.totalNormalizedColorMaxMinutes||800),log:false};
   if(state.overlayMode==='totalLog')return {min:Number(p.totalLogColorMinMinutes||0),max:Number(p.totalLogColorMaxMinutes||120),log:true};
+  if(state.overlayMode==='walk')return {min:Number(p.walkColorMinMinutes||0),max:Number(p.walkColorMaxMinutes||60),log:false};
+  if(state.overlayMode==='stopTransport')return {min:Number(p.stopTransportColorMinMinutes||0),max:Number(p.stopTransportColorMaxMinutes||120),log:false};
   return {min:Number(p.totalColorMinMinutes||0),max:Number(p.totalColorMaxMinutes||120),log:false};
 }
 function minutesFromColor(r,g,b,scale){
