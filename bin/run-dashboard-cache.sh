@@ -3,15 +3,6 @@ set -euo pipefail
 
 cd /home/eljah/apps/buscrawl
 
-if [[ "${BUS_SKIP_HEAVY_JOB_LOCK:-false}" != "true" ]]; then
-  LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    echo "$(date -Is) dashboard cache skipped: another heavy derived job is running"
-    exit 0
-  fi
-fi
-
 export BUS_PARQUET_DIR=${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}
 export BUS_DASHBOARD_CACHE_FILE=${BUS_DASHBOARD_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/stats.json}
 export BUS_DASHBOARD_ROUTE_CACHE_FILE=${BUS_DASHBOARD_ROUTE_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/route-last-movement.json}

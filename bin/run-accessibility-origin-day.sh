@@ -16,7 +16,6 @@ TILE_PREFIX_ROOT=${BUS_ACCESSIBILITY_TILE_PREFIX_ROOT:-accessibility-v4-render-c
 TILE_ROOT_BASE=${BUS_TILE_ROOT:-/home/eljah/apps/buscrawl/dashboard-cache/tiles}
 TRANSFER_LOCK_FILE=${BUS_TRANSFER_POTENTIAL_LOCK_FILE:-/home/eljah/data/buscrawl/transfer-potential-origin.lock}
 DAY_LOCK_FILE=${BUS_ACCESSIBILITY_DAY_LOCK_FILE:-/home/eljah/data/buscrawl/accessibility-origin-day.lock}
-HEAVY_JOB_LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
 RETENTION_DAYS=${BUS_TRANSFER_POTENTIAL_RETENTION_DAYS:-92}
 LOG_PREFIX=${BUS_ACCESSIBILITY_LOG_PREFIX:-accessibility-origin-day}
 ORIGIN_SLUGS=${BUS_ACCESSIBILITY_ORIGIN_SLUGS:-}
@@ -269,18 +268,15 @@ for line in "${ORIGINS[@]}"; do
     clear_transfer_date "$slug"
   fi
   echo "$(date -Is) $LOG_PREFIX transfer start date=$TARGET_DATE slug=$slug stopIds=$stop_ids"
-  exec 7>"$HEAVY_JOB_LOCK_FILE"
-  echo "$(date -Is) $LOG_PREFIX transfer waiting for heavy IO lock $HEAVY_JOB_LOCK_FILE"
-  flock 7
-  BUS_TRANSFER_POTENTIAL_DIR="$origin_dir" \
-  BUS_TRANSFER_POTENTIAL_STATE_FILE="$origin_dir/aggregation-state.json" \
-  BUS_TRANSFER_POTENTIAL_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/transfer-potential-origin-spark-temp/$slug" \
-  BUS_TRANSFER_ORIGIN_STOP_IDS="$stop_ids" \
-  BUS_TRANSFER_TARGET_DATE="$TARGET_DATE" \
-  BUS_TRANSFER_MAX_BUCKETS_PER_RUN="${BUS_TRANSFER_MAX_BUCKETS_PER_ORIGIN_RUN:-100000}" \
-  BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME="${BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME-23:59}" \
-  ./bin/run-transfer-potential.sh
-  flock -u 7
+  env \
+    BUS_TRANSFER_POTENTIAL_DIR="$origin_dir" \
+    BUS_TRANSFER_POTENTIAL_STATE_FILE="$origin_dir/aggregation-state.json" \
+    BUS_TRANSFER_POTENTIAL_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/transfer-potential-origin-spark-temp/$slug" \
+    BUS_TRANSFER_ORIGIN_STOP_IDS="$stop_ids" \
+    BUS_TRANSFER_TARGET_DATE="$TARGET_DATE" \
+    BUS_TRANSFER_MAX_BUCKETS_PER_RUN="${BUS_TRANSFER_MAX_BUCKETS_PER_ORIGIN_RUN:-100000}" \
+    BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME="${BUS_TRANSFER_STOP_BEFORE_LOCAL_TIME-23:59}" \
+    ./bin/run-transfer-potential.sh
   if transfer_complete "$slug"; then
     echo "$(date -Is) $LOG_PREFIX transfer finish date=$TARGET_DATE slug=$slug"
   else
@@ -311,56 +307,54 @@ for line in "${ORIGINS[@]}"; do
     echo "$(date -Is) $LOG_PREFIX render start date=$TARGET_DATE slug=$slug label=$label stopIds=$stop_ids scope=missing departureTimes=$render_times"
   fi
   set +e
-  exec 7>"$HEAVY_JOB_LOCK_FILE"
-  echo "$(date -Is) $LOG_PREFIX render waiting for heavy IO lock $HEAVY_JOB_LOCK_FILE"
-  flock 7
   if [ "$render_times" = "__FULL__" ]; then
-    BUS_TRANSFER_POTENTIAL_DIR="$ORIGIN_ROOT/$slug" \
-    BUS_ACCESSIBILITY_MAP_CACHE_FILE="$RENDER_JSON_DIR/$slug.json" \
-    BUS_ACCESSIBILITY_CONTOUR_STATS_DIR="$CONTOUR_STATS_ROOT/originSlug=$slug/serviceDate=$TARGET_DATE" \
-    BUS_ACCESSIBILITY_ORIGIN_SLUG="$slug" \
-    BUS_ACCESSIBILITY_TILE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_BASE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_URL_PREFIX="$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_STAGING_ROOT="${BUS_ACCESSIBILITY_TILE_STAGING_ROOT:-/home/eljah/data/buscrawl/accessibility-render-staging/$slug}" \
-    BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS="${BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS:-3000}" \
-    BUS_ACCESSIBILITY_ORIGIN_STOP="$label" \
-    BUS_ACCESSIBILITY_ORIGIN_STOP_IDS="$stop_ids" \
-    BUS_ACCESSIBILITY_SERVICE_DATES="$TARGET_DATE" \
-    BUS_ACCESSIBILITY_DEPARTURE_START=04:00 \
-    BUS_ACCESSIBILITY_DEPARTURE_END=23:45 \
-    BUS_ACCESSIBILITY_DEPARTURE_STEP_MINUTES=15 \
-    BUS_ACCESSIBILITY_RENDER_MODES="${BUS_ACCESSIBILITY_RENDER_MODES:-total,totalNormalized,totalLog,walk,stopTransport}" \
-    BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM="${BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM:-11}" \
-    BUS_ACCESSIBILITY_WALK_CACHE_FILE=${BUS_ACCESSIBILITY_WALK_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-walk-cache-primitive.bin.gz} \
-    BUS_ACCESSIBILITY_RENDER_CACHE_FILE=${BUS_ACCESSIBILITY_RENDER_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-render-cache-z11.bin.gz} \
-    BUS_ACCESSIBILITY_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/accessibility-map-spark-temp/$slug-$TARGET_DATE" \
-    BUS_ACCESSIBILITY_SPARK_MASTER=${BUS_ACCESSIBILITY_SPARK_MASTER:-local[2]} \
-    ./bin/run-accessibility-map-cache.sh
+    env \
+      BUS_TRANSFER_POTENTIAL_DIR="$ORIGIN_ROOT/$slug" \
+      BUS_ACCESSIBILITY_MAP_CACHE_FILE="$RENDER_JSON_DIR/$slug.json" \
+      BUS_ACCESSIBILITY_CONTOUR_STATS_DIR="$CONTOUR_STATS_ROOT/originSlug=$slug/serviceDate=$TARGET_DATE" \
+      BUS_ACCESSIBILITY_ORIGIN_SLUG="$slug" \
+      BUS_ACCESSIBILITY_TILE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_BASE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_URL_PREFIX="$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_STAGING_ROOT="${BUS_ACCESSIBILITY_TILE_STAGING_ROOT:-/home/eljah/data/buscrawl/accessibility-render-staging/$slug}" \
+      BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS="${BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS:-3000}" \
+      BUS_ACCESSIBILITY_ORIGIN_STOP="$label" \
+      BUS_ACCESSIBILITY_ORIGIN_STOP_IDS="$stop_ids" \
+      BUS_ACCESSIBILITY_SERVICE_DATES="$TARGET_DATE" \
+      BUS_ACCESSIBILITY_DEPARTURE_START=04:00 \
+      BUS_ACCESSIBILITY_DEPARTURE_END=23:45 \
+      BUS_ACCESSIBILITY_DEPARTURE_STEP_MINUTES=15 \
+      BUS_ACCESSIBILITY_RENDER_MODES="${BUS_ACCESSIBILITY_RENDER_MODES:-total,totalNormalized,totalLog,walk,stopTransport}" \
+      BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM="${BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM:-11}" \
+      BUS_ACCESSIBILITY_WALK_CACHE_FILE=${BUS_ACCESSIBILITY_WALK_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-walk-cache-primitive.bin.gz} \
+      BUS_ACCESSIBILITY_RENDER_CACHE_FILE=${BUS_ACCESSIBILITY_RENDER_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-render-cache-z11.bin.gz} \
+      BUS_ACCESSIBILITY_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/accessibility-map-spark-temp/$slug-$TARGET_DATE" \
+      BUS_ACCESSIBILITY_SPARK_MASTER=${BUS_ACCESSIBILITY_SPARK_MASTER:-local[2]} \
+      ./bin/run-accessibility-map-cache.sh
   else
-    BUS_TRANSFER_POTENTIAL_DIR="$ORIGIN_ROOT/$slug" \
-    BUS_ACCESSIBILITY_MAP_CACHE_FILE="$RENDER_JSON_DIR/$slug.json" \
-    BUS_ACCESSIBILITY_CONTOUR_STATS_DIR="$CONTOUR_STATS_ROOT/originSlug=$slug/serviceDate=$TARGET_DATE" \
-    BUS_ACCESSIBILITY_ORIGIN_SLUG="$slug" \
-    BUS_ACCESSIBILITY_TILE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_BASE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_URL_PREFIX="$TILE_PREFIX_ROOT/$slug" \
-    BUS_ACCESSIBILITY_TILE_STAGING_ROOT="${BUS_ACCESSIBILITY_TILE_STAGING_ROOT:-/home/eljah/data/buscrawl/accessibility-render-staging/$slug}" \
-    BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS="${BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS:-3000}" \
-    BUS_ACCESSIBILITY_ORIGIN_STOP="$label" \
-    BUS_ACCESSIBILITY_ORIGIN_STOP_IDS="$stop_ids" \
-    BUS_ACCESSIBILITY_SERVICE_DATES="$TARGET_DATE" \
-    BUS_ACCESSIBILITY_DEPARTURE_TIMES="$render_times" \
-    BUS_ACCESSIBILITY_RENDER_MODES="${BUS_ACCESSIBILITY_RENDER_MODES:-total,totalNormalized,totalLog,walk,stopTransport}" \
-    BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM="${BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM:-11}" \
-    BUS_ACCESSIBILITY_WALK_CACHE_FILE=${BUS_ACCESSIBILITY_WALK_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-walk-cache-primitive.bin.gz} \
-    BUS_ACCESSIBILITY_RENDER_CACHE_FILE=${BUS_ACCESSIBILITY_RENDER_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-render-cache-z11.bin.gz} \
-    BUS_ACCESSIBILITY_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/accessibility-map-spark-temp/$slug-$TARGET_DATE" \
-    BUS_ACCESSIBILITY_SPARK_MASTER=${BUS_ACCESSIBILITY_SPARK_MASTER:-local[2]} \
-    ./bin/run-accessibility-map-cache.sh
+    env \
+      BUS_TRANSFER_POTENTIAL_DIR="$ORIGIN_ROOT/$slug" \
+      BUS_ACCESSIBILITY_MAP_CACHE_FILE="$RENDER_JSON_DIR/$slug.json" \
+      BUS_ACCESSIBILITY_CONTOUR_STATS_DIR="$CONTOUR_STATS_ROOT/originSlug=$slug/serviceDate=$TARGET_DATE" \
+      BUS_ACCESSIBILITY_ORIGIN_SLUG="$slug" \
+      BUS_ACCESSIBILITY_TILE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_BASE_ROOT="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_URL_PREFIX="$TILE_PREFIX_ROOT/$slug" \
+      BUS_ACCESSIBILITY_TILE_STAGING_ROOT="${BUS_ACCESSIBILITY_TILE_STAGING_ROOT:-/home/eljah/data/buscrawl/accessibility-render-staging/$slug}" \
+      BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS="${BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS:-3000}" \
+      BUS_ACCESSIBILITY_ORIGIN_STOP="$label" \
+      BUS_ACCESSIBILITY_ORIGIN_STOP_IDS="$stop_ids" \
+      BUS_ACCESSIBILITY_SERVICE_DATES="$TARGET_DATE" \
+      BUS_ACCESSIBILITY_DEPARTURE_TIMES="$render_times" \
+      BUS_ACCESSIBILITY_RENDER_MODES="${BUS_ACCESSIBILITY_RENDER_MODES:-total,totalNormalized,totalLog,walk,stopTransport}" \
+      BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM="${BUS_ACCESSIBILITY_OVERLAY_TILE_MAX_ZOOM:-11}" \
+      BUS_ACCESSIBILITY_WALK_CACHE_FILE=${BUS_ACCESSIBILITY_WALK_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-walk-cache-primitive.bin.gz} \
+      BUS_ACCESSIBILITY_RENDER_CACHE_FILE=${BUS_ACCESSIBILITY_RENDER_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/accessibility-render-cache-z11.bin.gz} \
+      BUS_ACCESSIBILITY_SPARK_LOCAL_DIR="/home/eljah/data/buscrawl/accessibility-map-spark-temp/$slug-$TARGET_DATE" \
+      BUS_ACCESSIBILITY_SPARK_MASTER=${BUS_ACCESSIBILITY_SPARK_MASTER:-local[2]} \
+      ./bin/run-accessibility-map-cache.sh
   fi
   status=$?
-  flock -u 7
   set -e
   if [ "$status" -eq 0 ]; then
     echo "$(date -Is) $LOG_PREFIX render finish date=$TARGET_DATE slug=$slug"

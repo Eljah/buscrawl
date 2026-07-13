@@ -7,6 +7,7 @@ import org.apache.spark.sql.SparkSession;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,6 +44,7 @@ public class BusDashboardCacheJob {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final Duration STATS_WINDOW = Duration.ofHours(24);
     private static final Duration FILE_LOOKBACK_SLACK = Duration.ofMinutes(30);
+    private static final int DEFAULT_MAX_PARQUET_CANDIDATES = 2000;
     private static final ZoneId CITY_ZONE = ZoneId.of(
             System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow")
     );
@@ -870,6 +872,10 @@ public class BusDashboardCacheJob {
     }
 
     private static List<ParquetFileInfo> listRecentParquetFiles(Path parquetDir, Instant modifiedSince) throws IOException {
+        if (!Boolean.parseBoolean(System.getenv().getOrDefault("BUS_DASHBOARD_RECURSIVE_PARQUET_SCAN", "false"))) {
+            return listRecentTopLevelParquetFiles(parquetDir, modifiedSince);
+        }
+        System.out.printf("BusDashboardCacheJob: recursive parquet scan enabled for %s%n", parquetDir);
         FileTime modifiedSinceTime = FileTime.from(modifiedSince);
         try (Stream<Path> files = Files.walk(parquetDir, FileVisitOption.FOLLOW_LINKS)) {
             return files
@@ -883,10 +889,60 @@ public class BusDashboardCacheJob {
         }
     }
 
+    private static List<ParquetFileInfo> listRecentTopLevelParquetFiles(Path parquetDir, Instant modifiedSince) throws IOException {
+        FileTime modifiedSinceTime = FileTime.from(modifiedSince);
+        int maxCandidates = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_MAX_PARQUET_CANDIDATES",
+                String.valueOf(DEFAULT_MAX_PARQUET_CANDIDATES)
+        ));
+        List<ParquetFileInfo> result = new ArrayList<>();
+        int seen = 0;
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(parquetDir, "*.parquet")) {
+            for (Path path : files) {
+                seen++;
+                ParquetFileInfo file = toParquetFileInfo(path, modifiedSinceTime);
+                if (file != null) {
+                    result.add(file);
+                }
+            }
+        }
+        int partitionDirs = 0;
+        try (DirectoryStream<Path> partitions = Files.newDirectoryStream(parquetDir, "serviceDate=*")) {
+            for (Path partition : partitions) {
+                if (!Files.isDirectory(partition)) {
+                    continue;
+                }
+                partitionDirs++;
+                try (DirectoryStream<Path> files = Files.newDirectoryStream(partition, "*.parquet")) {
+                    for (Path path : files) {
+                        seen++;
+                        ParquetFileInfo file = toParquetFileInfo(path, modifiedSinceTime);
+                        if (file != null) {
+                            result.add(file);
+                        }
+                    }
+                }
+            }
+        }
+        result.sort(Comparator.comparing((ParquetFileInfo file) -> parseInstant(file.modifiedAt)).thenComparing(file -> file.path));
+        if (result.size() > maxCandidates) {
+            result = new ArrayList<>(result.subList(result.size() - maxCandidates, result.size()));
+        }
+        System.out.printf(
+                "BusDashboardCacheJob: bounded parquet listing dir=%s partitionDirs=%d seen=%d selected=%d maxCandidates=%d%n",
+                parquetDir,
+                partitionDirs,
+                seen,
+                result.size(),
+                maxCandidates
+        );
+        return result;
+    }
+
     private static ParquetFileInfo toParquetFileInfo(Path path, FileTime modifiedSinceTime) {
         try {
             FileTime modifiedAt = Files.getLastModifiedTime(path);
-            if (!isReadableParquetFile(path) || modifiedAt.compareTo(modifiedSinceTime) < 0) {
+            if (modifiedAt.compareTo(modifiedSinceTime) < 0 || !isReadableParquetFile(path)) {
                 return null;
             }
             ParquetFileInfo file = new ParquetFileInfo();

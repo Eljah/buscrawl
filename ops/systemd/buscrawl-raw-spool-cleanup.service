@@ -7,6 +7,8 @@ Type=oneshot
 User=eljah
 WorkingDirectory=/home/eljah/apps/buscrawl
 Environment=BUS_RAW_SPOOL_CLEANUP_DRY_RUN=false
-Environment=BUS_RAW_SPOOL_CLEANUP_MAX_FILES=5000
+Environment=BUS_RAW_SPOOL_CLEANUP_MAX_FILES=500
+Environment=BUS_RAW_SPOOL_CLEANUP_MAX_RECORDS=10000
 Environment=BUS_RAW_SPOOL_CLEANUP_MIN_AGE_HOURS=6
 ExecStart=/home/eljah/apps/buscrawl/bin/run-raw-spool-cleanup.sh
+TimeoutStartSec=120s

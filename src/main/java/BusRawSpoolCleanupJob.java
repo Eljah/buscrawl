@@ -1,14 +1,15 @@
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,6 +23,7 @@ public class BusRawSpoolCleanupJob {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     public static void main(String[] args) throws Exception {
+        Instant startedAt = Instant.now();
         Path storageRoot = Paths.get(System.getenv().getOrDefault("BUS_STORAGE_ROOT", "./var/bus"));
         Path readyDir = Paths.get(System.getenv().getOrDefault(
                 "BUS_RAW_SPOOL_READY_DIR",
@@ -31,13 +33,21 @@ public class BusRawSpoolCleanupJob {
                 "BUS_STREAM_CHECKPOINT_DIR",
                 storageRoot.resolve("bus-data-checkpoint").toString()
         ));
+        Path stateFile = Paths.get(System.getenv().getOrDefault(
+                "BUS_RAW_SPOOL_CLEANUP_STATE_FILE",
+                storageRoot.resolve("raw-spool-cleanup-state.json").toString()
+        ));
         Duration minAge = Duration.ofHours(Long.parseLong(System.getenv().getOrDefault(
                 "BUS_RAW_SPOOL_CLEANUP_MIN_AGE_HOURS",
                 "6"
         )));
         int maxFiles = Integer.parseInt(System.getenv().getOrDefault(
                 "BUS_RAW_SPOOL_CLEANUP_MAX_FILES",
-                "5000"
+                "1000"
+        ));
+        int maxRecords = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_RAW_SPOOL_CLEANUP_MAX_RECORDS",
+                "20000"
         ));
         boolean dryRun = Boolean.parseBoolean(System.getenv().getOrDefault(
                 "BUS_RAW_SPOOL_CLEANUP_DRY_RUN",
@@ -51,33 +61,172 @@ public class BusRawSpoolCleanupJob {
                     + ", sourceLog=" + sourceLogDir + ", commits=" + commitDir);
         }
 
-        Set<Long> committedBatches = readCommittedBatches(commitDir);
-        List<Path> sourceLogs = listSourceLogs(sourceLogDir, committedBatches);
-        Set<Path> committedReadyFiles = readCommittedReadyFiles(sourceLogs, readyDir);
-        List<Path> deleteCandidates = selectDeleteCandidates(committedReadyFiles, minAge, maxFiles);
+        System.out.printf(
+                "Raw spool cleanup start: dryRun=%s minAge=%s maxFiles=%d maxRecords=%d state=%s%n",
+                dryRun,
+                minAge,
+                maxFiles,
+                maxRecords,
+                stateFile
+        );
 
-        long bytes = 0L;
-        int deleted = 0;
-        for (Path path : deleteCandidates) {
-            long size = Files.exists(path) ? Files.size(path) : 0L;
-            bytes += size;
-            if (!dryRun) {
-                Files.deleteIfExists(path);
-                deleted++;
-            }
+        CleanupState state = readState(stateFile);
+        Set<Long> committedBatches = readCommittedBatches(commitDir);
+        System.out.printf(
+                "Raw spool cleanup phase committed-batches: count=%d lastCompletedBatch=%d currentSourceLog=%s offset=%d elapsedMs=%d%n",
+                committedBatches.size(),
+                state.lastCompletedBatch,
+                state.currentSourceLog,
+                state.currentSourceOffset,
+                elapsedMs(startedAt)
+        );
+
+        List<SourceLogRef> sourceLogs = listSourceLogs(sourceLogDir, committedBatches, state);
+        System.out.printf(
+                "Raw spool cleanup phase source-logs: selected=%d first=%s elapsedMs=%d%n",
+                sourceLogs.size(),
+                sourceLogs.isEmpty() ? "-" : sourceLogs.get(0).path.getFileName(),
+                elapsedMs(startedAt)
+        );
+        if (sourceLogs.isEmpty()) {
+            state.updatedAt = Instant.now().toString();
+            writeState(stateFile, state);
+            System.out.printf(
+                    "Raw spool cleanup complete: dryRun=%s committedBatches=%d sourceLogs=0 scanned=0 candidates=0 deleted=0 bytes=0 lastCompletedBatch=%d elapsedMs=%d%n",
+                    dryRun,
+                    committedBatches.size(),
+                    state.lastCompletedBatch,
+                    elapsedMs(startedAt)
+            );
+            return;
         }
 
+        CleanupResult result = processSourceLogs(sourceLogs, readyDir, minAge, maxFiles, maxRecords, dryRun, state);
+        state.updatedAt = Instant.now().toString();
+        writeState(stateFile, state);
+
         System.out.printf(
-                "Raw spool cleanup complete: dryRun=%s, committedBatches=%d, sourceLogs=%d, "
-                        + "committedReadyFiles=%d, candidates=%d, deleted=%d, bytes=%d%n",
+                "Raw spool cleanup complete: dryRun=%s committedBatches=%d sourceLogs=%d scanned=%d "
+                        + "candidates=%d deleted=%d bytes=%d stoppedBy=%s lastCompletedBatch=%d currentSourceLog=%s "
+                        + "offset=%d elapsedMs=%d%n",
                 dryRun,
                 committedBatches.size(),
                 sourceLogs.size(),
-                committedReadyFiles.size(),
-                deleteCandidates.size(),
-                deleted,
-                bytes
+                result.scannedRecords,
+                result.candidates,
+                result.deleted,
+                result.bytes,
+                result.stoppedBy,
+                state.lastCompletedBatch,
+                state.currentSourceLog,
+                state.currentSourceOffset,
+                elapsedMs(startedAt)
         );
+    }
+
+    private static CleanupResult processSourceLogs(
+            List<SourceLogRef> sourceLogs,
+            Path readyDir,
+            Duration minAge,
+            int maxFiles,
+            int maxRecords,
+            boolean dryRun,
+            CleanupState state
+    ) throws Exception {
+        CleanupResult result = new CleanupResult();
+        Instant cutoff = Instant.now().minus(minAge);
+        Path normalizedReadyDir = readyDir.toAbsolutePath().normalize();
+        for (SourceLogRef sourceLog : sourceLogs) {
+            long offset = sourceLog.path.getFileName().toString().equals(state.currentSourceLog)
+                    ? Math.max(0L, state.currentSourceOffset)
+                    : 0L;
+            System.out.printf(
+                    "Raw spool cleanup phase source-log: batch=%d file=%s offset=%d%n",
+                    sourceLog.batchId,
+                    sourceLog.path.getFileName(),
+                    offset
+            );
+            try (RandomAccessFile reader = new RandomAccessFile(sourceLog.path.toFile(), "r")) {
+                reader.seek(Math.min(offset, reader.length()));
+                while (reader.getFilePointer() < reader.length()) {
+                    long lineOffset = reader.getFilePointer();
+                    String line = reader.readLine();
+                    long nextOffset = reader.getFilePointer();
+                    if (line == null) {
+                        break;
+                    }
+                    if (result.scannedRecords >= maxRecords) {
+                        result.stoppedBy = "maxRecords";
+                        state.currentSourceLog = sourceLog.path.getFileName().toString();
+                        state.currentSourceOffset = lineOffset;
+                        return result;
+                    }
+                    result.scannedRecords++;
+                    Path readyFile = readyFileFromSourceLine(line, normalizedReadyDir);
+                    if (readyFile == null) {
+                        state.currentSourceLog = sourceLog.path.getFileName().toString();
+                        state.currentSourceOffset = nextOffset;
+                        continue;
+                    }
+                    FileDecision decision = decideFile(readyFile, cutoff);
+                    if (decision == FileDecision.NOT_OLD_ENOUGH) {
+                        result.stoppedBy = "minAge";
+                        state.currentSourceLog = sourceLog.path.getFileName().toString();
+                        state.currentSourceOffset = lineOffset;
+                        return result;
+                    }
+                    if (decision == FileDecision.DELETE) {
+                        result.candidates++;
+                        long size = Files.size(readyFile);
+                        result.bytes += size;
+                        if (!dryRun) {
+                            Files.deleteIfExists(readyFile);
+                            result.deleted++;
+                        }
+                        if (result.deleted >= maxFiles || (dryRun && result.candidates >= maxFiles)) {
+                            result.stoppedBy = "maxFiles";
+                            state.currentSourceLog = sourceLog.path.getFileName().toString();
+                            state.currentSourceOffset = nextOffset;
+                            return result;
+                        }
+                    }
+                    state.currentSourceLog = sourceLog.path.getFileName().toString();
+                    state.currentSourceOffset = nextOffset;
+                }
+            }
+            state.lastCompletedBatch = Math.max(state.lastCompletedBatch, sourceLog.batchId);
+            state.currentSourceLog = null;
+            state.currentSourceOffset = 0L;
+        }
+        result.stoppedBy = "end";
+        return result;
+    }
+
+    private static FileDecision decideFile(Path readyFile, Instant cutoff) throws IOException {
+        if (!Files.isRegularFile(readyFile)) {
+            return FileDecision.SKIP;
+        }
+        BasicFileAttributes attrs = Files.readAttributes(readyFile, BasicFileAttributes.class);
+        if (attrs.lastModifiedTime().toInstant().isAfter(cutoff)) {
+            return FileDecision.NOT_OLD_ENOUGH;
+        }
+        return FileDecision.DELETE;
+    }
+
+    private static Path readyFileFromSourceLine(String line, Path normalizedReadyDir) throws IOException {
+        if (line.isBlank() || line.equals("v1")) {
+            return null;
+        }
+        JsonNode node = OBJECT_MAPPER.readTree(new String(line.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8));
+        JsonNode pathNode = node.get("path");
+        if (pathNode == null || pathNode.asText().isBlank()) {
+            return null;
+        }
+        Path sourcePath = pathFromSparkUri(pathNode.asText()).toAbsolutePath().normalize();
+        if (sourcePath.getParent() == null || !sourcePath.getParent().equals(normalizedReadyDir)) {
+            return null;
+        }
+        return sourcePath;
     }
 
     private static Set<Long> readCommittedBatches(Path commitDir) throws IOException {
@@ -98,92 +247,62 @@ public class BusRawSpoolCleanupJob {
         return batches;
     }
 
-    private static List<Path> listSourceLogs(Path sourceLogDir, Set<Long> committedBatches) throws IOException {
-        List<Path> sourceLogs = new ArrayList<>();
-        long latestCommittedCompactBatch = -1L;
-        Path latestCommittedCompact = null;
+    private static List<SourceLogRef> listSourceLogs(
+            Path sourceLogDir,
+            Set<Long> committedBatches,
+            CleanupState state
+    ) throws IOException {
+        List<SourceLogRef> regularLogs = new ArrayList<>();
+        SourceLogRef latestCommittedCompact = null;
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceLogDir)) {
             for (Path path : stream) {
                 String name = path.getFileName().toString();
                 if (name.startsWith(".") || name.endsWith(".crc")) {
                     continue;
                 }
-                if (name.endsWith(".compact")) {
-                    String batchName = name.substring(0, name.length() - ".compact".length());
-                    try {
-                        long batchId = Long.parseLong(batchName);
-                        if (committedBatches.contains(batchId) && batchId > latestCommittedCompactBatch) {
-                            latestCommittedCompactBatch = batchId;
-                            latestCommittedCompact = path;
-                        }
-                    } catch (NumberFormatException ignored) {
-                        // Only numeric compact source log files are valid.
-                    }
+                Long batchId = parseBatchId(name);
+                if (batchId == null || !committedBatches.contains(batchId)) {
                     continue;
                 }
-                try {
-                    long batchId = Long.parseLong(name);
-                    if (committedBatches.contains(batchId) && batchId > latestCommittedCompactBatch) {
-                        sourceLogs.add(path);
+                SourceLogRef ref = new SourceLogRef(batchId, path);
+                if (name.endsWith(".compact")) {
+                    if (latestCommittedCompact == null || batchId > latestCommittedCompact.batchId) {
+                        latestCommittedCompact = ref;
                     }
-                } catch (NumberFormatException ignored) {
-                    // Only numeric source log files are per-batch file lists.
+                } else {
+                    regularLogs.add(ref);
                 }
             }
         }
-        long compactBatch = latestCommittedCompactBatch;
-        sourceLogs.removeIf(path -> batchIdFromPath(path) <= compactBatch);
-        sourceLogs.sort(Comparator.comparingLong(BusRawSpoolCleanupJob::batchIdFromPath));
-        if (latestCommittedCompact != null) {
-            sourceLogs.add(0, latestCommittedCompact);
+
+        long floorBatch = Math.max(0L, state.lastCompletedBatch);
+        List<SourceLogRef> result = new ArrayList<>();
+        if (latestCommittedCompact != null && latestCommittedCompact.batchId > floorBatch) {
+            result.add(latestCommittedCompact);
+            floorBatch = latestCommittedCompact.batchId;
+        } else if (state.currentSourceLog != null && latestCommittedCompact != null
+                && latestCommittedCompact.path.getFileName().toString().equals(state.currentSourceLog)) {
+            result.add(latestCommittedCompact);
+            floorBatch = latestCommittedCompact.batchId;
         }
-        return sourceLogs;
+        long regularLogFloorBatch = floorBatch;
+        regularLogs.stream()
+                .filter(ref -> ref.batchId > regularLogFloorBatch
+                        || (state.currentSourceLog != null && ref.path.getFileName().toString().equals(state.currentSourceLog)))
+                .sorted(Comparator.comparingLong(ref -> ref.batchId))
+                .forEach(result::add);
+        return result;
     }
 
-    private static Set<Path> readCommittedReadyFiles(List<Path> sourceLogs, Path readyDir) throws IOException {
-        Path normalizedReadyDir = readyDir.toAbsolutePath().normalize();
-        Set<Path> paths = new HashSet<>();
-        for (Path sourceLog : sourceLogs) {
-            try (BufferedReader reader = Files.newBufferedReader(sourceLog, StandardCharsets.UTF_8)) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.isBlank() || line.equals("v1")) {
-                        continue;
-                    }
-                    JsonNode node = OBJECT_MAPPER.readTree(line);
-                    JsonNode pathNode = node.get("path");
-                    if (pathNode == null || pathNode.asText().isBlank()) {
-                        continue;
-                    }
-                    Path sourcePath = pathFromSparkUri(pathNode.asText()).toAbsolutePath().normalize();
-                    if (sourcePath.getParent() != null && sourcePath.getParent().equals(normalizedReadyDir)) {
-                        paths.add(sourcePath);
-                    }
-                }
-            }
+    private static Long parseBatchId(String name) {
+        if (name.endsWith(".compact")) {
+            name = name.substring(0, name.length() - ".compact".length());
         }
-        return paths;
-    }
-
-    private static List<Path> selectDeleteCandidates(Set<Path> committedReadyFiles, Duration minAge, int maxFiles)
-            throws IOException {
-        Instant cutoff = Instant.now().minus(minAge);
-        List<Path> candidates = new ArrayList<>();
-        for (Path path : committedReadyFiles) {
-            if (!Files.isRegularFile(path)) {
-                continue;
-            }
-            BasicFileAttributes attrs = Files.readAttributes(path, BasicFileAttributes.class);
-            if (attrs.lastModifiedTime().toInstant().isAfter(cutoff)) {
-                continue;
-            }
-            candidates.add(path);
+        try {
+            return Long.parseLong(name);
+        } catch (NumberFormatException ignored) {
+            return null;
         }
-        candidates.sort(Comparator.comparing(BusRawSpoolCleanupJob::lastModifiedOrEpoch));
-        if (candidates.size() > maxFiles) {
-            return new ArrayList<>(candidates.subList(0, maxFiles));
-        }
-        return candidates;
     }
 
     private static Path pathFromSparkUri(String value) {
@@ -193,19 +312,52 @@ public class BusRawSpoolCleanupJob {
         return Paths.get(value);
     }
 
-    private static long batchIdFromPath(Path path) {
-        String name = path.getFileName().toString();
-        if (name.endsWith(".compact")) {
-            name = name.substring(0, name.length() - ".compact".length());
+    private static CleanupState readState(Path stateFile) throws IOException {
+        if (!Files.exists(stateFile)) {
+            return new CleanupState();
         }
-        return Long.parseLong(name);
+        return OBJECT_MAPPER.readValue(stateFile.toFile(), CleanupState.class);
     }
 
-    private static Instant lastModifiedOrEpoch(Path path) {
-        try {
-            return Files.getLastModifiedTime(path).toInstant();
-        } catch (IOException e) {
-            return Instant.EPOCH;
+    private static void writeState(Path stateFile, CleanupState state) throws IOException {
+        Files.createDirectories(stateFile.getParent());
+        Path tempFile = Files.createTempFile(stateFile.getParent(), stateFile.getFileName().toString(), ".tmp");
+        OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValue(tempFile.toFile(), state);
+        Files.move(tempFile, stateFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private static long elapsedMs(Instant startedAt) {
+        return Duration.between(startedAt, Instant.now()).toMillis();
+    }
+
+    private enum FileDecision {
+        DELETE,
+        NOT_OLD_ENOUGH,
+        SKIP
+    }
+
+    public static final class CleanupState {
+        public String updatedAt;
+        public long lastCompletedBatch;
+        public String currentSourceLog;
+        public long currentSourceOffset;
+    }
+
+    private static final class SourceLogRef {
+        private final long batchId;
+        private final Path path;
+
+        private SourceLogRef(long batchId, Path path) {
+            this.batchId = batchId;
+            this.path = path;
         }
+    }
+
+    private static final class CleanupResult {
+        private int scannedRecords;
+        private int candidates;
+        private int deleted;
+        private long bytes;
+        private String stoppedBy = "end";
     }
 }

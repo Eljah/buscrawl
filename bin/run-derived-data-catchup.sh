@@ -6,8 +6,31 @@ APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$APP_DIR"
 
 LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
+LOCK_LOG=${BUS_HEAVY_JOB_LOCK_LOG:-/home/eljah/apps/buscrawl/logs/heavy-io-lock.log}
+
+lock_log() {
+  mkdir -p "$(dirname "$LOCK_LOG")"
+  echo "$(date -Is) job=derived-data-catchup pid=$$ $*" >> "$LOCK_LOG"
+}
+
 exec 9>"$LOCK_FILE"
+lock_wait_started_ms=$(date +%s%3N)
+lock_log "lock=wait path=$LOCK_FILE"
 flock 9
+lock_acquired_ms=$(date +%s%3N)
+lock_log "lock=acquired path=$LOCK_FILE waitMs=$((lock_acquired_ms - lock_wait_started_ms))"
+release_heavy_lock() {
+  local status=$?
+  if [[ "${LOCK_RELEASED:-false}" == "true" ]]; then
+    return "$status"
+  fi
+  LOCK_RELEASED=true
+  local released_ms
+  released_ms=$(date +%s%3N)
+  lock_log "lock=released path=$LOCK_FILE heldMs=$((released_ms - lock_acquired_ms)) status=$status"
+  return "$status"
+}
+trap release_heavy_lock EXIT
 
 LOG_PREFIX="$(date -Is)"
 echo "$LOG_PREFIX derived data catchup started"
@@ -120,9 +143,10 @@ BUS_TRAFFIC_BEHAVIOR_OUTPUT_PARTITIONS="${BUS_TRAFFIC_BEHAVIOR_OUTPUT_PARTITIONS
 BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY="${BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY:-true}" \
   ./bin/run-traffic-behavior-aggregation.sh
 
-BUS_SKIP_HEAVY_JOB_LOCK=true ./bin/run-dashboard-cache.sh
+./bin/run-dashboard-cache.sh
 
 echo "$(date -Is) derived data critical catchup finished"
+release_heavy_lock
 exec 9>&-
 
 if [[ "${BUS_DERIVED_RUN_UI_CACHE_AFTER:-true}" == "true" ]]; then

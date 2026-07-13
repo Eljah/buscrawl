@@ -77,6 +77,15 @@ commits_dir = checkpoint / "commits"
 if not checkpoint.exists():
     raise SystemExit(0)
 
+try:
+    backup_root.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # Older manual repairs may leave the shared backup directory root-owned.
+    # The stream runs as eljah, so fall back to a checkpoint-local backup path
+    # rather than failing before Spark can repair/replay the tail.
+    backup_root = checkpoint / "_repair-backup" / ("stream-start-" + datetime.now().strftime("%Y%m%d%H%M%S"))
+    backup_root.mkdir(parents=True, exist_ok=True)
+
 sources = numeric_files(sources_dir)
 offsets = numeric_files(offsets_dir)
 commits = numeric_files(commits_dir)
