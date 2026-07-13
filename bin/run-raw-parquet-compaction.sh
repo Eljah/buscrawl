@@ -3,9 +3,21 @@ set -euo pipefail
 
 cd /home/eljah/apps/buscrawl
 
+if [[ "${BUS_SKIP_HEAVY_JOB_LOCK:-false}" != "true" ]]; then
+  LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "$(date -Is) raw parquet compaction skipped: another heavy derived job is running"
+    exit 0
+  fi
+fi
+
 export BUS_PARQUET_DIR=${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet}
 export BUS_COMPACTED_PARQUET_DIR=${BUS_COMPACTED_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}
 export BUS_COMPACTED_PARQUET_STATE_FILE=${BUS_COMPACTED_PARQUET_STATE_FILE:-/home/eljah/data/buscrawl/bus-data-parquet-compacted/compaction-state.json}
+export BUS_RAW_PARQUET_MANIFEST_FILE=${BUS_RAW_PARQUET_MANIFEST_FILE:-/home/eljah/data/buscrawl/bus-data-parquet-manifest.tsv}
+export BUS_RAW_PARQUET_LEGACY_MANIFEST_FILE=${BUS_RAW_PARQUET_LEGACY_MANIFEST_FILE:-/home/eljah/data/buscrawl/bus-data-parquet-legacy-manifest.tsv}
+export BUS_COMPACTED_PARQUET_USE_MANIFEST=${BUS_COMPACTED_PARQUET_USE_MANIFEST:-true}
 export BUS_COMPACTED_PARQUET_SPARK_LOCAL_DIR=${BUS_COMPACTED_PARQUET_SPARK_LOCAL_DIR:-/home/eljah/data/buscrawl/compaction-spark-temp}
 export BUS_COMPACTED_PARQUET_SPARK_MASTER=${BUS_COMPACTED_PARQUET_SPARK_MASTER:-local[2]}
 export BUS_COMPACTED_PARQUET_DRIVER_MEMORY=${BUS_COMPACTED_PARQUET_DRIVER_MEMORY:-4g}

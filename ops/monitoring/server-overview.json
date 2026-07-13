@@ -1,0 +1,1397 @@
+{
+    "annotations":  {
+                        "list":  [
+
+                                 ]
+                    },
+    "editable":  true,
+    "panels":  [
+                   {
+                       "id":  1,
+                       "title":  "CPU used",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  0
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+                                           "legendFormat":  "CPU used",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  2,
+                       "title":  "Memory",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  0
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "bytes"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+                                           "legendFormat":  "RAM used",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "node_memory_MemAvailable_bytes",
+                                           "legendFormat":  "RAM available",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes",
+                                           "legendFormat":  "Swap used",
+                                           "refId":  "C"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  3,
+                       "title":  "Disk used",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  0
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "100 * (1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"})",
+                                           "legendFormat":  "{{mountpoint}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  4,
+                       "title":  "Temperature sensors",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  8
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "celsius"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "node_hwmon_temp_celsius",
+                                           "legendFormat":  "{{chip}} {{sensor}}",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "node_thermal_zone_temp",
+                                           "legendFormat":  "{{thermal_zone}}",
+                                           "refId":  "B"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  5,
+                       "title":  "Network",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  8
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "Bps"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "rate(node_network_receive_bytes_total{device!~\"lo\"}[5m])",
+                                           "legendFormat":  "rx {{device}}",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "rate(node_network_transmit_bytes_total{device!~\"lo\"}[5m])",
+                                           "legendFormat":  "tx {{device}}",
+                                           "refId":  "B"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  6,
+                       "title":  "Disk IO",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  8
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "Bps"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "rate(node_disk_read_bytes_total{device=\"sda\"}[5m])",
+                                           "legendFormat":  "sda read",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "rate(node_disk_written_bytes_total{device=\"sda\"}[5m])",
+                                           "legendFormat":  "sda write",
+                                           "refId":  "B"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  7,
+                       "title":  "Disk IO time",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  16
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "rate(node_disk_io_time_seconds_total{device=\"sda\"}[5m]) * 100",
+                                           "legendFormat":  "sda io busy approx",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  8,
+                       "title":  "SMART disk health",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  16
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "none"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "smart_cciss_disk_health",
+                                           "legendFormat":  "{{disk}} {{serial}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  9,
+                       "title":  "SMART disk temperature",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  16
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "celsius"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "smart_cciss_attribute_raw{attribute=\"temperature_celsius\"}",
+                                           "legendFormat":  "{{disk}} {{serial}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  10,
+                       "title":  "SMART reallocated sectors",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  24
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "none"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "smart_cciss_attribute_raw{attribute=\"reallocated_sector_count\"}",
+                                           "legendFormat":  "{{disk}} {{serial}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  11,
+                       "title":  "SMART power-on hours",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  24
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "h"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "smart_cciss_attribute_raw{attribute=\"power_on_hours\"}",
+                                           "legendFormat":  "{{disk}} {{serial}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  12,
+                       "title":  "SMART error counters",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  24
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "none"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "smart_cciss_attribute_raw{attribute=~\"current_pending_sector|offline_uncorrectable|reported_uncorrectable_errors|command_timeout|spin_retry_count\"}",
+                                           "legendFormat":  "{{disk}} {{serial}} {{attribute}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  13,
+                       "title":  "Java RSS per process",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  32
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "bytes"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "java_process_memory_rss_bytes",
+                                           "legendFormat":  "{{pid}} {{main}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  14,
+                       "title":  "Java CPU per process",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  32
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "java_process_cpu_percent",
+                                           "legendFormat":  "{{pid}} {{main}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  15,
+                       "title":  "Java open FDs per process",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  32
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "none"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "java_process_open_fds",
+                                           "legendFormat":  "{{pid}} {{main}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  16,
+                       "title":  "Filesystem size, GB",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  6,
+                                       "x":  0,
+                                       "y":  40
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "gbytes",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"} / 1024 / 1024 / 1024",
+                                           "legendFormat":  "{{mountpoint}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  17,
+                       "title":  "Filesystem used, GB",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  6,
+                                       "x":  6,
+                                       "y":  40
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "gbytes",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "(node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"}) / 1024 / 1024 / 1024",
+                                           "legendFormat":  "{{mountpoint}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  18,
+                       "title":  "Filesystem free, GB",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  6,
+                                       "x":  12,
+                                       "y":  40
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "gbytes",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"} / 1024 / 1024 / 1024",
+                                           "legendFormat":  "{{mountpoint}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  19,
+                       "title":  "Filesystem used, %",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  6,
+                                       "x":  18,
+                                       "y":  40
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "100 * (1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|devtmpfs\",mountpoint!~\"/run.*|/sys.*|/proc.*\"})",
+                                           "legendFormat":  "{{mountpoint}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  20,
+                       "title":  "IPMI fan blocks, %",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  48
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "ipmi_sensor_value{type=\"fan_percent\"}",
+                                           "legendFormat":  "{{sensor}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  21,
+                       "title":  "IPMI power, W",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  48
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "watt",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "ipmi_sensor_value{type=\"power_watts\"}",
+                                           "legendFormat":  "{{sensor}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  22,
+                       "title":  "IPMI temperatures, C",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  48
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "celsius",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "ipmi_sensor_value{type=\"temperature_celsius\"}",
+                                           "legendFormat":  "{{sensor}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  23,
+                       "title":  "IPMI chassis fault flags",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  56
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "none",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "ipmi_chassis_status{status=~\".*Fault|Power Overload|Chassis Intrusion|Cooling/Fan Fault|Drive Fault\"}",
+                                           "legendFormat":  "{{status}}",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  24,
+                       "title":  "IPMI collector age, sec",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  56
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "s",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "single",
+                                                       "sort":  "none"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "time() - ipmi_scrape_timestamp_seconds",
+                                           "legendFormat":  "age",
+                                           "refId":  "A"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  26,
+                       "title":  "Current power and load context",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  56
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "watt",
+                                                            "decimals":  1
+                                                        },
+                                           "overrides":  [
+                                                             {
+                                                                 "matcher":  {
+                                                                                 "id":  "byRegexp",
+                                                                                 "options":  ".*%$"
+                                                                             },
+                                                                 "properties":  [
+                                                                                    {
+                                                                                        "id":  "unit",
+                                                                                        "value":  "percent"
+                                                                                    },
+                                                                                    {
+                                                                                        "id":  "custom.axisPlacement",
+                                                                                        "value":  "right"
+                                                                                    }
+                                                                                ]
+                                                             },
+                                                             {
+                                                                 "matcher":  {
+                                                                                 "id":  "byRegexp",
+                                                                                 "options":  ".*C$"
+                                                                             },
+                                                                 "properties":  [
+                                                                                    {
+                                                                                        "id":  "unit",
+                                                                                        "value":  "celsius"
+                                                                                    },
+                                                                                    {
+                                                                                        "id":  "custom.axisPlacement",
+                                                                                        "value":  "right"
+                                                                                    }
+                                                                                ]
+                                                             }
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "ipmi_sensor_value{type=\"power_watts\"}",
+                                           "legendFormat":  "total power W",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+                                           "legendFormat":  "CPU busy %",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "100 * max(rate(node_disk_io_time_seconds_total{device!~\"loop.*|ram.*|fd.*\"}[5m]))",
+                                           "legendFormat":  "disk IO busy %",
+                                           "refId":  "C"
+                                       },
+                                       {
+                                           "expr":  "avg(ipmi_sensor_value{type=\"fan_percent\"})",
+                                           "legendFormat":  "fan avg %",
+                                           "refId":  "D"
+                                       },
+                                       {
+                                           "expr":  "avg(ipmi_sensor_value{type=\"temperature_celsius\"})",
+                                           "legendFormat":  "IPMI temp avg C",
+                                           "refId":  "E"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  25,
+                       "title":  "IPMI energy used and average power",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  24,
+                                       "x":  0,
+                                       "y":  64
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "kwatth",
+                                                            "decimals":  3
+                                                        },
+                                           "overrides":  [
+                                                             {
+                                                                 "matcher":  {
+                                                                                 "id":  "byRegexp",
+                                                                                 "options":  ".*avg W$"
+                                                                             },
+                                                                 "properties":  [
+                                                                                    {
+                                                                                        "id":  "unit",
+                                                                                        "value":  "watt"
+                                                                                    },
+                                                                                    {
+                                                                                        "id":  "custom.axisPlacement",
+                                                                                        "value":  "right"
+                                                                                    },
+                                                                                    {
+                                                                                        "id":  "decimals",
+                                                                                        "value":  0
+                                                                                    }
+                                                                                ]
+                                                             }
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "sum_over_time(ipmi_sensor_value{type=\"power_watts\"}[1h]) * 15 / 3600000",
+                                           "legendFormat":  "rolling 1h kWh",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "sum_over_time(ipmi_sensor_value{type=\"power_watts\"}[24h]) * 15 / 3600000",
+                                           "legendFormat":  "rolling 24h kWh",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "avg_over_time(ipmi_sensor_value{type=\"power_watts\"}[1h])",
+                                           "legendFormat":  "rolling 1h avg W",
+                                           "refId":  "C"
+                                       },
+                                       {
+                                           "expr":  "avg_over_time(ipmi_sensor_value{type=\"power_watts\"}[24h])",
+                                           "legendFormat":  "rolling 24h avg W",
+                                           "refId":  "D"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  27,
+                       "title":  "Host heartbeat lag",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  72
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "s"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "time() - buscrawl_host_heartbeat_timestamp_seconds",
+                                           "legendFormat":  "heartbeat lag",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "buscrawl_host_heartbeat_stall_threshold_seconds",
+                                           "legendFormat":  "stall event threshold",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "300",
+                                           "legendFormat":  "watchdog timeout",
+                                           "refId":  "C"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  28,
+                       "title":  "Recovered host stalls",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  8,
+                                       "y":  72
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "short"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "increase(buscrawl_host_heartbeat_stall_events_total[$__range])",
+                                           "legendFormat":  "recovered stall events in range",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "buscrawl_host_heartbeat_loop_delay_seconds",
+                                           "legendFormat":  "last loop delay sec",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "buscrawl_host_heartbeat_max_loop_delay_seconds",
+                                           "legendFormat":  "max loop delay sec",
+                                           "refId":  "C"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  29,
+                       "title":  "Reboots and last previous heartbeat",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  16,
+                                       "y":  72
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "short"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "changes(node_boot_time_seconds[$__range])",
+                                           "legendFormat":  "boot time changes in range",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "increase(buscrawl_host_heartbeat_reboot_events_observed_total[$__range])",
+                                           "legendFormat":  "heartbeat observed reboots",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "time() - buscrawl_host_heartbeat_previous_boot_last_seen_timestamp_seconds",
+                                           "legendFormat":  "seconds since previous boot last heartbeat",
+                                           "refId":  "C"
+                                       }
+                                   ]
+                   },
+                   {
+                       "id":  30,
+                       "title":  "Stall context: IO wait and runnable load",
+                       "type":  "timeseries",
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  24,
+                                       "x":  0,
+                                       "y":  80
+                                   },
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "Prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "unit":  "percent"
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "options":  {
+                                       "legend":  {
+                                                      "displayMode":  "list",
+                                                      "placement":  "bottom"
+                                                  },
+                                       "tooltip":  {
+                                                       "mode":  "multi",
+                                                       "sort":  "desc"
+                                                   }
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "100 * avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[5m]))",
+                                           "legendFormat":  "CPU iowait %",
+                                           "refId":  "A"
+                                       },
+                                       {
+                                           "expr":  "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+                                           "legendFormat":  "CPU busy %",
+                                           "refId":  "B"
+                                       },
+                                       {
+                                           "expr":  "100 * max(rate(node_disk_io_time_seconds_total{device!~\"loop.*|ram.*|fd.*\"}[5m]))",
+                                           "legendFormat":  "max disk IO busy %",
+                                           "refId":  "C"
+                                       },
+                                       {
+                                           "expr":  "node_load1 / count(count by (cpu) (node_cpu_seconds_total{mode=\"idle\"})) * 100",
+                                           "legendFormat":  "load1 per CPU %",
+                                           "refId":  "D"
+                                       }
+                                   ]
+                   }
+               ],
+    "refresh":  "30s",
+    "schemaVersion":  39,
+    "tags":  [
+                 "disk",
+                 "energy",
+                 "heartbeat",
+                 "ipmi",
+                 "java",
+                 "node",
+                 "server",
+                 "smart",
+                 "stalls",
+                 "watchdog"
+             ],
+    "time":  {
+                 "from":  "now-6h",
+                 "to":  "now"
+             },
+    "timezone":  "browser",
+    "title":  "Server Overview",
+    "uid":  "server-overview"
+}

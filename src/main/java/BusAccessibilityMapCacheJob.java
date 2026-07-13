@@ -30,6 +30,7 @@ import java.io.DataOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -110,6 +111,18 @@ public class BusAccessibilityMapCacheJob {
     );
     private static final double ROAD_NODE_GRID_DEGREES = Double.parseDouble(System.getenv().getOrDefault("BUS_ACCESSIBILITY_ROAD_NODE_GRID_DEGREES", "0.005"));
     private static final int TILE_SIZE = 256;
+    private static final int SNAPSHOT_RENDER_SLEEP_MILLIS = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS",
+            "0"
+    ));
+    private static final int SNAPSHOT_MAX_DISK_INFLIGHT = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_SNAPSHOT_MAX_DISK_INFLIGHT",
+            "96"
+    ));
+    private static final int SNAPSHOT_DISK_WAIT_MAX_MILLIS = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_SNAPSHOT_DISK_WAIT_MAX_MILLIS",
+            "60000"
+    ));
 
     public static void main(String[] args) throws Exception {
         ImageIO.setUseCache(false);
@@ -136,6 +149,10 @@ public class BusAccessibilityMapCacheJob {
         Path tileBaseRoot = Path.of(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_TILE_BASE_ROOT",
                 tileRoot.getParent() == null ? tileRoot.toString() : tileRoot.getParent().toString()
+        ));
+        Path tileStagingRoot = Path.of(System.getenv().getOrDefault(
+                "BUS_ACCESSIBILITY_TILE_STAGING_ROOT",
+                tileBaseRoot.resolve(".staging").toString()
         ));
         String tileUrlPrefix = normalizeTileUrlPrefix(System.getenv().getOrDefault(
                 "BUS_ACCESSIBILITY_TILE_URL_PREFIX",
@@ -261,69 +278,81 @@ public class BusAccessibilityMapCacheJob {
                             : buildAccessibilitySegments(walkCache, reachability.stopTimes);
                     String snapshotId = snapshotId(snapshotDate, snapshotTime);
                     debugTopTotalSegments(snapshotDate, snapshotTime, segments);
-                    Path snapshotRoot = tileBaseRoot.resolve(snapshotId);
+                    Path finalSnapshotRoot = tileBaseRoot.resolve(snapshotId);
+                    Path snapshotRoot = createSnapshotStagingRoot(tileStagingRoot, originSlug, snapshotId);
                     Path totalTileRoot = snapshotRoot.resolve("total");
                     Path totalNormalizedTileRoot = snapshotRoot.resolve("total-normalized");
                     Path totalLogTileRoot = snapshotRoot.resolve("total-log");
                     Path walkTileRoot = snapshotRoot.resolve("walk");
                     Path stopTransportTileRoot = snapshotRoot.resolve("stop-transport");
-                    Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes = renderCache == null
-                            ? buildTileIndexes(segments, Double.POSITIVE_INFINITY)
-                            : Map.of();
-                    logSnapshotStage(snapshotId, "render total tiles start");
-                    ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes, renderCache);
-                    logSnapshotStage(snapshotId, "render total tiles done");
-                    ColorScale totalNormalizedColorScale = null;
-                    if (renderModes.contains("totalNormalized")) {
-                        logSnapshotStage(snapshotId, "render totalNormalized tiles start");
-                        totalNormalizedColorScale = renderTiles(segments, totalNormalizedTileRoot, ColorMetric.TOTAL_NORMALIZED, tileIndexes, renderCache);
-                        logSnapshotStage(snapshotId, "render totalNormalized tiles done");
+                    try {
+                        Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes = renderCache == null
+                                ? buildTileIndexes(segments, Double.POSITIVE_INFINITY)
+                                : Map.of();
+                        logSnapshotStage(snapshotId, "render total tiles start");
+                        ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes, renderCache);
+                        logSnapshotStage(snapshotId, "render total tiles done");
+                        ColorScale totalNormalizedColorScale = null;
+                        if (renderModes.contains("totalNormalized")) {
+                            logSnapshotStage(snapshotId, "render totalNormalized tiles start");
+                            totalNormalizedColorScale = renderTiles(segments, totalNormalizedTileRoot, ColorMetric.TOTAL_NORMALIZED, tileIndexes, renderCache);
+                            logSnapshotStage(snapshotId, "render totalNormalized tiles done");
+                        }
+                        ColorScale totalLogColorScale = null;
+                        if (renderModes.contains("totalLog")) {
+                            logSnapshotStage(snapshotId, "render totalLog tiles start");
+                            totalLogColorScale = renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes, renderCache);
+                            logSnapshotStage(snapshotId, "render totalLog tiles done");
+                        }
+                        ColorScale walkColorScale = null;
+                        if (renderModes.contains("walk")) {
+                            logSnapshotStage(snapshotId, "render walk tiles start");
+                            walkColorScale = renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes, renderCache);
+                            logSnapshotStage(snapshotId, "render walk tiles done");
+                        }
+                        ColorScale stopTransportColorScale = null;
+                        if (renderModes.contains("stopTransport")) {
+                            logSnapshotStage(snapshotId, "render stopTransport tiles start");
+                            stopTransportColorScale = renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes, renderCache);
+                            logSnapshotStage(snapshotId, "render stopTransport tiles done");
+                        }
+                        logSnapshotStage(snapshotId, "calculate contours start");
+                        ContourResult contourResult = calculateContourResult(segments, renderCache, householdIndex);
+                        logSnapshotStage(snapshotId, "calculate contours done");
+                        markSnapshotSuccess(snapshotRoot, snapshotId);
+                        logSnapshotStage(snapshotId, "publish tiles start");
+                        publishSnapshotRoot(snapshotRoot, finalSnapshotRoot);
+                        logSnapshotStage(snapshotId, "publish tiles done");
+                        snapshots.add(new SnapshotPayload(
+                                snapshotId,
+                                snapshotDate,
+                                snapshotTime,
+                                reachability,
+                                segments.size(),
+                                contourResult.stats,
+                                contourResult.polygons,
+                                totalColorScale,
+                                totalNormalizedColorScale,
+                                totalLogColorScale,
+                                walkColorScale,
+                                stopTransportColorScale,
+                                tileUrlPrefix
+                        ));
+                        writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
+                        writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
+                        System.out.printf(
+                                Locale.ROOT,
+                                "BusAccessibilityMapCacheJob: rendered snapshot %s stops=%d segments=%d%n",
+                                snapshotId,
+                                reachability.stopTimes.size(),
+                                segments.size()
+                        );
+                    } catch (Exception e) {
+                        cleanupTempRootQuietly(snapshotRoot);
+                        throw e;
+                    } finally {
+                        sleepAfterSnapshot(snapshotId);
                     }
-                    ColorScale totalLogColorScale = null;
-                    if (renderModes.contains("totalLog")) {
-                        logSnapshotStage(snapshotId, "render totalLog tiles start");
-                        totalLogColorScale = renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes, renderCache);
-                        logSnapshotStage(snapshotId, "render totalLog tiles done");
-                    }
-                    ColorScale walkColorScale = null;
-                    if (renderModes.contains("walk")) {
-                        logSnapshotStage(snapshotId, "render walk tiles start");
-                        walkColorScale = renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes, renderCache);
-                        logSnapshotStage(snapshotId, "render walk tiles done");
-                    }
-                    ColorScale stopTransportColorScale = null;
-                    if (renderModes.contains("stopTransport")) {
-                        logSnapshotStage(snapshotId, "render stopTransport tiles start");
-                        stopTransportColorScale = renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes, renderCache);
-                        logSnapshotStage(snapshotId, "render stopTransport tiles done");
-                    }
-                    logSnapshotStage(snapshotId, "calculate contours start");
-                    ContourResult contourResult = calculateContourResult(segments, renderCache, householdIndex);
-                    logSnapshotStage(snapshotId, "calculate contours done");
-                    snapshots.add(new SnapshotPayload(
-                            snapshotId,
-                            snapshotDate,
-                            snapshotTime,
-                            reachability,
-                            segments.size(),
-                            contourResult.stats,
-                            contourResult.polygons,
-                            totalColorScale,
-                            totalNormalizedColorScale,
-                            totalLogColorScale,
-                            walkColorScale,
-                            stopTransportColorScale,
-                            tileUrlPrefix
-                    ));
-                    writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
-                    writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
-                    System.out.printf(
-                            Locale.ROOT,
-                            "BusAccessibilityMapCacheJob: rendered snapshot %s stops=%d segments=%d%n",
-                            snapshotId,
-                            reachability.stopTimes.size(),
-                            segments.size()
-                    );
                 }
             }
             writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
@@ -1965,6 +1994,143 @@ public class BusAccessibilityMapCacheJob {
             cleanupTempRootQuietly(tempRoot);
             throw e;
         }
+    }
+
+    private static Path createSnapshotStagingRoot(Path stagingRoot, String originSlug, String snapshotId) throws Exception {
+        String safeOrigin = originSlug == null || originSlug.isBlank() ? "default" : originSlug.replaceAll("[^A-Za-z0-9._-]", "_");
+        Path originStagingRoot = stagingRoot.resolve(safeOrigin);
+        Files.createDirectories(originStagingRoot);
+        return Files.createTempDirectory(originStagingRoot, snapshotId + "-");
+    }
+
+    private static void markSnapshotSuccess(Path snapshotRoot, String snapshotId) throws Exception {
+        Files.writeString(
+                snapshotRoot.resolve("_SUCCESS"),
+                "snapshotId=" + snapshotId + "\ncompletedAt=" + Instant.now() + "\n",
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE
+        );
+    }
+
+    private static void publishSnapshotRoot(Path stagingSnapshotRoot, Path finalSnapshotRoot) throws Exception {
+        if (!Files.exists(stagingSnapshotRoot.resolve("_SUCCESS"))) {
+            throw new IllegalStateException("Refusing to publish incomplete snapshot without _SUCCESS: " + stagingSnapshotRoot);
+        }
+        Files.createDirectories(finalSnapshotRoot.getParent());
+        Path publishRoot = finalSnapshotRoot.resolveSibling(
+                finalSnapshotRoot.getFileName() + ".publish-" + System.currentTimeMillis()
+        );
+        copyDirectory(stagingSnapshotRoot, publishRoot);
+        try {
+            if (Files.exists(finalSnapshotRoot)) {
+                clearDirectory(finalSnapshotRoot);
+                Files.delete(finalSnapshotRoot);
+            }
+            try {
+                Files.move(publishRoot, finalSnapshotRoot, StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception ignored) {
+                Files.move(publishRoot, finalSnapshotRoot, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception e) {
+            cleanupTempRootQuietly(publishRoot);
+            throw e;
+        } finally {
+            cleanupTempRootQuietly(stagingSnapshotRoot);
+        }
+    }
+
+    private static void copyDirectory(Path sourceRoot, Path targetRoot) throws Exception {
+        try (java.util.stream.Stream<Path> stream = Files.walk(sourceRoot)) {
+            List<Path> paths = stream.sorted().collect(Collectors.toList());
+            for (Path source : paths) {
+                Path target = targetRoot.resolve(sourceRoot.relativize(source).toString());
+                if (Files.isDirectory(source)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.createDirectories(target.getParent());
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
+    }
+
+    private static void sleepAfterSnapshot(String snapshotId) {
+        try {
+            if (SNAPSHOT_RENDER_SLEEP_MILLIS > 0) {
+                System.out.printf(
+                        Locale.ROOT,
+                        "BusAccessibilityMapCacheJob: snapshot=%s sleepAfterSnapshotMillis=%d%n",
+                        snapshotId,
+                        SNAPSHOT_RENDER_SLEEP_MILLIS
+                );
+                Thread.sleep(SNAPSHOT_RENDER_SLEEP_MILLIS);
+            }
+            waitForDiskQueue(snapshotId);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void waitForDiskQueue(String snapshotId) throws InterruptedException {
+        if (SNAPSHOT_MAX_DISK_INFLIGHT <= 0 || SNAPSHOT_DISK_WAIT_MAX_MILLIS <= 0) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + SNAPSHOT_DISK_WAIT_MAX_MILLIS;
+        int lastInflight = currentDiskInflight();
+        boolean logged = false;
+        while (lastInflight > SNAPSHOT_MAX_DISK_INFLIGHT && System.currentTimeMillis() < deadline) {
+            if (!logged) {
+                System.out.printf(
+                        Locale.ROOT,
+                        "BusAccessibilityMapCacheJob: snapshot=%s waitingForDiskInflight current=%d threshold=%d maxWaitMillis=%d%n",
+                        snapshotId,
+                        lastInflight,
+                        SNAPSHOT_MAX_DISK_INFLIGHT,
+                        SNAPSHOT_DISK_WAIT_MAX_MILLIS
+                );
+                logged = true;
+            }
+            Thread.sleep(2000);
+            lastInflight = currentDiskInflight();
+        }
+        if (logged) {
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusAccessibilityMapCacheJob: snapshot=%s diskInflightAfterWait=%d%n",
+                    snapshotId,
+                    lastInflight
+            );
+        }
+    }
+
+    private static int currentDiskInflight() {
+        Path blockRoot = Path.of("/sys/block");
+        if (!Files.isDirectory(blockRoot)) {
+            return 0;
+        }
+        int total = 0;
+        try (java.util.stream.Stream<Path> stream = Files.list(blockRoot)) {
+            for (Path device : stream.collect(Collectors.toList())) {
+                String name = device.getFileName().toString();
+                if (name.startsWith("loop") || name.startsWith("ram") || name.startsWith("fd")) {
+                    continue;
+                }
+                Path inflight = device.resolve("inflight");
+                if (!Files.isRegularFile(inflight)) {
+                    continue;
+                }
+                String[] parts = Files.readString(inflight).trim().split("\\s+");
+                for (String part : parts) {
+                    if (!part.isBlank()) {
+                        total += Integer.parseInt(part);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            return 0;
+        }
+        return total;
     }
 
     private static double[] metricValuesBySegmentIndex(List<AccessibleSegment> segments, ColorMetric metric, int segmentCount) {

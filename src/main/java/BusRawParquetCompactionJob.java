@@ -32,6 +32,7 @@ public class BusRawParquetCompactionJob {
         int initialLookbackDays = Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_INITIAL_LOOKBACK_DAYS", "3"));
         String bootstrapStrategy = System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_BOOTSTRAP_MODE", "full-history");
         boolean newestFirst = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_NEWEST_FIRST", "false"));
+        long minRawParquetBytes = Long.parseLong(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_MIN_RAW_BYTES", "100"));
 
         Files.createDirectories(outputDir);
         Files.createDirectories(stateFile.getParent());
@@ -61,19 +62,74 @@ public class BusRawParquetCompactionJob {
                 "BUS_COMPACTED_PARQUET_USE_FIND_LISTING",
                 "true"
         ));
+        boolean useManifestListing = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_COMPACTED_PARQUET_USE_MANIFEST",
+                "true"
+        ));
+        Path manifestFile = Path.of(System.getenv().getOrDefault(
+                "BUS_RAW_PARQUET_MANIFEST_FILE",
+                inputDir.getParent().resolve("bus-data-parquet-manifest.tsv").toString()
+        ));
+        Path legacyManifestFile = Path.of(System.getenv().getOrDefault(
+                "BUS_RAW_PARQUET_LEGACY_MANIFEST_FILE",
+                inputDir.getParent().resolve("bus-data-parquet-legacy-manifest.tsv").toString()
+        ));
         System.out.printf(
-                "BusRawParquetCompactionJob: listing raw parquet files in %s since %s (recursive=%s, find=%s)%n",
+                "BusRawParquetCompactionJob: listing raw parquet files in %s since %s (manifest=%s, recursive=%s, find=%s)%n",
                 inputDir,
                 modifiedSince,
+                useManifestListing,
                 recursiveListing,
                 useFindListing
         );
-        List<IncrementalParquetSupport.ParquetFileInfo> candidateFiles =
-                useFindListing
+        BusRawParquetManifest.ManifestWindow manifestWindow = null;
+        List<IncrementalParquetSupport.ParquetFileInfo> candidateFiles;
+        boolean useLegacyManifest = useManifestListing
+                && Files.exists(legacyManifestFile)
+                && !state.legacyManifestComplete;
+        if (useLegacyManifest) {
+            int manifestWindowRecords = Integer.parseInt(System.getenv().getOrDefault(
+                    "BUS_COMPACTED_PARQUET_MANIFEST_WINDOW_RECORDS",
+                    Integer.toString(maxFilesPerRun)
+            ));
+            manifestWindow = BusRawParquetManifest.readWindow(
+                    legacyManifestFile,
+                    Math.max(0L, state.legacyManifestOffset),
+                    manifestWindowRecords
+            );
+            candidateFiles = manifestWindow.records;
+            System.out.printf(
+                    "BusRawParquetCompactionJob: legacy manifest window offset=%d nextOffset=%d endOffset=%d records=%d reachedEnd=%s%n",
+                    Math.max(0L, state.legacyManifestOffset),
+                    manifestWindow.nextOffset,
+                    manifestWindow.endOffset,
+                    candidateFiles.size(),
+                    manifestWindow.reachedEnd
+            );
+        } else if (useManifestListing && Files.exists(manifestFile)) {
+            int manifestWindowRecords = Integer.parseInt(System.getenv().getOrDefault(
+                    "BUS_COMPACTED_PARQUET_MANIFEST_WINDOW_RECORDS",
+                    Integer.toString(maxFilesPerRun)
+            ));
+            manifestWindow = BusRawParquetManifest.readWindow(
+                    manifestFile,
+                    Math.max(0L, state.manifestOffset),
+                    manifestWindowRecords
+            );
+            candidateFiles = manifestWindow.records;
+            System.out.printf(
+                    "BusRawParquetCompactionJob: manifest window offset=%d nextOffset=%d records=%d%n",
+                    Math.max(0L, state.manifestOffset),
+                    manifestWindow.nextOffset,
+                    candidateFiles.size()
+            );
+        } else {
+            candidateFiles = useFindListing
                         ? listRecentParquetFilesWithFind(inputDir, modifiedSince)
                         : recursiveListing
                         ? IncrementalParquetSupport.listRecentParquetFiles(inputDir, modifiedSince)
                         : IncrementalParquetSupport.listRecentParquetFilesFlat(inputDir, modifiedSince);
+        }
         List<IncrementalParquetSupport.ParquetFileInfo> selectedNewFiles =
                 IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath);
         System.out.printf(
@@ -85,11 +141,24 @@ public class BusRawParquetCompactionJob {
         int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, maxFilesPerRun));
         int startIndex = newestFirst ? Math.max(0, selectedNewFiles.size() - cappedSize) : 0;
         int endIndex = newestFirst ? selectedNewFiles.size() : cappedSize;
-        List<IncrementalParquetSupport.ParquetFileInfo> newFiles =
+        List<IncrementalParquetSupport.ParquetFileInfo> windowFiles =
                 new ArrayList<>(selectedNewFiles.subList(startIndex, endIndex));
+        List<IncrementalParquetSupport.ParquetFileInfo> newFiles =
+                filterReadableRawParquetFiles(windowFiles, minRawParquetBytes);
 
         if (newFiles.isEmpty()) {
-            System.out.println("BusRawParquetCompactionJob: no new parquet files to compact");
+            if (windowFiles.isEmpty()) {
+                System.out.println("BusRawParquetCompactionJob: no new parquet files to compact");
+                if (manifestWindow != null && !candidateFiles.isEmpty()) {
+                    updateState(stateFile, state, List.of(), manifestWindow, useLegacyManifest);
+                } else if (manifestWindow != null && useLegacyManifest && manifestWindow.reachedEnd) {
+                    state.legacyManifestComplete = true;
+                    updateState(stateFile, state, List.of(), manifestWindow, true);
+                }
+            } else {
+                System.out.println("BusRawParquetCompactionJob: no readable new parquet files to compact");
+                updateState(stateFile, state, windowFiles, manifestWindow, useLegacyManifest);
+            }
             return;
         }
 
@@ -112,7 +181,47 @@ public class BusRawParquetCompactionJob {
         }
         movePartitionedBatch(tempOutputDir, outputDir, batchId);
 
-        updateState(stateFile, state, newFiles);
+        updateState(stateFile, state, windowFiles, manifestWindow, useLegacyManifest);
+    }
+
+    private static List<IncrementalParquetSupport.ParquetFileInfo> filterReadableRawParquetFiles(
+            List<IncrementalParquetSupport.ParquetFileInfo> files,
+            long minRawParquetBytes
+    ) {
+        List<IncrementalParquetSupport.ParquetFileInfo> result = new ArrayList<>();
+        int skipped = 0;
+        for (IncrementalParquetSupport.ParquetFileInfo file : files) {
+            Path path = Path.of(file.path);
+            try {
+                long size = Files.size(path);
+                if (size < minRawParquetBytes) {
+                    skipped++;
+                    System.out.printf(
+                            "BusRawParquetCompactionJob: skipping unreadable raw parquet %s (%d bytes < %d)%n",
+                            file.path,
+                            size,
+                            minRawParquetBytes
+                    );
+                    continue;
+                }
+                result.add(file);
+            } catch (Exception exception) {
+                skipped++;
+                System.out.printf(
+                        "BusRawParquetCompactionJob: skipping unreadable raw parquet %s (%s)%n",
+                        file.path,
+                        exception.getMessage()
+                );
+            }
+        }
+        if (skipped > 0) {
+            System.out.printf(
+                    "BusRawParquetCompactionJob: skipped %d unreadable raw parquet files, %d remain%n",
+                    skipped,
+                    result.size()
+            );
+        }
+        return result;
     }
 
     private static String buildCopySql(List<IncrementalParquetSupport.ParquetFileInfo> files, Path outputDir) {
@@ -239,15 +348,30 @@ public class BusRawParquetCompactionJob {
     private static void updateState(
             Path stateFile,
             CompactionState state,
-            List<IncrementalParquetSupport.ParquetFileInfo> processedFiles
+            List<IncrementalParquetSupport.ParquetFileInfo> processedFiles,
+            BusRawParquetManifest.ManifestWindow manifestWindow,
+            boolean legacyManifest
     ) throws Exception {
-        if (processedFiles.isEmpty()) {
+        Long manifestOffset = manifestWindow == null ? null : manifestWindow.nextOffset;
+        if (processedFiles.isEmpty() && manifestOffset == null) {
             return;
         }
-        IncrementalParquetSupport.ParquetFileInfo last = processedFiles.get(processedFiles.size() - 1);
         state.updatedAt = Instant.now().toString();
-        state.lastProcessedModifiedAt = last.modifiedAt;
-        state.lastProcessedPath = last.path;
+        if (!processedFiles.isEmpty()) {
+            IncrementalParquetSupport.ParquetFileInfo last = processedFiles.get(processedFiles.size() - 1);
+            state.lastProcessedModifiedAt = last.modifiedAt;
+            state.lastProcessedPath = last.path;
+        }
+        if (manifestOffset != null) {
+            if (legacyManifest) {
+                state.legacyManifestOffset = manifestOffset;
+                if (manifestWindow.reachedEnd) {
+                    state.legacyManifestComplete = true;
+                }
+            } else {
+                state.manifestOffset = manifestOffset;
+            }
+        }
 
         Path tempFile = Files.createTempFile(stateFile.getParent(), stateFile.getFileName().toString(), ".tmp");
         MAPPER.writeValue(tempFile.toFile(), state);
@@ -258,5 +382,8 @@ public class BusRawParquetCompactionJob {
         public String updatedAt;
         public String lastProcessedModifiedAt;
         public String lastProcessedPath;
+        public long manifestOffset;
+        public long legacyManifestOffset;
+        public boolean legacyManifestComplete;
     }
 }

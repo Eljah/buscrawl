@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd /home/eljah/apps/buscrawl
 
-if [[ "${BUS_SKIP_HEAVY_JOB_LOCK:-true}" != "true" ]]; then
+if [[ "${BUS_SKIP_HEAVY_JOB_LOCK:-false}" != "true" ]]; then
   LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then

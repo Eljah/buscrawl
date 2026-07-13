@@ -1,0 +1,20 @@
+[Unit]
+Description=Buscrawl host heartbeat exporter for stall detection
+After=network-online.target monitoring-node-exporter.service
+Wants=network-online.target monitoring-node-exporter.service
+
+[Service]
+Type=simple
+User=eljah
+Group=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-monitoring-heartbeat.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/eljah/data/monitoring
+
+[Install]
+WantedBy=multi-user.target

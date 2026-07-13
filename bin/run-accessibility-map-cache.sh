@@ -16,11 +16,13 @@ export BUS_ACCESSIBILITY_DEPARTURE_STEP_MINUTES=${BUS_ACCESSIBILITY_DEPARTURE_ST
 export BUS_ACCESSIBILITY_RENDER_MODES=${BUS_ACCESSIBILITY_RENDER_MODES:-total,totalNormalized,totalLog,walk,stopTransport}
 export BUS_ACCESSIBILITY_SPARK_LOCAL_DIR=${BUS_ACCESSIBILITY_SPARK_LOCAL_DIR:-/home/eljah/data/buscrawl/accessibility-map-spark-temp}
 export BUS_ACCESSIBILITY_SPARK_MASTER=${BUS_ACCESSIBILITY_SPARK_MASTER:-local[2]}
+export BUS_ACCESSIBILITY_TILE_STAGING_ROOT=${BUS_ACCESSIBILITY_TILE_STAGING_ROOT:-/home/eljah/data/buscrawl/accessibility-render-staging}
+export BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS=${BUS_ACCESSIBILITY_SNAPSHOT_RENDER_SLEEP_MILLIS:-3000}
 export SPARK_LOCAL_IP=127.0.0.1
 export SPARK_LOCAL_HOSTNAME=localhost
 export JAVA_TOOL_OPTIONS='--add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
 
-exec ionice -c2 -n7 nice -n 10 /usr/bin/java \
+exec ionice -c3 nice -n 19 /usr/bin/java \
   -Dspark.driver.host=127.0.0.1 \
   -Dspark.driver.bindAddress=127.0.0.1 \
   -cp "target/classes:target/dependency/*" \

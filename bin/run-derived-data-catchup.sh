@@ -49,7 +49,12 @@ print(count)
 PY
 }
 
-initial_raw_backlog="$(raw_backlog_count)"
+if [[ "${BUS_DERIVED_BACKLOG_SCAN:-false}" == "true" ]]; then
+  initial_raw_backlog="$(raw_backlog_count)"
+else
+  initial_raw_backlog="${BUS_DERIVED_INITIAL_RAW_BACKLOG_OVERRIDE:-0}"
+  echo "$(date -Is) raw backlog scan skipped: raw_backlog=$initial_raw_backlog"
+fi
 fast_backlog_threshold="${BUS_DERIVED_FAST_COMPACTION_BACKLOG_THRESHOLD:-50000}"
 skip_downstream_backlog_threshold="${BUS_DERIVED_SKIP_DOWNSTREAM_RAW_BACKLOG_THRESHOLD:-50000}"
 if [[ "$initial_raw_backlog" -gt "$fast_backlog_threshold" ]]; then
@@ -66,6 +71,7 @@ for batch in $(seq 1 "$compaction_max_batches"); do
   batch_log="$(mktemp)"
   BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN="$compaction_max_files_per_run" \
   BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS="${BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS:-8}" \
+  BUS_SKIP_HEAVY_JOB_LOCK=true \
     ./bin/run-raw-parquet-compaction.sh | tee "$batch_log"
 
   if grep -Eq "no new parquet files to (process|compact)" "$batch_log"; then
@@ -76,11 +82,15 @@ for batch in $(seq 1 "$compaction_max_batches"); do
   echo "$(date -Is) raw parquet compaction batch $batch completed"
 done
 
-remaining_raw_backlog="$(raw_backlog_count)"
-if [[ "$remaining_raw_backlog" -gt "$skip_downstream_backlog_threshold" ]]; then
-  echo "$(date -Is) raw compaction still behind: raw_backlog=$remaining_raw_backlog; skipping downstream derived jobs in this pass"
-  echo "$(date -Is) derived data catchup finished"
-  exit 0
+if [[ "${BUS_DERIVED_BACKLOG_SCAN:-false}" == "true" ]]; then
+  remaining_raw_backlog="$(raw_backlog_count)"
+  if [[ "$remaining_raw_backlog" -gt "$skip_downstream_backlog_threshold" ]]; then
+    echo "$(date -Is) raw compaction still behind: raw_backlog=$remaining_raw_backlog; skipping downstream derived jobs in this pass"
+    echo "$(date -Is) derived data catchup finished"
+    exit 0
+  fi
+else
+  echo "$(date -Is) raw backlog post-scan skipped"
 fi
 
 for batch in $(seq 1 "${BUS_DERIVED_STOP_VISIT_MAX_BATCHES:-20}"); do

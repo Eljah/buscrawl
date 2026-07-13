@@ -10,7 +10,14 @@ import org.apache.spark.sql.streaming.Trigger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.expr;
@@ -24,6 +31,14 @@ public class BusDataSparkStreaming {
         Path storageRoot = Paths.get(System.getenv().getOrDefault("BUS_STORAGE_ROOT", "./var/bus"));
         Path localDir = storageRoot.resolve("spark-temp");
         Path outputDir = storageRoot.resolve("bus-data-parquet");
+        Path stagingDir = Paths.get(System.getenv().getOrDefault(
+                "BUS_PARQUET_STAGING_DIR",
+                storageRoot.resolve("bus-data-parquet-staging").toString()
+        ));
+        Path manifestFile = Paths.get(System.getenv().getOrDefault(
+                "BUS_RAW_PARQUET_MANIFEST_FILE",
+                storageRoot.resolve("bus-data-parquet-manifest.tsv").toString()
+        ));
         Path checkpointDir = storageRoot.resolve("bus-data-checkpoint");
         Path spoolReadyDir = Paths.get(System.getenv().getOrDefault(
                 "BUS_RAW_SPOOL_READY_DIR",
@@ -41,6 +56,8 @@ public class BusDataSparkStreaming {
         try {
             Files.createDirectories(localDir);
             Files.createDirectories(outputDir);
+            Files.createDirectories(stagingDir);
+            Files.createDirectories(manifestFile.getParent());
             Files.createDirectories(checkpointDir);
             Files.createDirectories(spoolReadyDir);
         } catch (Exception e) {
@@ -100,6 +117,7 @@ public class BusDataSparkStreaming {
             busData.writeStream()
                     .foreachBatch((dataset, batchId) -> {
                         System.out.printf("Batch #%d received%n", batchId);
+                        Path batchStagingDir = stagingDir.resolve("batch-" + batchId + "-" + System.currentTimeMillis());
                         dataset.dropDuplicates(
                                         "internalRouteId",
                                         "realRouteNumber",
@@ -111,7 +129,15 @@ public class BusDataSparkStreaming {
                                 .coalesce(Math.max(1, outputFilesPerBatch))
                                 .write()
                                 .mode("append")
-                                .parquet(outputDir.toAbsolutePath().toString());
+                                .parquet(batchStagingDir.toAbsolutePath().toString());
+                        List<IncrementalParquetSupport.ParquetFileInfo> movedFiles =
+                                publishBatchParquetFiles(batchStagingDir, outputDir, batchId);
+                        BusRawParquetManifest.append(manifestFile, movedFiles);
+                        System.out.printf(
+                                "Batch #%d published %d parquet files and appended raw manifest%n",
+                                batchId,
+                                movedFiles.size()
+                        );
                     })
                     .trigger(Trigger.ProcessingTime("5 seconds"))
                     .option("checkpointLocation", checkpointDir.toAbsolutePath().toString())
@@ -119,6 +145,49 @@ public class BusDataSparkStreaming {
                     .awaitTermination();
         } catch (TimeoutException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static List<IncrementalParquetSupport.ParquetFileInfo> publishBatchParquetFiles(
+            Path batchStagingDir,
+            Path outputDir,
+            long batchId
+    ) throws Exception {
+        List<Path> parquetFiles;
+        try (var paths = Files.walk(batchStagingDir)) {
+            parquetFiles = paths
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".parquet"))
+                    .sorted()
+                    .collect(Collectors.toList());
+        }
+        DateTimeFormatter dateFormatter = DateTimeFormatter.BASIC_ISO_DATE.withZone(ZoneOffset.UTC);
+        String datePart = dateFormatter.format(java.time.Instant.now());
+        List<IncrementalParquetSupport.ParquetFileInfo> movedFiles = new ArrayList<>();
+        int index = 0;
+        for (Path source : parquetFiles) {
+            String fileName = String.format(
+                    "raw-%s-batch-%020d-part-%03d.parquet",
+                    datePart,
+                    batchId,
+                    ++index
+            );
+            Path target = outputDir.resolve(fileName);
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            movedFiles.add(BusRawParquetManifest.toInfo(target));
+        }
+        deleteRecursively(batchStagingDir);
+        return movedFiles;
+    }
+
+    private static void deleteRecursively(Path path) throws Exception {
+        if (!Files.exists(path)) {
+            return;
+        }
+        try (var paths = Files.walk(path)) {
+            for (Path current : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+                Files.deleteIfExists(current);
+            }
         }
     }
 }
