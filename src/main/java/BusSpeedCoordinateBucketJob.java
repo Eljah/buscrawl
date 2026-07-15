@@ -34,7 +34,7 @@ public class BusSpeedCoordinateBucketJob {
         Files.createDirectories(outputRoot);
 
         LocalDate yesterday = LocalDate.now(CITY_ZONE).minusDays(1);
-        String parquetGlob = rawParquetDir.toAbsolutePath().toString().replace('\\', '/') + "/*.parquet";
+        String parquetGlob = rawParquetDir.toAbsolutePath().toString().replace('\\', '/') + "/**/*.parquet";
 
         Class.forName("org.duckdb.DuckDBDriver");
         try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");

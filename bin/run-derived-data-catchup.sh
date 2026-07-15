@@ -5,40 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$APP_DIR"
 
-LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
-LOCK_LOG=${BUS_HEAVY_JOB_LOCK_LOG:-/home/eljah/apps/buscrawl/logs/heavy-io-lock.log}
-LOCK_HELD=false
-
-lock_log() {
-  mkdir -p "$(dirname "$LOCK_LOG")"
-  echo "$(date -Is) job=derived-data-catchup pid=$$ $*" >> "$LOCK_LOG"
-}
-
-release_heavy_lock() {
-  local status=$?
-  if [[ "$LOCK_HELD" != "true" || "${LOCK_RELEASED:-false}" == "true" ]]; then
-    return "$status"
-  fi
-  LOCK_RELEASED=true
-  local released_ms
-  released_ms=$(date +%s%3N)
-  lock_log "lock=released path=$LOCK_FILE heldMs=$((released_ms - lock_acquired_ms)) status=$status"
-  return "$status"
-}
-trap release_heavy_lock EXIT
-
-if [[ "${BUS_DERIVED_ASSUME_HEAVY_JOB_LOCK:-false}" == "true" ]]; then
-  echo "$(date -Is) derived data catchup using caller-held heavy job lock"
-else
-  exec 9>"$LOCK_FILE"
-  lock_wait_started_ms=$(date +%s%3N)
-  lock_log "lock=wait path=$LOCK_FILE"
-  flock 9
-  LOCK_HELD=true
-  lock_acquired_ms=$(date +%s%3N)
-  lock_log "lock=acquired path=$LOCK_FILE waitMs=$((lock_acquired_ms - lock_wait_started_ms))"
-fi
-
 LOG_PREFIX="$(date -Is)"
 echo "$LOG_PREFIX derived data catchup started"
 
@@ -142,7 +108,7 @@ else
   echo "$(date -Is) raw backlog post-scan skipped"
 fi
 
-for batch in $(seq 1 "${BUS_DERIVED_STOP_VISIT_MAX_BATCHES:-20}"); do
+for batch in $(seq 1 "${BUS_DERIVED_STOP_VISIT_MAX_BATCHES:-100}"); do
   batch_log="$(mktemp)"
   BUS_PARQUET_DIR="${BUS_COMPACTED_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}" \
   BUS_STOP_LAST_PASS_INPUT_HAS_SOURCE_FILE=true \
@@ -172,10 +138,6 @@ BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY="${BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY:-true}" \
 ./bin/run-dashboard-cache.sh
 
 echo "$(date -Is) derived data critical catchup finished"
-release_heavy_lock
-if [[ "$LOCK_HELD" == "true" ]]; then
-  exec 9>&-
-fi
 
 if [[ "${BUS_DERIVED_RUN_UI_CACHE_AFTER:-true}" == "true" ]]; then
   mkdir -p logs

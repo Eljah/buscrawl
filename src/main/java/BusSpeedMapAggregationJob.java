@@ -172,7 +172,7 @@ public class BusSpeedMapAggregationJob {
     ) {
         Dataset<Row> rawPoints = spark.read()
                 .option("mergeSchema", "false")
-                .parquet(rawParquetDir.toAbsolutePath().toString() + "/*.parquet")
+                .parquet(rawParquetDir.toAbsolutePath().toString().replace('\\', '/') + "/**/*.parquet")
                 .filter(col("latitude").isNotNull())
                 .filter(col("longitude").isNotNull())
                 .filter(col("eventTime").isNotNull())
