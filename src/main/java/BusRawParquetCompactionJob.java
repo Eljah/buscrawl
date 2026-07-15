@@ -29,6 +29,10 @@ public class BusRawParquetCompactionJob {
                 outputDir.resolve("compaction-state.json").toString()
         ));
         int maxFilesPerRun = Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN", "5000"));
+        int minBatchFiles = Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_MIN_BATCH_FILES", "100"));
+        long minBatchBytes = Long.parseLong(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_MIN_BATCH_BYTES", "67108864"));
+        Duration maxOpenLag = Duration.ofMinutes(Long.parseLong(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_MAX_OPEN_LAG_MINUTES", "60")));
+        boolean allowSmallTail = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_ALLOW_SMALL_TAIL", "false"));
         int initialLookbackDays = Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_INITIAL_LOOKBACK_DAYS", "3"));
         String bootstrapStrategy = System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_BOOTSTRAP_MODE", "full-history");
         boolean newestFirst = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_NEWEST_FIRST", "false"));
@@ -87,10 +91,50 @@ public class BusRawParquetCompactionJob {
         boolean useLegacyManifest = useManifestListing
                 && Files.exists(legacyManifestFile)
                 && !state.legacyManifestComplete;
+        int activeMaxFilesPerRun = useLegacyManifest
+                ? Integer.parseInt(System.getenv().getOrDefault(
+                        "BUS_COMPACTED_PARQUET_LEGACY_MAX_FILES_PER_RUN",
+                        Integer.toString(maxFilesPerRun)
+                ))
+                : maxFilesPerRun;
+        int activeMinBatchFiles = useLegacyManifest
+                ? Integer.parseInt(System.getenv().getOrDefault(
+                        "BUS_COMPACTED_PARQUET_LEGACY_MIN_BATCH_FILES",
+                        Integer.toString(minBatchFiles)
+                ))
+                : minBatchFiles;
+        long activeMinBatchBytes = useLegacyManifest
+                ? Long.parseLong(System.getenv().getOrDefault(
+                        "BUS_COMPACTED_PARQUET_LEGACY_MIN_BATCH_BYTES",
+                        Long.toString(minBatchBytes)
+                ))
+                : minBatchBytes;
+        Duration activeMaxOpenLag = useLegacyManifest
+                ? Duration.ofMinutes(Long.parseLong(System.getenv().getOrDefault(
+                        "BUS_COMPACTED_PARQUET_LEGACY_MAX_OPEN_LAG_MINUTES",
+                        Long.toString(maxOpenLag.toMinutes())
+                )))
+                : maxOpenLag;
+        boolean activeAllowSmallTail = useLegacyManifest
+                ? Boolean.parseBoolean(System.getenv().getOrDefault(
+                        "BUS_COMPACTED_PARQUET_LEGACY_ALLOW_SMALL_TAIL",
+                        Boolean.toString(allowSmallTail)
+                ))
+                : allowSmallTail;
+        String inputMode = useLegacyManifest ? "legacy" : "current";
+        System.out.printf(
+                "BusRawParquetCompactionJob: inputMode=%s maxFilesPerRun=%d minBatchFiles=%d minBatchBytes=%d maxOpenLag=%s allowSmallTail=%s%n",
+                inputMode,
+                activeMaxFilesPerRun,
+                activeMinBatchFiles,
+                activeMinBatchBytes,
+                activeMaxOpenLag,
+                activeAllowSmallTail
+        );
         if (useLegacyManifest) {
             int manifestWindowRecords = Integer.parseInt(System.getenv().getOrDefault(
                     "BUS_COMPACTED_PARQUET_MANIFEST_WINDOW_RECORDS",
-                    Integer.toString(maxFilesPerRun)
+                    Integer.toString(activeMaxFilesPerRun)
             ));
             manifestWindow = BusRawParquetManifest.readWindow(
                     legacyManifestFile,
@@ -109,7 +153,7 @@ public class BusRawParquetCompactionJob {
         } else if (useManifestListing && Files.exists(manifestFile)) {
             int manifestWindowRecords = Integer.parseInt(System.getenv().getOrDefault(
                     "BUS_COMPACTED_PARQUET_MANIFEST_WINDOW_RECORDS",
-                    Integer.toString(maxFilesPerRun)
+                    Integer.toString(activeMaxFilesPerRun)
             ));
             manifestWindow = BusRawParquetManifest.readWindow(
                     manifestFile,
@@ -130,21 +174,26 @@ public class BusRawParquetCompactionJob {
                         ? IncrementalParquetSupport.listRecentParquetFiles(inputDir, modifiedSince)
                         : IncrementalParquetSupport.listRecentParquetFilesFlat(inputDir, modifiedSince);
         }
-        List<IncrementalParquetSupport.ParquetFileInfo> selectedNewFiles =
-                IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath);
+        List<IncrementalParquetSupport.ParquetFileInfo> selectedNewFiles = manifestWindow == null
+                ? IncrementalParquetSupport.selectNewFiles(candidateFiles, state.lastProcessedModifiedAt, state.lastProcessedPath)
+                : candidateFiles;
         System.out.printf(
                 "BusRawParquetCompactionJob: listed %d candidates, %d selected new files%n",
                 candidateFiles.size(),
                 selectedNewFiles.size()
         );
 
-        int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, maxFilesPerRun));
+        int cappedSize = Math.min(selectedNewFiles.size(), Math.max(1, activeMaxFilesPerRun));
         int startIndex = newestFirst ? Math.max(0, selectedNewFiles.size() - cappedSize) : 0;
         int endIndex = newestFirst ? selectedNewFiles.size() : cappedSize;
         List<IncrementalParquetSupport.ParquetFileInfo> windowFiles =
                 new ArrayList<>(selectedNewFiles.subList(startIndex, endIndex));
         List<IncrementalParquetSupport.ParquetFileInfo> newFiles =
                 filterReadableRawParquetFiles(windowFiles, minRawParquetBytes);
+
+        if (!newFiles.isEmpty() && !isBatchReady(newFiles, activeMinBatchFiles, activeMinBatchBytes, activeMaxOpenLag, activeAllowSmallTail)) {
+            return;
+        }
 
         if (newFiles.isEmpty()) {
             if (windowFiles.isEmpty()) {
@@ -174,14 +223,99 @@ public class BusRawParquetCompactionJob {
         );
 
         Class.forName("org.duckdb.DuckDBDriver");
-        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
+        int stagedReadChunkFiles = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_COMPACTED_PARQUET_STAGED_READ_CHUNK_FILES",
+                "0"
+        ));
+        long stagedReadChunkSleepMillis = Long.parseLong(System.getenv().getOrDefault(
+                "BUS_COMPACTED_PARQUET_STAGED_READ_CHUNK_SLEEP_MILLIS",
+                "0"
+        ));
+        Path duckDbFile = null;
+        String duckDbUrl = "jdbc:duckdb:";
+        if (stagedReadChunkFiles > 0 && newFiles.size() > stagedReadChunkFiles) {
+            Path duckDbTempDir = Path.of(System.getenv().getOrDefault(
+                    "BUS_COMPACTED_PARQUET_DUCKDB_TEMP_DIR",
+                    outputDir.getParent().resolve(outputDir.getFileName() + "-duckdb-tmp").toString()
+            ));
+            Files.createDirectories(duckDbTempDir);
+            duckDbFile = duckDbTempDir.resolve(batchId + ".duckdb");
+            duckDbUrl = "jdbc:duckdb:" + duckDbFile.toAbsolutePath();
+        }
+        try (Connection connection = DriverManager.getConnection(duckDbUrl);
              Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA threads=" + Integer.parseInt(System.getenv().getOrDefault("BUS_COMPACTED_PARQUET_THREADS", "4")));
-            statement.execute(buildCopySql(newFiles, tempOutputDir));
+            if (stagedReadChunkFiles > 0 && newFiles.size() > stagedReadChunkFiles) {
+                compactWithStagedReads(statement, newFiles, tempOutputDir, stagedReadChunkFiles, stagedReadChunkSleepMillis);
+            } else {
+                statement.execute(buildCopySql(newFiles, tempOutputDir));
+            }
+        }
+        if (duckDbFile != null) {
+            Files.deleteIfExists(duckDbFile);
+            Files.deleteIfExists(Path.of(duckDbFile.toString() + ".wal"));
         }
         movePartitionedBatch(tempOutputDir, outputDir, batchId);
 
         updateState(stateFile, state, windowFiles, manifestWindow, useLegacyManifest);
+    }
+
+    private static boolean isBatchReady(
+            List<IncrementalParquetSupport.ParquetFileInfo> files,
+            int minBatchFiles,
+            long minBatchBytes,
+            Duration maxOpenLag,
+            boolean allowSmallTail
+    ) {
+        if (allowSmallTail) {
+            return true;
+        }
+        long totalBytes = 0L;
+        Instant oldestModifiedAt = null;
+        Instant newestModifiedAt = null;
+        for (IncrementalParquetSupport.ParquetFileInfo file : files) {
+            Instant modifiedAt = IncrementalParquetSupport.parseInstant(file.modifiedAt);
+            if (modifiedAt != null && (oldestModifiedAt == null || modifiedAt.isBefore(oldestModifiedAt))) {
+                oldestModifiedAt = modifiedAt;
+            }
+            if (modifiedAt != null && (newestModifiedAt == null || modifiedAt.isAfter(newestModifiedAt))) {
+                newestModifiedAt = modifiedAt;
+            }
+            try {
+                totalBytes += Files.size(Path.of(file.path));
+            } catch (Exception ignored) {
+                // The readability filter already checked the file; size races are handled by the next run.
+            }
+        }
+        boolean readyByCount = files.size() >= minBatchFiles;
+        boolean readyByBytes = totalBytes >= minBatchBytes;
+        boolean readyByLag = oldestModifiedAt != null && !oldestModifiedAt.isAfter(Instant.now().minus(maxOpenLag));
+        if (readyByCount || readyByBytes || readyByLag) {
+            System.out.printf(
+                    "BusRawParquetCompactionJob: batch ready files=%d bytes=%d oldest=%s newest=%s "
+                            + "readyByCount=%s readyByBytes=%s readyByLag=%s%n",
+                    files.size(),
+                    totalBytes,
+                    oldestModifiedAt,
+                    newestModifiedAt,
+                    readyByCount,
+                    readyByBytes,
+                    readyByLag
+            );
+            return true;
+        }
+        System.out.printf(
+                "BusRawParquetCompactionJob: waiting for larger fresh batch files=%d bytes=%d oldest=%s newest=%s "
+                        + "minFiles=%d minBytes=%d maxOpenLag=%s%n",
+                files.size(),
+                totalBytes,
+                oldestModifiedAt,
+                newestModifiedAt,
+                minBatchFiles,
+                minBatchBytes,
+                maxOpenLag
+        );
+        return false;
     }
 
     private static List<IncrementalParquetSupport.ParquetFileInfo> filterReadableRawParquetFiles(
@@ -224,13 +358,54 @@ public class BusRawParquetCompactionJob {
         return result;
     }
 
+    private static void compactWithStagedReads(
+            Statement statement,
+            List<IncrementalParquetSupport.ParquetFileInfo> files,
+            Path outputDir,
+            int chunkFiles,
+            long sleepMillis
+    ) throws Exception {
+        System.out.printf(
+                Locale.US,
+                "BusRawParquetCompactionJob: staged read compacting files=%d chunkFiles=%d sleepMillis=%d%n",
+                files.size(),
+                chunkFiles,
+                sleepMillis
+        );
+        for (int start = 0; start < files.size(); start += chunkFiles) {
+            int end = Math.min(files.size(), start + chunkFiles);
+            List<IncrementalParquetSupport.ParquetFileInfo> chunk = files.subList(start, end);
+            String sql = (start == 0 ? "CREATE TABLE compacted_raw AS " : "INSERT INTO compacted_raw ")
+                    + buildCompactedSelectSql(chunk);
+            statement.execute(sql);
+            System.out.printf(
+                    Locale.US,
+                    "BusRawParquetCompactionJob: staged read loaded chunk start=%d end=%d total=%d%n",
+                    start,
+                    end,
+                    files.size()
+            );
+            if (sleepMillis > 0 && end < files.size()) {
+                Thread.sleep(sleepMillis);
+            }
+        }
+        statement.execute("COPY compacted_raw TO '" + sqlEscape(outputDir.toAbsolutePath().toString()) + "' "
+                + "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (serviceDate))");
+        statement.execute("DROP TABLE compacted_raw");
+    }
+
     private static String buildCopySql(List<IncrementalParquetSupport.ParquetFileInfo> files, Path outputDir) {
+        return "COPY (" + buildCompactedSelectSql(files) + ") TO '"
+                + sqlEscape(outputDir.toAbsolutePath().toString()) + "' "
+                + "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (serviceDate))";
+    }
+
+    private static String buildCompactedSelectSql(List<IncrementalParquetSupport.ParquetFileInfo> files) {
         String fileList = files.stream()
                 .map(file -> "'" + sqlEscape(file.path) + "'")
                 .collect(Collectors.joining(", ", "[", "]"));
 
-        return "COPY ("
-                + "SELECT "
+        return "SELECT "
                 + "plate, internalRouteId, realRouteNumber, latitude, longitude, "
                 + "eventTime, max(speed) AS speed, "
                 + "min(timestamp) AS timestamp, min(readableTime) AS readableTime, "
@@ -244,9 +419,7 @@ public class BusRawParquetCompactionJob {
                 + " AND internalRouteId IS NOT NULL"
                 + " AND latitude IS NOT NULL"
                 + " AND longitude IS NOT NULL"
-                + " GROUP BY internalRouteId, realRouteNumber, plate, eventTime, latitude, longitude"
-                + ") TO '" + sqlEscape(outputDir.toAbsolutePath().toString()) + "' "
-                + "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (serviceDate))";
+                + " GROUP BY internalRouteId, realRouteNumber, plate, eventTime, latitude, longitude";
     }
 
     private static void movePartitionedBatch(Path tempOutputDir, Path outputDir, String batchId) throws Exception {

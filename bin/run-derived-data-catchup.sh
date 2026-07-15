@@ -7,21 +7,16 @@ cd "$APP_DIR"
 
 LOCK_FILE=${BUS_HEAVY_JOB_LOCK_FILE:-/home/eljah/data/buscrawl/derived-jobs.lock}
 LOCK_LOG=${BUS_HEAVY_JOB_LOCK_LOG:-/home/eljah/apps/buscrawl/logs/heavy-io-lock.log}
+LOCK_HELD=false
 
 lock_log() {
   mkdir -p "$(dirname "$LOCK_LOG")"
   echo "$(date -Is) job=derived-data-catchup pid=$$ $*" >> "$LOCK_LOG"
 }
 
-exec 9>"$LOCK_FILE"
-lock_wait_started_ms=$(date +%s%3N)
-lock_log "lock=wait path=$LOCK_FILE"
-flock 9
-lock_acquired_ms=$(date +%s%3N)
-lock_log "lock=acquired path=$LOCK_FILE waitMs=$((lock_acquired_ms - lock_wait_started_ms))"
 release_heavy_lock() {
   local status=$?
-  if [[ "${LOCK_RELEASED:-false}" == "true" ]]; then
+  if [[ "$LOCK_HELD" != "true" || "${LOCK_RELEASED:-false}" == "true" ]]; then
     return "$status"
   fi
   LOCK_RELEASED=true
@@ -31,6 +26,18 @@ release_heavy_lock() {
   return "$status"
 }
 trap release_heavy_lock EXIT
+
+if [[ "${BUS_DERIVED_ASSUME_HEAVY_JOB_LOCK:-false}" == "true" ]]; then
+  echo "$(date -Is) derived data catchup using caller-held heavy job lock"
+else
+  exec 9>"$LOCK_FILE"
+  lock_wait_started_ms=$(date +%s%3N)
+  lock_log "lock=wait path=$LOCK_FILE"
+  flock 9
+  LOCK_HELD=true
+  lock_acquired_ms=$(date +%s%3N)
+  lock_log "lock=acquired path=$LOCK_FILE waitMs=$((lock_acquired_ms - lock_wait_started_ms))"
+fi
 
 LOG_PREFIX="$(date -Is)"
 echo "$LOG_PREFIX derived data catchup started"
@@ -90,20 +97,39 @@ else
   echo "$(date -Is) normal raw compaction mode: raw_backlog=$initial_raw_backlog max_batches=$compaction_max_batches max_files_per_run=$compaction_max_files_per_run"
 fi
 
-for batch in $(seq 1 "$compaction_max_batches"); do
-  batch_log="$(mktemp)"
-  BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN="$compaction_max_files_per_run" \
-  BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS="${BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS:-8}" \
-  BUS_SKIP_HEAVY_JOB_LOCK=true \
-    ./bin/run-raw-parquet-compaction.sh | tee "$batch_log"
+if [[ "${BUS_DERIVED_SKIP_RAW_COMPACTION:-false}" == "true" ]]; then
+  echo "$(date -Is) raw parquet compaction skipped by caller"
+else
+  for batch in $(seq 1 "$compaction_max_batches"); do
+    batch_log="$(mktemp)"
+    BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN="$compaction_max_files_per_run" \
+    BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS="${BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS:-8}" \
+    BUS_SKIP_HEAVY_JOB_LOCK=true \
+      ./bin/run-raw-parquet-compaction.sh | tee "$batch_log"
 
-  if grep -Eq "no new parquet files to (process|compact)" "$batch_log"; then
+    if grep -Eq "no new parquet files to (process|compact)" "$batch_log"; then
+      rm -f "$batch_log"
+      break
+    fi
     rm -f "$batch_log"
-    break
+    echo "$(date -Is) raw parquet compaction batch $batch completed"
+  done
+fi
+
+if [[ "${BUS_DERIVED_RUN_RAW_CLEANUP_AFTER_COMPACTION:-false}" == "true" ]]; then
+  if [[ -x ./bin/run-raw-parquet-cleanup.sh ]]; then
+    BUS_RAW_PARQUET_CLEANUP_SKIP_WHEN_HEAVY_JOB_RUNNING=false \
+      ./bin/run-raw-parquet-cleanup.sh
+  else
+    echo "$(date -Is) raw parquet cleanup script is absent; skipping"
   fi
-  rm -f "$batch_log"
-  echo "$(date -Is) raw parquet compaction batch $batch completed"
-done
+  if [[ -x ./bin/run-raw-spool-cleanup.sh ]]; then
+    BUS_RAW_SPOOL_CLEANUP_SKIP_WHEN_HEAVY_JOB_RUNNING=false \
+      ./bin/run-raw-spool-cleanup.sh
+  else
+    echo "$(date -Is) raw spool cleanup script is absent; skipping"
+  fi
+fi
 
 if [[ "${BUS_DERIVED_BACKLOG_SCAN:-false}" == "true" ]]; then
   remaining_raw_backlog="$(raw_backlog_count)"
@@ -147,7 +173,9 @@ BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY="${BUS_TRAFFIC_BEHAVIOR_EVENTS_ONLY:-true}" \
 
 echo "$(date -Is) derived data critical catchup finished"
 release_heavy_lock
-exec 9>&-
+if [[ "$LOCK_HELD" == "true" ]]; then
+  exec 9>&-
+fi
 
 if [[ "${BUS_DERIVED_RUN_UI_CACHE_AFTER:-true}" == "true" ]]; then
   mkdir -p logs

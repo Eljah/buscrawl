@@ -1,0 +1,28 @@
+[Unit]
+Description=Buscrawl resumable legacy raw parquet manifest bootstrap
+After=network-online.target buscrawl-stream.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_FINALIZE=false
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_MAX_APPEND_PER_RUN=50000
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_CHECKPOINT_EVERY=1000
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_SLEEP_EVERY_RECORDS=2000
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_SLEEP_MILLIS=25
+Environment=BUS_RAW_PARQUET_MANIFEST_BOOTSTRAP_SKIP_LOCK=true
+ExecStart=/home/eljah/apps/buscrawl/bin/run-raw-parquet-manifest-bootstrap.sh
+Restart=on-failure
+RestartSec=60s
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+TimeoutStopSec=300s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/raw-parquet-manifest-bootstrap.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/raw-parquet-manifest-bootstrap.log
+
+[Install]
+WantedBy=multi-user.target

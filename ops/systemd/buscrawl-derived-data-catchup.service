@@ -1,5 +1,5 @@
 [Unit]
-Description=Buscrawl derived data catchup
+Description=Buscrawl maintenance orchestrator
 After=network-online.target buscrawl-stream.service
 Wants=network-online.target
 Requires=buscrawl-stream.service
@@ -8,6 +8,6 @@ Requires=buscrawl-stream.service
 Type=oneshot
 User=eljah
 WorkingDirectory=/home/eljah/apps/buscrawl
-ExecStart=/home/eljah/apps/buscrawl/bin/run-derived-data-catchup.sh
+ExecStart=/home/eljah/apps/buscrawl/bin/run-buscrawl-maintenance-orchestrator.sh
 StandardOutput=append:/home/eljah/apps/buscrawl/logs/derived-data-catchup.log
 StandardError=append:/home/eljah/apps/buscrawl/logs/derived-data-catchup.log

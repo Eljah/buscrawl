@@ -1,0 +1,26 @@
+[Unit]
+Description=Buscrawl raw parquet date partition migration
+After=network-online.target buscrawl-stream.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+Environment=BUS_RAW_PARQUET_DATE_MIGRATION_MAX_RECORDS_PER_RUN=500
+Environment=BUS_RAW_PARQUET_DATE_MIGRATION_CHECKPOINT_EVERY=50
+Environment=BUS_RAW_PARQUET_DATE_MIGRATION_SLEEP_EVERY_RECORDS=50
+Environment=BUS_RAW_PARQUET_DATE_MIGRATION_SLEEP_MILLIS=100
+ExecStart=/home/eljah/apps/buscrawl/bin/run-raw-parquet-date-migration.sh
+Restart=on-failure
+RestartSec=5s
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+TimeoutStopSec=300s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/raw-parquet-date-migration.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/raw-parquet-date-migration.log
+
+[Install]
+WantedBy=multi-user.target

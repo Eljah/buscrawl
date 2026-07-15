@@ -100,6 +100,50 @@ clear_transfer_date() {
     "$(transfer_partition_dir "$slug" request-grid-counts)"
 }
 
+reset_transfer_state_date() {
+  local slug="$1"
+  local state_file="$ORIGIN_ROOT/$slug/aggregation-state.json"
+  [ -f "$state_file" ] || return 0
+  python3 - "$state_file" "$TARGET_DATE" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+target_date = sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+
+prefix = target_date + "|"
+processed_buckets = data.get("processedBucketKeys")
+if isinstance(processed_buckets, list):
+    data["processedBucketKeys"] = [
+        value for value in processed_buckets
+        if not str(value).startswith(prefix)
+    ]
+
+processed_dates = data.get("processedServiceDates")
+if isinstance(processed_dates, list):
+    data["processedServiceDates"] = [
+        value for value in processed_dates
+        if str(value) != target_date
+    ]
+
+if str(data.get("lastProcessedServiceDate") or "") == target_date:
+    remaining = [
+        str(value) for value in data.get("processedServiceDates", [])
+        if str(value)
+    ]
+    data["lastProcessedServiceDate"] = max(remaining) if remaining else None
+
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
 tile_complete() {
   local slug="$1"
   local root="$TILE_ROOT_BASE/$TILE_PREFIX_ROOT/$slug"
@@ -263,6 +307,8 @@ for line in "${ORIGINS[@]}"; do
     echo "$(date -Is) $LOG_PREFIX transfer skipped date=$TARGET_DATE slug=$slug: complete partitions already exist"
     continue
   fi
+  echo "$(date -Is) $LOG_PREFIX transfer state reset date=$TARGET_DATE slug=$slug: incomplete/forced partitions will be recomputed"
+  reset_transfer_state_date "$slug"
   if transfer_any "$slug"; then
     echo "$(date -Is) $LOG_PREFIX transfer cleanup date=$TARGET_DATE slug=$slug: removing incomplete/forced partitions before recompute"
     clear_transfer_date "$slug"

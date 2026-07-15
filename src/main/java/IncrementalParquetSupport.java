@@ -92,7 +92,7 @@ public final class IncrementalParquetSupport {
     private static ParquetFileInfo toParquetFileInfo(Path path, FileTime modifiedSinceTime) {
         try {
             FileTime modifiedAt = Files.getLastModifiedTime(path);
-            if (!isReadableParquetFile(path) || modifiedAt.compareTo(modifiedSinceTime) < 0) {
+            if (modifiedAt.compareTo(modifiedSinceTime) < 0 || !isReadableParquetFile(path)) {
                 return null;
             }
             ParquetFileInfo file = new ParquetFileInfo();

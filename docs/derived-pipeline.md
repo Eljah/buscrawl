@@ -6,21 +6,30 @@ Raw JSON spool files under `/home/eljah/data/buscrawl/raw-json-spool/ready` are 
 
 Derived processing is split into two classes of work:
 
-1. Critical catchup: `bin/run-derived-data-catchup.sh`
+1. Critical maintenance/catchup: `bin/run-buscrawl-maintenance-orchestrator.sh`
 2. Optional UI cache refresh: `bin/run-derived-ui-cache.sh`
 
 ## Critical Catchup
 
-`run-derived-data-catchup.sh` owns `/home/eljah/data/buscrawl/derived-jobs.lock` only while it advances durable state:
+The systemd timer starts `buscrawl-derived-data-catchup.service`, whose entrypoint is `bin/run-buscrawl-maintenance-orchestrator.sh`.
+The orchestrator is the only normal owner of `/home/eljah/data/buscrawl/derived-jobs.lock` in the 5-minute catchup path.
+It runs the disk-heavy work as one ordered batch instead of letting compaction, cleanup, and cache jobs compete for the same lock:
 
 ```text
 raw parquet compaction
+raw parquet cleanup after proven compaction
+raw JSON spool cleanup after Spark checkpoint commits
 stop visit events
 traffic-behavior parquet
 dashboard stats cache
 ```
 
+`bin/run-derived-data-catchup.sh` is still the inner derived-facts step, but production calls it with `BUS_DERIVED_ASSUME_HEAVY_JOB_LOCK=true` and `BUS_DERIVED_SKIP_RAW_COMPACTION=true`.
+This prevents nested lock contention while preserving the ability to run the derived step manually for diagnostics.
+
 After `dashboard stats cache` is written, the script releases the critical lock. This is intentional: new raw data catchup must not wait for map tiles, heatmaps, or large UI detail caches.
+
+Do not enable separate periodic cleanup timers while the orchestrator is active. Cleanup remains available as a manual script, but production cleanup should happen inside the orchestrator so it follows the same compaction proof/state and cannot starve behind a constantly held lock.
 
 Raw parquet compaction runs in multiple bounded batches per critical catchup invocation. Defaults:
 
@@ -28,9 +37,25 @@ Raw parquet compaction runs in multiple bounded batches per critical catchup inv
 BUS_DERIVED_COMPACTION_MAX_BATCHES=8
 BUS_COMPACTED_PARQUET_MAX_FILES_PER_RUN=1000
 BUS_COMPACTED_PARQUET_OUTPUT_PARTITIONS=8
+BUS_COMPACTED_PARQUET_MIN_BATCH_FILES=100
+BUS_COMPACTED_PARQUET_MIN_BATCH_BYTES=67108864
+BUS_COMPACTED_PARQUET_MAX_OPEN_LAG_MINUTES=60
+BUS_COMPACTED_PARQUET_ALLOW_SMALL_TAIL=false
 ```
 
 This is required because one small compaction batch per timer tick can fall behind during daytime source peaks. If compacted parquet lags, all dashboard graphs based on derived facts can look stopped even while raw ingestion is healthy.
+
+The lower batch thresholds prevent copying one tiny raw parquet file into one tiny compacted parquet file. Fresh raw parquet is left in the raw layer until either enough files/bytes accumulate or the oldest unprocessed file reaches the open-lag limit. Raw ingestion is still disk-first and immediate; only the derived compacted view is delayed by this batching window.
+
+When no fresh compacted batch is ready, the orchestrator enters bounded cleanup-while-waiting mode:
+
+```text
+BUS_MAINTENANCE_IDLE_CLEANUP_MAX_CYCLES=6
+BUS_RAW_PARQUET_CLEANUP_MAX_FILES=5000
+BUS_RAW_PARQUET_CLEANUP_MAX_RECORDS=10000
+```
+
+After each cleanup quantum it rechecks compaction. If a fresh compaction batch became ready, cleanup stops and the critical derived chain runs. This lets old proven-covered raw files be deleted in idle periods without letting cleanup monopolize the maintenance lock.
 
 Compaction must deduplicate raw source events by the canonical provider identity:
 

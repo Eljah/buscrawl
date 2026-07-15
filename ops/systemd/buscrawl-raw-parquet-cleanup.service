@@ -1,0 +1,21 @@
+[Unit]
+Description=Buscrawl raw parquet cleanup after proven compaction
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+Environment=BUS_RAW_PARQUET_CLEANUP_DRY_RUN=false
+Environment=BUS_RAW_PARQUET_CLEANUP_MAX_FILES=1000
+Environment=BUS_RAW_PARQUET_CLEANUP_MAX_RECORDS=2000
+Environment=BUS_RAW_PARQUET_CLEANUP_MIN_AGE_HOURS=1
+ExecStart=/home/eljah/apps/buscrawl/bin/run-raw-parquet-cleanup.sh
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+TimeoutStartSec=180s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/raw-parquet-cleanup.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/raw-parquet-cleanup.log

@@ -1,0 +1,23 @@
+[Unit]
+Description=Buscrawl second-level compacted parquet rewrite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+Environment=BUS_COMPACTED_PARQUET_DIR=/home/eljah/data/buscrawl/bus-data-parquet-compacted
+Environment=BUS_COMPACTED_REWRITE_MIN_FILES=8
+Environment=BUS_COMPACTED_REWRITE_MAX_DATES_PER_RUN=1
+Environment=BUS_COMPACTED_REWRITE_EXCLUDE_RECENT_DAYS=2
+Environment=BUS_COMPACTED_REWRITE_MIN_SOURCE_AGE_MINUTES=30
+Environment=BUS_COMPACTED_REWRITE_KEEP_BACKUP=false
+ExecStart=/home/eljah/apps/buscrawl/bin/run-compacted-parquet-rewrite.sh
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+TimeoutStartSec=1800s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/compacted-parquet-rewrite.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/compacted-parquet-rewrite.log
