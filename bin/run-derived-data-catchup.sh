@@ -8,6 +8,13 @@ cd "$APP_DIR"
 LOG_PREFIX="$(date -Is)"
 echo "$LOG_PREFIX derived data catchup started"
 
+COMPACTED_REWRITE_LOCK_FILE=${BUS_COMPACTED_REWRITE_LOCK_FILE:-/home/eljah/data/buscrawl/compacted-parquet-rewrite.lock}
+mkdir -p "$(dirname "$COMPACTED_REWRITE_LOCK_FILE")"
+exec 8>"$COMPACTED_REWRITE_LOCK_FILE"
+echo "$(date -Is) derived data catchup waiting for shared compacted parquet lock $COMPACTED_REWRITE_LOCK_FILE"
+flock -s 8
+echo "$(date -Is) derived data catchup acquired shared compacted parquet lock $COMPACTED_REWRITE_LOCK_FILE"
+
 raw_backlog_count() {
   python3 - \
     "${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet}" \
@@ -113,7 +120,7 @@ for batch in $(seq 1 "${BUS_DERIVED_STOP_VISIT_MAX_BATCHES:-100}"); do
   BUS_PARQUET_DIR="${BUS_COMPACTED_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}" \
   BUS_STOP_LAST_PASS_INPUT_HAS_SOURCE_FILE=true \
   BUS_STOP_LAST_PASS_VISITS_ONLY=true \
-  BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN="${BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN:-1}" \
+  BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN="${BUS_STOP_LAST_PASS_MAX_FILES_PER_RUN:-8}" \
   BUS_STOP_LAST_PASS_SPARK_MASTER="${BUS_STOP_LAST_PASS_SPARK_MASTER:-local[1]}" \
   BUS_STOP_LAST_PASS_DRIVER_MEMORY="${BUS_STOP_LAST_PASS_DRIVER_MEMORY:-7g}" \
   BUS_STOP_LAST_PASS_EXECUTOR_MEMORY="${BUS_STOP_LAST_PASS_EXECUTOR_MEMORY:-7g}" \

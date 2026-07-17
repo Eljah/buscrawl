@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Buscrawl second-level compacted parquet rewrite daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+AccuracySec=10min
+Persistent=true
+Unit=buscrawl-compacted-parquet-rewrite.service
+
+[Install]
+WantedBy=timers.target

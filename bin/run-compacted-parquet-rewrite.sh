@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd /home/eljah/apps/buscrawl
 
+LOCK_FILE=${BUS_COMPACTED_REWRITE_LOCK_FILE:-/home/eljah/data/buscrawl/compacted-parquet-rewrite.lock}
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+echo "$(date -Is) compacted parquet rewrite waiting for exclusive lock $LOCK_FILE"
+flock 9
+echo "$(date -Is) compacted parquet rewrite acquired exclusive lock $LOCK_FILE"
+
 export BUS_COMPACTED_PARQUET_DIR=${BUS_COMPACTED_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}
 export BUS_COMPACTED_REWRITE_STATE_FILE=${BUS_COMPACTED_REWRITE_STATE_FILE:-/home/eljah/data/buscrawl/bus-data-parquet-compacted/rewrite-state.json}
 export BUS_COMPACTED_REWRITE_MIN_FILES=${BUS_COMPACTED_REWRITE_MIN_FILES:-8}
