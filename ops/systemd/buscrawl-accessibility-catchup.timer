@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Buscrawl accessibility origin catchup until missing dates are filled
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=10min
+AccuracySec=2min
+Persistent=true
+Unit=buscrawl-accessibility-catchup.service
+
+[Install]
+WantedBy=timers.target

@@ -80,9 +80,13 @@ transfer_partition_dir() {
 
 transfer_complete() {
   local slug="$1"
+  partition_has_parquet "$(transfer_partition_dir "$slug" request-grid-counts)"
+}
+
+transfer_has_reachable_journeys() {
+  local slug="$1"
   partition_has_parquet "$(transfer_partition_dir "$slug" journeys)" \
-    && partition_has_parquet "$(transfer_partition_dir "$slug" journey-fragments)" \
-    && partition_has_parquet "$(transfer_partition_dir "$slug" request-grid-counts)"
+    && partition_has_parquet "$(transfer_partition_dir "$slug" journey-fragments)"
 }
 
 transfer_any() {
@@ -327,6 +331,9 @@ for line in "${ORIGINS[@]}"; do
     echo "$(date -Is) $LOG_PREFIX transfer finish date=$TARGET_DATE slug=$slug"
   else
     echo "$(date -Is) $LOG_PREFIX transfer incomplete date=$TARGET_DATE slug=$slug: one or more partitions are missing"
+    reset_transfer_state_date "$slug"
+    clear_transfer_date "$slug"
+    echo "$(date -Is) $LOG_PREFIX transfer incomplete cleanup date=$TARGET_DATE slug=$slug: removed partial partitions and reset retry state"
   fi
 done
 flock -u 8
@@ -337,6 +344,10 @@ for line in "${ORIGINS[@]}"; do
   IFS=$'\t' read -r slug label stop_ids <<< "$line"
   if ! transfer_complete "$slug"; then
     echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: transfer partitions are incomplete"
+    continue
+  fi
+  if ! transfer_has_reachable_journeys "$slug"; then
+    echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: no reachable transfer journeys"
     continue
   fi
   render_times="__FULL__"

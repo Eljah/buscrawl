@@ -14,8 +14,8 @@ if ! flock -n 9; then
 fi
 
 TARGET_DATE=${BUS_TRANSFER_TARGET_DATE:-$(TZ="$CITY_TZ" date -d 'yesterday' +%F)}
-echo "$(date -Is) origin-specific accessibility nightly started targetDate=$TARGET_DATE"
-BUS_ACCESSIBILITY_TARGET_DATE="$TARGET_DATE" \
+echo "$(date -Is) origin-specific accessibility nightly catchup started endDate=$TARGET_DATE"
+BUS_ACCESSIBILITY_CATCHUP_END_DATE="$TARGET_DATE" \
 BUS_ACCESSIBILITY_LOG_PREFIX="accessibility-nightly" \
-./bin/run-accessibility-origin-day.sh
-echo "$(date -Is) origin-specific accessibility nightly finished"
+./bin/run-accessibility-origin-selected-backfill.sh
+echo "$(date -Is) origin-specific accessibility nightly catchup finished endDate=$TARGET_DATE"

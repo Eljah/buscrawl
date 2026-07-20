@@ -1,0 +1,12 @@
+[Unit]
+Description=Buscrawl recoverable accessibility origin catchup
+After=network-online.target buscrawl-derived-data-catchup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-accessibility-origin-selected-backfill.sh
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/accessibility-catchup.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/accessibility-catchup.log
