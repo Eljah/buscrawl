@@ -128,7 +128,8 @@
         </div>
         <div>
           <div class="selector-row">
-            <label>Date <select id="areaDateSelect"></select></label>
+            <label>From <select id="areaDateFromSelect"></select></label>
+            <label>To <select id="areaDateToSelect"></select></label>
             <label>Metric <select id="areaMetricSelect"><option value="area">km2</option><option value="households">households</option></select></label>
           </div>
           <div class="chart-meta" id="areaMeta"></div>
@@ -146,7 +147,8 @@
           <p class="chart-meta">Contour metric for all generated origins</p>
         </div>
         <div class="selector-row">
-          <label>Date <select id="originCompareDate"></select></label>
+          <label>From <select id="originCompareDateFrom"></select></label>
+          <label>To <select id="originCompareDateTo"></select></label>
           <label>Contour <select id="originCompareThreshold"><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select></label>
           <label>Metric <select id="originCompareMetric"><option value="area">km2</option><option value="households">households</option></select></label>
           <label>Origins <input type="search" id="originCompareFilter" placeholder="filter origins"></label>
@@ -169,7 +171,7 @@ const contourSvg=document.getElementById('contourSvg');
 const emptyEl=document.getElementById('emptyState');
 const originLayer=document.getElementById('originLayer');
 const timeProbe=document.getElementById('timeProbe');
-const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,originCompareDate:'',originCompareFilter:'',originCompareSelectionInitialized:false,selectedOriginCompareSlugs:new Set(),areaChartDate:'',areaChartMetric:'area',currentSnapshot:null,dailySnapshots:[],aggregateSnapshots:[],weekdayFilters:new Set(),dataset:'daily',centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
+const state={payload:null,config:null,originIndex:null,originSlug:'',originPayloads:new Map(),originComparisonLoading:false,originCompareFocusSlug:null,originCompareDateFrom:'',originCompareDateTo:'',originCompareFilter:'',originCompareSelectionInitialized:false,selectedOriginCompareSlugs:new Set(),areaChartDateFrom:'',areaChartDateTo:'',areaChartMetric:'area',currentSnapshot:null,dailySnapshots:[],aggregateSnapshots:[],weekdayFilters:new Set(),dataset:'daily',centerLat:55.79,centerLon:49.12,zoom:12,overlayMode:'total',dragging:false,startX:0,startY:0,startCenterX:0,startCenterY:0};
 const dtf=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const fullModeList=['total','totalNormalized','totalLog','walk','stopTransport'];
 
@@ -316,19 +318,26 @@ function renderAreaChart(){
   if(!box||!state.payload)return;
   const fullSeries=Array.isArray(state.payload.contourAreaSeries)?state.payload.contourAreaSeries:[];
   const dates=[...new Set(fullSeries.map(item=>item.serviceDate).filter(Boolean))].sort();
-  const dateSelect=document.getElementById('areaDateSelect');
+  const dateFromSelect=document.getElementById('areaDateFromSelect');
+  const dateToSelect=document.getElementById('areaDateToSelect');
   const metricSelect=document.getElementById('areaMetricSelect');
-  if(dateSelect){
-    dateSelect.innerHTML=dates.map(date=>`<option value="${escapeHtml(date)}">${escapeHtml(date)}</option>`).join('');
+  if(dateFromSelect&&dateToSelect){
+    const options=dates.map(date=>`<option value="${escapeHtml(date)}">${escapeHtml(date)}</option>`).join('');
+    dateFromSelect.innerHTML=options;
+    dateToSelect.innerHTML=options;
     const currentDate=currentSnapshot().serviceDate;
-    if(!state.areaChartDate&&currentDate&&dates.includes(currentDate))state.areaChartDate=currentDate;
-    if(!state.areaChartDate||!dates.includes(state.areaChartDate))state.areaChartDate=dates[dates.length-1]||'';
-    dateSelect.value=state.areaChartDate;
+    if(!state.areaChartDateFrom&&currentDate&&dates.includes(currentDate))state.areaChartDateFrom=currentDate;
+    if(!state.areaChartDateTo&&currentDate&&dates.includes(currentDate))state.areaChartDateTo=currentDate;
+    if(!state.areaChartDateFrom||!dates.includes(state.areaChartDateFrom))state.areaChartDateFrom=dates[dates.length-1]||'';
+    if(!state.areaChartDateTo||!dates.includes(state.areaChartDateTo))state.areaChartDateTo=state.areaChartDateFrom;
+    if(state.areaChartDateFrom>state.areaChartDateTo)state.areaChartDateTo=state.areaChartDateFrom;
+    dateFromSelect.value=state.areaChartDateFrom;
+    dateToSelect.value=state.areaChartDateTo;
   }
   if(metricSelect){
     state.areaChartMetric=metricSelect.value||state.areaChartMetric||'area';
   }
-  const series=state.areaChartDate?fullSeries.filter(item=>item.serviceDate===state.areaChartDate):fullSeries;
+  const series=fullSeries.filter(item=>dateInRange(item.serviceDate,state.areaChartDateFrom,state.areaChartDateTo));
   if(!fullSeries.length||!series.length){
     box.innerHTML='<div class="area-empty">Reachability area series is not generated yet.</div>';
     document.getElementById('areaMeta').textContent='';
@@ -385,8 +394,8 @@ function renderAreaChart(){
   const currentArea=current.contourArea||series.find(p=>p.departureTime===current.departureTime&&p.serviceDate===current.serviceDate);
   const k15=valueKey(15),k30=valueKey(30),k60=valueKey(60);
   document.getElementById('areaMeta').textContent=currentArea
-    ? `selected: ${fmtScale(currentArea[k15]||0)} / ${fmtScale(currentArea[k30]||0)} / ${fmtScale(currentArea[k60]||0)} ${unit}`
-    : '';
+    ? `range ${state.areaChartDateFrom}..${state.areaChartDateTo}; selected: ${fmtScale(currentArea[k15]||0)} / ${fmtScale(currentArea[k30]||0)} / ${fmtScale(currentArea[k60]||0)} ${unit}`
+    : `range ${state.areaChartDateFrom}..${state.areaChartDateTo}`;
 }
 async function ensureOriginPayloads(){
   const origins=Array.isArray(state.originIndex?.origins)?state.originIndex.origins:[];
@@ -426,13 +435,14 @@ function renderOriginComparisonChart(){
   const metric=document.getElementById('originCompareMetric')?.value||'area';
   const key=originMetricKey(threshold,metric);
   const unit=metric==='households'?'households':'km2';
-  const selectedDate=state.originCompareDate;
+  const dateFrom=state.originCompareDateFrom;
+  const dateTo=state.originCompareDateTo;
   const items=[...state.originPayloads.values()]
     .filter(item=>item.payload&&Array.isArray(item.payload.contourAreaSeries))
     .map(item=>({
       label:item.origin.label||item.payload.originStopName||item.origin.slug,
       slug:item.origin.slug,
-      series:item.payload.contourAreaSeries.filter(point=>!selectedDate||point.serviceDate===selectedDate)
+      series:item.payload.contourAreaSeries.filter(point=>dateInRange(point.serviceDate,dateFrom,dateTo))
     }))
     .filter(item=>state.selectedOriginCompareSlugs.has(item.slug))
     .filter(item=>item.series.some(point=>Number(point[key]||0)>0));
@@ -504,14 +514,20 @@ function originComparisonDates(){
   return dates;
 }
 function renderOriginCompareControls(){
-  const dateSelect=document.getElementById('originCompareDate');
+  const dateFromSelect=document.getElementById('originCompareDateFrom');
+  const dateToSelect=document.getElementById('originCompareDateTo');
   const picker=document.getElementById('originComparePicker');
   const filterInput=document.getElementById('originCompareFilter');
-  if(dateSelect){
+  if(dateFromSelect&&dateToSelect){
     const dates=originComparisonDates();
-    dateSelect.innerHTML=dates.map(date=>`<option value="${escapeHtml(date)}">${escapeHtml(date)}</option>`).join('');
-    if(!state.originCompareDate||!dates.includes(state.originCompareDate))state.originCompareDate=dates[dates.length-1]||'';
-    dateSelect.value=state.originCompareDate;
+    const options=dates.map(date=>`<option value="${escapeHtml(date)}">${escapeHtml(date)}</option>`).join('');
+    dateFromSelect.innerHTML=options;
+    dateToSelect.innerHTML=options;
+    if(!state.originCompareDateFrom||!dates.includes(state.originCompareDateFrom))state.originCompareDateFrom=dates[dates.length-1]||'';
+    if(!state.originCompareDateTo||!dates.includes(state.originCompareDateTo))state.originCompareDateTo=state.originCompareDateFrom;
+    if(state.originCompareDateFrom>state.originCompareDateTo)state.originCompareDateTo=state.originCompareDateFrom;
+    dateFromSelect.value=state.originCompareDateFrom;
+    dateToSelect.value=state.originCompareDateTo;
   }
   if(!picker)return;
   const origins=[...state.originPayloads.values()]
@@ -533,6 +549,12 @@ function renderOriginCompareControls(){
     };
   });
   if(filterInput&&filterInput.value!==state.originCompareFilter)filterInput.value=state.originCompareFilter;
+}
+function dateInRange(date,from,to){
+  if(!date)return false;
+  if(from&&date<from)return false;
+  if(to&&date>to)return false;
+  return true;
 }
 function renderTileLayer(target,templateFn){
   const z=state.zoom,o=origin();
@@ -849,9 +871,11 @@ document.getElementById('zoomOut').onclick=()=>{state.zoom=Math.max(Number(state
 document.getElementById('modeRow').addEventListener('change',e=>{if(e.target?.name!=='accessMode')return;state.overlayMode=e.target.value;updateRangeMeta();renderAll();});
 document.getElementById('originCompareThreshold').addEventListener('change',renderOriginComparisonChart);
 document.getElementById('originCompareMetric').addEventListener('change',renderOriginComparisonChart);
-document.getElementById('areaDateSelect').addEventListener('change',e=>{state.areaChartDate=e.target.value;renderAreaChart();});
+document.getElementById('areaDateFromSelect').addEventListener('change',e=>{state.areaChartDateFrom=e.target.value;if(state.areaChartDateTo&&state.areaChartDateFrom>state.areaChartDateTo)state.areaChartDateTo=state.areaChartDateFrom;renderAreaChart();});
+document.getElementById('areaDateToSelect').addEventListener('change',e=>{state.areaChartDateTo=e.target.value;if(state.areaChartDateFrom&&state.areaChartDateFrom>state.areaChartDateTo)state.areaChartDateFrom=state.areaChartDateTo;renderAreaChart();});
 document.getElementById('areaMetricSelect').addEventListener('change',e=>{state.areaChartMetric=e.target.value;renderAreaChart();});
-document.getElementById('originCompareDate').addEventListener('change',e=>{state.originCompareDate=e.target.value;renderOriginComparisonChart();});
+document.getElementById('originCompareDateFrom').addEventListener('change',e=>{state.originCompareDateFrom=e.target.value;if(state.originCompareDateTo&&state.originCompareDateFrom>state.originCompareDateTo)state.originCompareDateTo=state.originCompareDateFrom;renderOriginComparisonChart();});
+document.getElementById('originCompareDateTo').addEventListener('change',e=>{state.originCompareDateTo=e.target.value;if(state.originCompareDateFrom&&state.originCompareDateFrom>state.originCompareDateTo)state.originCompareDateFrom=state.originCompareDateTo;renderOriginComparisonChart();});
 document.getElementById('originCompareFilter').addEventListener('input',e=>{state.originCompareFilter=e.target.value;renderOriginCompareControls();});
 window.addEventListener('resize',renderAll);
 boot().catch(err=>{emptyEl.textContent='Failed to load accessibility map: '+err.message;});
