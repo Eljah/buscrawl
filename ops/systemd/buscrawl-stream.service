@@ -1,0 +1,19 @@
+[Unit]
+Description=Buscrawl spark streaming writer
+After=network-online.target buscrawl-navi-client.service
+Wants=network-online.target
+Requires=buscrawl-navi-client.service
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-stream.sh
+Restart=always
+RestartSec=30s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/stream.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/stream.log
+
+[Install]
+WantedBy=multi-user.target

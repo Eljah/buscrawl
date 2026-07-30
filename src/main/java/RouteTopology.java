@@ -113,6 +113,7 @@ public class RouteTopology {
                         stopOrder
                 ));
             }
+            addNaviOverlay(stopsById, routesById, routeStops);
 
             routeStops.sort(Comparator
                     .comparing((RouteStopInfo info) -> info.internalRouteId)
@@ -345,6 +346,127 @@ public class RouteTopology {
 
     public Collection<SegmentInfo> getAdjacentSegments() {
         return adjacentSegments;
+    }
+
+    private static void addNaviOverlay(
+            Map<String, StopInfo> stopsById,
+            Map<String, RouteInfo> routesById,
+            List<RouteStopInfo> routeStops
+    ) {
+        try {
+            String content = readNaviRouteMap();
+            if (content == null || content.isBlank()) {
+                return;
+            }
+            JSONObject root = new JSONObject(content);
+            JSONArray routes = root.optJSONArray("routes");
+            if (routes == null) {
+                return;
+            }
+            for (int i = 0; i < routes.length(); i++) {
+                JSONObject route = routes.getJSONObject(i);
+                if (!"navi-overlay".equals(route.optString("mappedFrom"))) {
+                    continue;
+                }
+                String internalRouteId = route.optString("internalRouteId");
+                if (internalRouteId.isBlank()) {
+                    continue;
+                }
+                String baseRouteNumber = route.optString("naviRouteNumber", route.optString("displayRouteNumber"));
+                int transportType = naviTransportTypeToInternal(route.optString("naviTransportTypeId"));
+                String displayRouteNumber = route.optString(
+                        "displayRouteNumber",
+                        RouteMapper.formatRouteNumber(baseRouteNumber, transportType)
+                );
+                routesById.putIfAbsent(internalRouteId, new RouteInfo(
+                        internalRouteId,
+                        baseRouteNumber,
+                        displayRouteNumber,
+                        transportType
+                ));
+
+                JSONArray races = route.optJSONArray("races");
+                if (races == null) {
+                    continue;
+                }
+                for (int raceIndex = 0; raceIndex < races.length(); raceIndex++) {
+                    JSONObject race = races.getJSONObject(raceIndex);
+                    int direction = naviRaceTypeToDirection(
+                            race.optString("raceType", race.optString("naviRaceType")),
+                            raceIndex
+                    );
+                    JSONArray stops = race.optJSONArray("stops");
+                    if (stops == null) {
+                        continue;
+                    }
+                    for (int stopIndex = 0; stopIndex < stops.length(); stopIndex++) {
+                        JSONObject stop = stops.getJSONObject(stopIndex);
+                        String stopId = stop.optString("stopId");
+                        if (stopId.isBlank()) {
+                            continue;
+                        }
+                        String stopName = stop.optString("stopName", stop.optString("name", stopId));
+                        double latitude = stop.has("latitude") ? stop.optDouble("latitude") : stop.optDouble("lat");
+                        double longitude = stop.has("longitude") ? stop.optDouble("longitude") : stop.optDouble("lon");
+                        StopInfo stopInfo = stopsById.computeIfAbsent(stopId, ignored -> new StopInfo(
+                                stopId,
+                                stopName,
+                                latitude,
+                                longitude
+                        ));
+                        routeStops.add(new RouteStopInfo(
+                                internalRouteId,
+                                displayRouteNumber,
+                                stopInfo.stopId,
+                                stopInfo.stopName,
+                                stopInfo.latitude,
+                                stopInfo.longitude,
+                                direction,
+                                stop.optInt("order", stopIndex)
+                        ));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to load Navi route topology overlay: " + e.getMessage());
+        }
+    }
+
+    private static String readNaviRouteMap() throws Exception {
+        String configuredPath = System.getenv("BUS_NAVI_ROUTE_MAP_FILE");
+        if (configuredPath != null && !configuredPath.isBlank()) {
+            Path path = Path.of(configuredPath);
+            if (Files.exists(path)) {
+                return Files.readString(path, StandardCharsets.UTF_8);
+            }
+        }
+        try (InputStream inputStream = RouteTopology.class.getClassLoader()
+                .getResourceAsStream("navi-route-map.json")) {
+            if (inputStream == null) {
+                return null;
+            }
+            return new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static int naviTransportTypeToInternal(String naviTransportTypeId) {
+        if ("2".equals(naviTransportTypeId)) {
+            return 1;
+        }
+        if ("3".equals(naviTransportTypeId)) {
+            return 2;
+        }
+        return 0;
+    }
+
+    private static int naviRaceTypeToDirection(String raceType, int fallbackIndex) {
+        if ("A".equalsIgnoreCase(raceType) || "C".equalsIgnoreCase(raceType)) {
+            return 0;
+        }
+        if ("B".equalsIgnoreCase(raceType) || "D".equalsIgnoreCase(raceType)) {
+            return 1;
+        }
+        return Math.max(0, fallbackIndex);
     }
 
     private static double haversineMeters(double lat1, double lon1, double lat2, double lon2) {

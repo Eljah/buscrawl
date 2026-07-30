@@ -1,0 +1,20 @@
+[Unit]
+Description=Buscrawl Navi realtime client
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=eljah
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-navi-client.sh
+Restart=always
+RestartSec=30s
+NoNewPrivileges=true
+StandardOutput=append:/home/eljah/apps/buscrawl/logs/navi-client.log
+StandardError=append:/home/eljah/apps/buscrawl/logs/navi-client.log
+
+[Install]
+WantedBy=multi-user.target
