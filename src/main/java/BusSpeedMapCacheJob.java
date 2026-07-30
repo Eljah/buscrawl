@@ -21,8 +21,10 @@ import java.util.Map;
 public class BusSpeedMapCacheJob {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final ZoneId CITY_ZONE = ZoneId.of(System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow"));
-    private static final int ROW_LIMIT = Integer.parseInt(System.getenv().getOrDefault("BUS_SPEED_MAP_CACHE_ROW_LIMIT", "20000"));
+    private static final int ROW_LIMIT = Integer.parseInt(System.getenv().getOrDefault("BUS_SPEED_MAP_CACHE_ROW_LIMIT", "500"));
+    private static final int POINT_ROW_LIMIT = Integer.parseInt(System.getenv().getOrDefault("BUS_SPEED_MAP_POINT_CACHE_ROW_LIMIT", "250"));
     private static final int HEATMAP_ROW_LIMIT = Integer.parseInt(System.getenv().getOrDefault("BUS_SPEED_MAP_HEATMAP_ROW_LIMIT", "0"));
+    private static final boolean RENDER_TILES = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_SPEED_MAP_RENDER_TILES", "true"));
 
     public static void main(String[] args) throws Exception {
         Path speedMapDir = Path.of(System.getenv().getOrDefault("BUS_SPEED_MAP_DIR", "./var/bus/speed-map"));
@@ -57,15 +59,16 @@ public class BusSpeedMapCacheJob {
             payload.put("timezone", CITY_ZONE.getId());
             payload.put("yesterday", yesterday.toString());
             payload.put("weekdays", buildWeekdays());
-            payload.put("segmentShapes", topology.buildSegmentShapes());
             payload.put("routeShapes", topology.buildRouteShapes());
             payload.put("pointData", buildSection(connection, speedMapDir, "speed-point", yesterday, today, Mode.POINT));
             payload.put("physicalSegmentData", buildSection(connection, speedMapDir, "speed-physical-segment", yesterday, today, Mode.PHYSICAL_SEGMENT));
             payload.put("routeSegmentData", buildSection(connection, speedMapDir, "speed-route-segment", yesterday, today, Mode.ROUTE_SEGMENT));
             payload.put("routeData", buildSection(connection, speedMapDir, "speed-route", yesterday, today, Mode.ROUTE));
             writeJsonAtomic(cacheFile, payload);
-            Map<String, Object> coordinateHeatmapData = buildCoordinateHeatmapSection(connection, speedMapDir, yesterday, today);
-            DashboardOverlayTileRenderer.renderSpeedCoordinateHeatmapTiles(coordinateHeatmapData, mapConfigFile, tileRoot);
+            if (RENDER_TILES) {
+                Map<String, Object> coordinateHeatmapData = buildCoordinateHeatmapSection(connection, speedMapDir, yesterday, today);
+                DashboardOverlayTileRenderer.renderSpeedCoordinateHeatmapTiles(coordinateHeatmapData, mapConfigFile, tileRoot);
+            }
         }
     }
 
@@ -175,7 +178,7 @@ public class BusSpeedMapCacheJob {
             } else if (!summary) {
                 statement.setString(index++, today.toString());
             }
-            statement.setInt(index, ROW_LIMIT);
+            statement.setInt(index, mode == Mode.POINT ? POINT_ROW_LIMIT : ROW_LIMIT);
             try (ResultSet rs = statement.executeQuery()) {
                 List<Map<String, Object>> rows = new ArrayList<>();
                 while (rs.next()) {

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Buscrawl speed map refresh periodically
+
+[Timer]
+OnBootSec=30min
+OnCalendar=*-*-* 04:20:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=buscrawl-speed-map-refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Buscrawl speed map derived parquet, cache, and tile refresh
+After=buscrawl-derived-data-catchup.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eljah/apps/buscrawl
+ExecStart=/home/eljah/apps/buscrawl/bin/run-speed-map-refresh.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
