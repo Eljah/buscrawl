@@ -44,6 +44,7 @@ public class BusDashboardCacheJob {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final Duration STATS_WINDOW = Duration.ofHours(24);
     private static final Duration FILE_LOOKBACK_SLACK = Duration.ofMinutes(30);
+    private static final Duration DEFAULT_RAW_TAIL_REBUILD_WINDOW = Duration.ofHours(2);
     private static final int DEFAULT_MAX_PARQUET_CANDIDATES = 2000;
     private static final ZoneId CITY_ZONE = ZoneId.of(
             System.getenv().getOrDefault("BUS_CITY_TIMEZONE", "Europe/Moscow")
@@ -67,6 +68,12 @@ public class BusDashboardCacheJob {
         Path sparkLocalDir = Path.of(System.getenv().getOrDefault(
                 "BUS_DASHBOARD_SPARK_LOCAL_DIR",
                 "./var/bus/dashboard-spark-temp"
+        ));
+        Path rawTailManifestFile = Path.of(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_RAW_TAIL_MANIFEST_FILE",
+                parquetDir.getParent() == null
+                        ? "./var/bus/bus-data-parquet-manifest.tsv"
+                        : parquetDir.getParent().resolve("bus-data-parquet-manifest.tsv").toString()
         ));
         Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
                 "BUS_TRAFFIC_BEHAVIOR_DIR",
@@ -92,6 +99,14 @@ public class BusDashboardCacheJob {
                 "BUS_DASHBOARD_FORCE_REBUILD",
                 "false"
         ));
+        boolean rawTailEnabled = Boolean.parseBoolean(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_RAW_TAIL_ENABLED",
+                "true"
+        ));
+        Duration rawTailRebuildWindow = Duration.ofMinutes(Long.parseLong(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_RAW_TAIL_REBUILD_MINUTES",
+                String.valueOf(DEFAULT_RAW_TAIL_REBUILD_WINDOW.toMinutes())
+        )));
         String sparkMaster = System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_MASTER", "local[2]");
 
         Files.createDirectories(statsCacheFile.getParent());
@@ -120,25 +135,43 @@ public class BusDashboardCacheJob {
             state = emptyState();
         }
         List<ParquetFileInfo> newFiles = selectNewFiles(candidateFiles, state.lastProcessedModifiedAt);
+        Instant rawTailRebuildStart = now.minus(rawTailRebuildWindow);
+        List<ParquetFileInfo> rawTailFiles = rawTailEnabled
+                ? listRawTailParquetFiles(rawTailManifestFile, rawTailRebuildStart, candidateFiles)
+                : List.of();
+        List<ParquetFileInfo> tailCompactedFiles = rawTailFiles.isEmpty()
+                ? List.of()
+                : selectFilesModifiedSince(candidateFiles, rawTailRebuildStart.minus(FILE_LOOKBACK_SLACK));
+        List<ParquetFileInfo> incrementalFiles = rawTailFiles.isEmpty()
+                ? newFiles
+                : subtractFiles(newFiles, tailCompactedFiles);
+        List<ParquetFileInfo> tailRebuildFiles = rawTailFiles.isEmpty()
+                ? List.of()
+                : mergeFileLists(tailCompactedFiles, rawTailFiles);
 
         Map<Instant, Long> statsBuckets = forceRebuild ? new TreeMap<>() : loadStatsBuckets(statsCacheFile, statsStart);
         RouteCache routeCache = forceRebuild ? new RouteCache() : loadRouteCache(routeMovementCacheFile, today, yesterday);
         RouteMapper routeMapper = new RouteMapper(null);
 
         System.out.printf(
-                "BusDashboardCacheJob: %d candidate parquet files, %d new files since %s%n",
+                "BusDashboardCacheJob: %d candidate parquet files, %d new compacted files since %s rawTail=%d tailCompacted=%d incremental=%d%n",
                 candidateFiles.size(),
                 newFiles.size(),
-                fileCutoff
+                fileCutoff,
+                rawTailFiles.size(),
+                tailCompactedFiles.size(),
+                incrementalFiles.size()
         );
 
         DerivedStats derivedStats = DerivedStats.empty();
-        if (!newFiles.isEmpty() || Files.exists(trafficBehaviorDir)) {
+        if (!incrementalFiles.isEmpty() || !tailRebuildFiles.isEmpty() || Files.exists(trafficBehaviorDir)) {
             SparkSession spark = SparkSession.builder()
                     .appName("BusDashboardCacheJob")
                     .master(sparkMaster)
                     .config("spark.local.dir", sparkLocalDir.toAbsolutePath().toString())
                     .config("spark.sql.session.timeZone", "UTC")
+                    .config("spark.sql.parquet.enableVectorizedReader", "false")
+                    .config("spark.sql.parquet.inferTimestampNTZ.enabled", "false")
                     .config("spark.driver.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_DRIVER_MEMORY", "2g"))
                     .config("spark.executor.memory", System.getenv().getOrDefault("BUS_DASHBOARD_SPARK_EXECUTOR_MEMORY", "2g"))
                     .getOrCreate();
@@ -146,14 +179,25 @@ public class BusDashboardCacheJob {
             spark.sparkContext().setLogLevel("WARN");
 
             try {
-                if (!newFiles.isEmpty()) {
-                    Dataset<Row> newBusData = spark.read()
-                            .parquet(newFiles.stream().map(file -> file.path).toArray(String[]::new))
+                if (!incrementalFiles.isEmpty()) {
+                    Dataset<Row> incrementalBusData = spark.read()
+                            .parquet(incrementalFiles.stream().map(file -> file.path).toArray(String[]::new))
                             .select("internalRouteId", "realRouteNumber", "eventTime", "speed")
                             .filter(col("eventTime").isNotNull());
 
-                    mergeStatsBuckets(statsBuckets, newBusData, statsStart, now);
-                    mergeRouteCache(routeMapper, routeCache, newBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+                    mergeStatsBuckets(statsBuckets, incrementalBusData, statsStart, now);
+                    mergeRouteCache(routeMapper, routeCache, incrementalBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
+                }
+                if (!tailRebuildFiles.isEmpty()) {
+                    Instant tailBucketStart = floorToBucket(maxInstant(statsStart, rawTailRebuildStart));
+                    statsBuckets.keySet().removeIf(bucket -> !bucket.isBefore(tailBucketStart));
+                    Dataset<Row> tailBusData = spark.read()
+                            .parquet(tailRebuildFiles.stream().map(file -> file.path).toArray(String[]::new))
+                            .select("internalRouteId", "realRouteNumber", "eventTime", "speed")
+                            .filter(col("eventTime").isNotNull());
+
+                    mergeStatsBuckets(statsBuckets, tailBusData, tailBucketStart, now);
+                    mergeRouteCache(routeMapper, routeCache, tailBusData, previousDayStart, today.atStartOfDay(CITY_ZONE).toInstant(), nextDayStart);
                 }
                 if (derivedSeriesEnabled) {
                     derivedStats = computeDerivedStats(
@@ -869,6 +913,107 @@ public class BusDashboardCacheJob {
             }
         }
         return newFiles;
+    }
+
+    private static List<ParquetFileInfo> selectFilesModifiedSince(List<ParquetFileInfo> files, Instant modifiedSince) {
+        List<ParquetFileInfo> selected = new ArrayList<>();
+        for (ParquetFileInfo file : files) {
+            Instant fileModifiedAt = parseInstant(file.modifiedAt);
+            if (fileModifiedAt != null && !fileModifiedAt.isBefore(modifiedSince)) {
+                selected.add(file);
+            }
+        }
+        return selected;
+    }
+
+    private static List<ParquetFileInfo> subtractFiles(List<ParquetFileInfo> files, List<ParquetFileInfo> excluded) {
+        if (files.isEmpty() || excluded.isEmpty()) {
+            return files;
+        }
+        LinkedHashSet<String> excludedPaths = excluded.stream()
+                .map(file -> file.path)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        return files.stream()
+                .filter(file -> !excludedPaths.contains(file.path))
+                .collect(Collectors.toList());
+    }
+
+    private static List<ParquetFileInfo> mergeFileLists(List<ParquetFileInfo> first, List<ParquetFileInfo> second) {
+        Map<String, ParquetFileInfo> byPath = new LinkedHashMap<>();
+        for (ParquetFileInfo file : first) {
+            byPath.put(file.path, file);
+        }
+        for (ParquetFileInfo file : second) {
+            byPath.put(file.path, file);
+        }
+        return byPath.values().stream()
+                .sorted(Comparator.comparing((ParquetFileInfo file) -> parseInstant(file.modifiedAt)).thenComparing(file -> file.path))
+                .collect(Collectors.toList());
+    }
+
+    private static List<ParquetFileInfo> listRawTailParquetFiles(
+            Path manifestFile,
+            Instant modifiedSince,
+            List<ParquetFileInfo> compactedFiles
+    ) {
+        if (!Files.exists(manifestFile)) {
+            return List.of();
+        }
+        Instant compactedWatermark = compactedFiles.stream()
+                .map(file -> parseInstant(file.modifiedAt))
+                .filter(instant -> instant != null)
+                .max(Comparator.naturalOrder())
+                .orElse(modifiedSince);
+        Instant cutoff = compactedFiles.isEmpty()
+                ? modifiedSince
+                : maxInstant(modifiedSince, compactedWatermark.plusMillis(1));
+        int maxRecords = Integer.parseInt(System.getenv().getOrDefault(
+                "BUS_DASHBOARD_RAW_TAIL_MAX_RECORDS",
+                "5000"
+        ));
+        List<ParquetFileInfo> result = new ArrayList<>();
+        try (Stream<String> lines = Files.lines(manifestFile)) {
+            lines.map(BusDashboardCacheJob::parseManifestLine)
+                    .filter(file -> file != null)
+                    .filter(file -> {
+                        Instant modifiedAt = parseInstant(file.modifiedAt);
+                        return modifiedAt != null && !modifiedAt.isBefore(cutoff);
+                    })
+                    .filter(file -> Files.exists(Path.of(file.path)))
+                    .filter(file -> isReadableParquetFile(Path.of(file.path)))
+                    .sorted(Comparator.comparing((ParquetFileInfo file) -> parseInstant(file.modifiedAt)).thenComparing(file -> file.path))
+                    .forEach(result::add);
+        } catch (Exception e) {
+            System.err.printf("BusDashboardCacheJob: failed to read raw tail manifest %s: %s%n", manifestFile, e);
+            return List.of();
+        }
+        if (result.size() > maxRecords) {
+            result = new ArrayList<>(result.subList(result.size() - maxRecords, result.size()));
+        }
+        System.out.printf(
+                "BusDashboardCacheJob: raw tail manifest=%s cutoff=%s selected=%d maxRecords=%d compactedWatermark=%s%n",
+                manifestFile,
+                cutoff,
+                result.size(),
+                maxRecords,
+                compactedWatermark
+        );
+        return result;
+    }
+
+    private static ParquetFileInfo parseManifestLine(String line) {
+        int separator = line == null ? -1 : line.indexOf('\t');
+        if (separator <= 0 || separator >= line.length() - 1) {
+            return null;
+        }
+        Instant modifiedAt = parseInstant(line.substring(0, separator));
+        if (modifiedAt == null) {
+            return null;
+        }
+        ParquetFileInfo file = new ParquetFileInfo();
+        file.modifiedAt = modifiedAt.toString();
+        file.path = line.substring(separator + 1);
+        return file;
     }
 
     private static List<ParquetFileInfo> listRecentParquetFiles(Path parquetDir, Instant modifiedSince) throws IOException {
