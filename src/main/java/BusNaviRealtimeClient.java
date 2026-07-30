@@ -22,6 +22,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class BusNaviRealtimeClient {
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
@@ -69,7 +70,19 @@ public class BusNaviRealtimeClient {
         double maxLon = Double.parseDouble(System.getenv().getOrDefault("BUS_NAVI_MAX_LON", "49.55"));
         long pollMillis = Math.max(1_000L, Long.parseLong(System.getenv().getOrDefault(
                 "BUS_NAVI_POLL_SECONDS",
-                "15"
+                "30"
+        )) * 1000L);
+        long pollJitterMillis = Math.max(0L, Long.parseLong(System.getenv().getOrDefault(
+                "BUS_NAVI_POLL_JITTER_SECONDS",
+                "5"
+        )) * 1000L);
+        long failureBackoffBaseMillis = Math.max(1_000L, Long.parseLong(System.getenv().getOrDefault(
+                "BUS_NAVI_FAILURE_BACKOFF_BASE_SECONDS",
+                "30"
+        )) * 1000L);
+        long failureBackoffMaxMillis = Math.max(failureBackoffBaseMillis, Long.parseLong(System.getenv().getOrDefault(
+                "BUS_NAVI_FAILURE_BACKOFF_MAX_SECONDS",
+                "300"
         )) * 1000L);
         long maxSourceLagSeconds = Long.parseLong(System.getenv().getOrDefault(
                 "BUS_NAVI_MAX_SOURCE_LAG_SECONDS",
@@ -80,18 +93,23 @@ public class BusNaviRealtimeClient {
         System.out.println("Raw bus events spool: " + rawSpool.getRootDir().toAbsolutePath());
         System.out.printf(
                 Locale.ROOT,
-                "Navi bbox: minLat=%.6f maxLat=%.6f minLon=%.6f maxLon=%.6f poll=%dms mappedRoutes=%d%n",
+                "Navi bbox: minLat=%.6f maxLat=%.6f minLon=%.6f maxLon=%.6f poll=%dms jitter=%dms failureBackoff=%d..%dms mappedRoutes=%d%n",
                 minLat,
                 maxLat,
                 minLon,
                 maxLon,
                 pollMillis,
+                pollJitterMillis,
+                failureBackoffBaseMillis,
+                failureBackoffMaxMillis,
                 routeMap.size()
         );
 
         long pollCount = 0L;
+        long consecutiveFailures = 0L;
         while (true) {
             long started = System.currentTimeMillis();
+            long sleepMillis = pollMillis + randomMillis(pollJitterMillis);
             try {
                 if (client.sid == null || client.sid.isBlank()) {
                     client.startSession();
@@ -111,13 +129,28 @@ public class BusNaviRealtimeClient {
                             client.sid
                     );
                 }
+                consecutiveFailures = 0L;
             } catch (Exception e) {
-                client.sid = null;
-                System.err.println("Navi poll failed, session will be recreated: " + e.getMessage());
-                e.printStackTrace(System.err);
+                consecutiveFailures++;
+                boolean resetSession = shouldResetSession(e);
+                if (resetSession) {
+                    client.sid = null;
+                }
+                sleepMillis = backoffMillis(consecutiveFailures, failureBackoffBaseMillis, failureBackoffMaxMillis);
+                System.err.printf(
+                        Locale.ROOT,
+                        "Navi poll failed #%d: %s; resetSession=%s; nextRetryMs=%d%n",
+                        consecutiveFailures,
+                        e.getMessage(),
+                        resetSession,
+                        sleepMillis
+                );
+                if (consecutiveFailures == 1L || consecutiveFailures % 10L == 0L) {
+                    e.printStackTrace(System.err);
+                }
             }
             long elapsed = System.currentTimeMillis() - started;
-            Thread.sleep(Math.max(1_000L, pollMillis - elapsed));
+            Thread.sleep(Math.max(1_000L, sleepMillis - elapsed));
         }
     }
 
@@ -315,6 +348,28 @@ public class BusNaviRealtimeClient {
 
     private static double parseDouble(String value) {
         return Double.parseDouble(value.trim());
+    }
+
+    private static boolean shouldResetSession(Exception e) {
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        if (message.contains("session") || message.contains("sid")) {
+            return true;
+        }
+        return message.startsWith("startsession ");
+    }
+
+    private static long backoffMillis(long consecutiveFailures, long baseMillis, long maxMillis) {
+        long exponent = Math.min(6L, Math.max(0L, consecutiveFailures - 1L));
+        long value = baseMillis * (1L << exponent);
+        long capped = Math.min(maxMillis, value);
+        return capped + randomMillis(Math.max(1_000L, capped / 4L));
+    }
+
+    private static long randomMillis(long maxExclusive) {
+        if (maxExclusive <= 0L) {
+            return 0L;
+        }
+        return ThreadLocalRandom.current().nextLong(maxExclusive);
     }
 
     private static final class Signature {
