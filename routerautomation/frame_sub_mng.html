@@ -1,0 +1,42 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="generator" content="PSPad editor, www.pspad.com">
+  <link rel="stylesheet" rev="stylesheet" href="style.css" type="text/css">
+  <script language="Javascript" src="navigation.js"></script>
+  <script language="Javascript" src="fadeFont.js"></script>
+  <title>test</title>
+  </head>
+  <body style="background-color: #3B9DCC" marginwidth="0" marginheight="0">
+  <script language="Javascript">
+  	var isDisplayCPU = 0;
+	var isEnableBT = 0;
+	var isDisplayTR069 = '1';
+	var isDisplayOpenvpn = '0';
+	 var userDegreeFlag = 2;
+	 var supportSuperUser = 1;
+	 var supportDiagnostic = 0; 
+	 	var isSupportWeave = 0;
+	var isSupportZigBee = 0;
+	draw_subnav_head();
+	//draw_subnav_mng(isDisplayCPU, isEnableBT, isDisplayTR069, isDisplayOpenvpn, userDegreeFlag, supportSuperUser, supportDiagnostic,isSupportWeave,isSupportZigBee);
+	add_subMenuItem("saveconf.htm","Конфигурация");
+	add_subMenuItem("upload.htm","обновление ПО");
+	add_subMenuItem("app.html?change_password","Учетные записи");
+	add_subMenuItem("ntp.htm","Время");
+	add_subMenuItem("syslog.htm","Журнал");
+	add_subMenuItem("debug.htm","Диагностика");
+	 
+	var issuperuser = 0;
+	if (issuperuser == 1 ){
+	  add_subMenuItem("tr069config.htm","TR-069");
+	}
+
+	add_subMenuItem("reboot.htm","Перезагрузка");
+	add_subMenuItem("logout.htm","Выход");
+	init_submenu("Конфигурация");
+	draw_subnav_tail();
+//	init_submenu("Status");	
+  </script><table id="topnav_container" border="0" cellspacing="1" summary=""><tbody><tr height="35"><td class="topnavoff nav navactive"><a href="saveconf.htm" target="content" id="Конфигурация" rel="Конфигурация" onclick="return on_click_menu(this);">Конфигурация</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="upload.htm" target="content" id="обновление ПО" rel="обновление ПО" onclick="return on_click_menu(this);">обновление ПО</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="app.html?change_password" target="content" id="Учетные записи" rel="Учетные записи" onclick="return on_click_menu(this);">Учетные записи</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="ntp.htm" target="content" id="Время" rel="Время" onclick="return on_click_menu(this);">Время</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="syslog.htm" target="content" id="Журнал" rel="Журнал" onclick="return on_click_menu(this);">Журнал</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="debug.htm" target="content" id="Диагностика" rel="Диагностика" onclick="return on_click_menu(this);">Диагностика</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="reboot.htm" target="content" id="Перезагрузка" rel="Перезагрузка" onclick="return on_click_menu(this);">Перезагрузка</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="logout.htm" target="content" id="Выход" rel="Выход" onclick="return on_click_menu(this);">Выход</a></td></tr><tr><td class="subMenuDummy"></td></tr></tbody></table>
+  
+
+</body></html>

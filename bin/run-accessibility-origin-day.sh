@@ -299,17 +299,15 @@ else:
 PY
 }
 
-echo "$(date -Is) $LOG_PREFIX waiting for transfer lock $TRANSFER_LOCK_FILE"
-exec 8>"$TRANSFER_LOCK_FILE"
-flock 8
-echo "$(date -Is) $LOG_PREFIX transfer stage start targetDate=$TARGET_DATE"
-for line in "${ORIGINS[@]}"; do
+run_transfer_origin() {
+  local line="$1"
+  local slug label stop_ids origin_dir
   IFS=$'\t' read -r slug label stop_ids <<< "$line"
   origin_dir="$ORIGIN_ROOT/$slug"
   mkdir -p "$origin_dir"
   if [ "$FORCE_TRANSFER" != "true" ] && transfer_complete "$slug"; then
     echo "$(date -Is) $LOG_PREFIX transfer skipped date=$TARGET_DATE slug=$slug: complete partitions already exist"
-    continue
+    return 0
   fi
   echo "$(date -Is) $LOG_PREFIX transfer state reset date=$TARGET_DATE slug=$slug: incomplete/forced partitions will be recomputed"
   reset_transfer_state_date "$slug"
@@ -329,33 +327,33 @@ for line in "${ORIGINS[@]}"; do
     ./bin/run-transfer-potential.sh
   if transfer_complete "$slug"; then
     echo "$(date -Is) $LOG_PREFIX transfer finish date=$TARGET_DATE slug=$slug"
-  else
-    echo "$(date -Is) $LOG_PREFIX transfer incomplete date=$TARGET_DATE slug=$slug: one or more partitions are missing"
-    reset_transfer_state_date "$slug"
-    clear_transfer_date "$slug"
-    echo "$(date -Is) $LOG_PREFIX transfer incomplete cleanup date=$TARGET_DATE slug=$slug: removed partial partitions and reset retry state"
+    return 0
   fi
-done
-flock -u 8
-echo "$(date -Is) $LOG_PREFIX transfer stage done targetDate=$TARGET_DATE"
+  echo "$(date -Is) $LOG_PREFIX transfer incomplete date=$TARGET_DATE slug=$slug: one or more partitions are missing"
+  reset_transfer_state_date "$slug"
+  clear_transfer_date "$slug"
+  echo "$(date -Is) $LOG_PREFIX transfer incomplete cleanup date=$TARGET_DATE slug=$slug: removed partial partitions and reset retry state"
+  return 1
+}
 
-echo "$(date -Is) $LOG_PREFIX render stage start targetDate=$TARGET_DATE"
-for line in "${ORIGINS[@]}"; do
+run_render_origin() {
+  local line="$1"
+  local slug label stop_ids render_times status
   IFS=$'\t' read -r slug label stop_ids <<< "$line"
   if ! transfer_complete "$slug"; then
     echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: transfer partitions are incomplete"
-    continue
+    return 0
   fi
   if ! transfer_has_reachable_journeys "$slug"; then
     echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: no reachable transfer journeys"
-    continue
+    return 0
   fi
   render_times="__FULL__"
   if [ "$FORCE_RENDER" != "true" ]; then
     render_times="$(render_departure_times "$slug")"
     if [ "$render_times" = "__SKIP__" ]; then
       echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: all observed 15-minute snapshots have tiles, JSON, and contour stats"
-      continue
+      return 0
     fi
   fi
   if [ "$render_times" = "__FULL__" ]; then
@@ -418,8 +416,42 @@ for line in "${ORIGINS[@]}"; do
   else
     echo "$(date -Is) $LOG_PREFIX render failed date=$TARGET_DATE slug=$slug status=$status; continuing with next origin"
   fi
+  return 0
+}
+
+echo "$(date -Is) $LOG_PREFIX waiting for transfer lock $TRANSFER_LOCK_FILE"
+exec 8>"$TRANSFER_LOCK_FILE"
+flock 8
+echo "$(date -Is) $LOG_PREFIX pipeline stage start targetDate=$TARGET_DATE originCount=${#ORIGINS[@]}"
+
+declare -a TRANSFER_STATUS
+run_transfer_origin "${ORIGINS[0]}"
+TRANSFER_STATUS[0]=$?
+
+for ((i=0; i<${#ORIGINS[@]}; i++)); do
+  next=$((i + 1))
+  next_pid=""
+  if [ "$next" -lt "${#ORIGINS[@]}" ]; then
+    run_transfer_origin "${ORIGINS[$next]}" &
+    next_pid=$!
+  fi
+
+  if [ "${TRANSFER_STATUS[$i]:-1}" -eq 0 ]; then
+    run_render_origin "${ORIGINS[$i]}"
+  else
+    IFS=$'\t' read -r slug _ <<< "${ORIGINS[$i]}"
+    echo "$(date -Is) $LOG_PREFIX render skipped date=$TARGET_DATE slug=$slug: transfer failed in pipeline"
+  fi
+
+  if [ -n "$next_pid" ]; then
+    set +e
+    wait "$next_pid"
+    TRANSFER_STATUS[$next]=$?
+    set -e
+  fi
 done
-echo "$(date -Is) $LOG_PREFIX render stage done targetDate=$TARGET_DATE"
+flock -u 8
+echo "$(date -Is) $LOG_PREFIX pipeline stage done targetDate=$TARGET_DATE"
 
 target_month=${TARGET_DATE:0:7}
 current_month=$(TZ="$CITY_TZ" date +%Y-%m)

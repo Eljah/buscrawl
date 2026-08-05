@@ -1,0 +1,225 @@
+D:\Java\buscrawl\.gitignore
+D:\Java\buscrawl\.idea
+D:\Java\buscrawl\bus-data-checkpoint
+D:\Java\buscrawl\bus-data-parquet
+D:\Java\buscrawl\hs_err_pid11440.log
+D:\Java\buscrawl\hs_err_pid16572.log
+D:\Java\buscrawl\hs_err_pid23404.log
+D:\Java\buscrawl\hs_err_pid2464.log
+D:\Java\buscrawl\hs_err_pid25696.log
+D:\Java\buscrawl\hs_err_pid26584.log
+D:\Java\buscrawl\hs_err_pid424.log
+D:\Java\buscrawl\pom.xml
+D:\Java\buscrawl\src
+D:\Java\buscrawl\target
+D:\Java\buscrawl\�������.txt
+D:\Java\buscrawl\.git\COMMIT_EDITMSG
+D:\Java\buscrawl\.git\config
+D:\Java\buscrawl\.git\description
+D:\Java\buscrawl\.git\HEAD
+D:\Java\buscrawl\.git\hooks
+D:\Java\buscrawl\.git\index
+D:\Java\buscrawl\.git\info
+D:\Java\buscrawl\.git\logs
+D:\Java\buscrawl\.git\objects
+D:\Java\buscrawl\.git\refs
+D:\Java\buscrawl\.git\hooks\applypatch-msg.sample
+D:\Java\buscrawl\.git\hooks\commit-msg.sample
+D:\Java\buscrawl\.git\hooks\fsmonitor-watchman.sample
+D:\Java\buscrawl\.git\hooks\post-update.sample
+D:\Java\buscrawl\.git\hooks\pre-applypatch.sample
+D:\Java\buscrawl\.git\hooks\pre-commit.sample
+D:\Java\buscrawl\.git\hooks\pre-merge-commit.sample
+D:\Java\buscrawl\.git\hooks\pre-push.sample
+D:\Java\buscrawl\.git\hooks\pre-rebase.sample
+D:\Java\buscrawl\.git\hooks\pre-receive.sample
+D:\Java\buscrawl\.git\hooks\prepare-commit-msg.sample
+D:\Java\buscrawl\.git\hooks\push-to-checkout.sample
+D:\Java\buscrawl\.git\hooks\sendemail-validate.sample
+D:\Java\buscrawl\.git\hooks\update.sample
+D:\Java\buscrawl\.git\info\exclude
+D:\Java\buscrawl\.git\logs\HEAD
+D:\Java\buscrawl\.git\logs\refs
+D:\Java\buscrawl\.git\logs\refs\heads
+D:\Java\buscrawl\.git\logs\refs\remotes
+D:\Java\buscrawl\.git\logs\refs\heads\master
+D:\Java\buscrawl\.git\logs\refs\remotes\origin
+D:\Java\buscrawl\.git\logs\refs\remotes\origin\master
+D:\Java\buscrawl\.git\objects\00
+D:\Java\buscrawl\.git\objects\08
+D:\Java\buscrawl\.git\objects\0f
+D:\Java\buscrawl\.git\objects\13
+D:\Java\buscrawl\.git\objects\14
+D:\Java\buscrawl\.git\objects\20
+D:\Java\buscrawl\.git\objects\26
+D:\Java\buscrawl\.git\objects\29
+D:\Java\buscrawl\.git\objects\49
+D:\Java\buscrawl\.git\objects\54
+D:\Java\buscrawl\.git\objects\59
+D:\Java\buscrawl\.git\objects\5d
+D:\Java\buscrawl\.git\objects\5f
+D:\Java\buscrawl\.git\objects\67
+D:\Java\buscrawl\.git\objects\72
+D:\Java\buscrawl\.git\objects\80
+D:\Java\buscrawl\.git\objects\91
+D:\Java\buscrawl\.git\objects\94
+D:\Java\buscrawl\.git\objects\a5
+D:\Java\buscrawl\.git\objects\a9
+D:\Java\buscrawl\.git\objects\b5
+D:\Java\buscrawl\.git\objects\c8
+D:\Java\buscrawl\.git\objects\d0
+D:\Java\buscrawl\.git\objects\de
+D:\Java\buscrawl\.git\objects\e1
+D:\Java\buscrawl\.git\objects\e6
+D:\Java\buscrawl\.git\objects\ea
+D:\Java\buscrawl\.git\objects\ec
+D:\Java\buscrawl\.git\objects\ee
+D:\Java\buscrawl\.git\objects\f5
+D:\Java\buscrawl\.git\objects\f6
+D:\Java\buscrawl\.git\objects\info
+D:\Java\buscrawl\.git\objects\pack
+D:\Java\buscrawl\.git\objects\00\357e68a17f1ba99139ba8898ebc83d66fbb5b0
+D:\Java\buscrawl\.git\objects\08\a09cd62cddbdb44c0a59396e14100b3f464665
+D:\Java\buscrawl\.git\objects\0f\ffea390fc2fbeb605119bffbb11f1f010036c9
+D:\Java\buscrawl\.git\objects\13\6fe6ed768a340d8cd7e7e8fddcc42f725347d0
+D:\Java\buscrawl\.git\objects\14\04770df1a8044e2ec9a3dd77504959e746e456
+D:\Java\buscrawl\.git\objects\20\187435474e5ee4a31e9f6fdd531957b1ba89e3
+D:\Java\buscrawl\.git\objects\26\d33521af10bcc7fd8cea344038eaaeb78d0ef5
+D:\Java\buscrawl\.git\objects\29\70f1620598c9f7383174af005e63201f10bb82
+D:\Java\buscrawl\.git\objects\49\ba8658ed023fc020075165c76b7378a87f10b9
+D:\Java\buscrawl\.git\objects\54\2f53452304670e652818baea368077668e8f35
+D:\Java\buscrawl\.git\objects\59\294da456a8853a9e753a4d2e7d821cd3fe7ce9
+D:\Java\buscrawl\.git\objects\59\e90135cb9b5761d5624e2ba206778643aa327e
+D:\Java\buscrawl\.git\objects\5d\2caa2ff74f9462ec1e005109c08692a344b4c6
+D:\Java\buscrawl\.git\objects\5f\f6309b7199129c1afe4f4ec1906e640bec48c6
+D:\Java\buscrawl\.git\objects\67\1c8ef43febb303942d9b1ad934d76335bf4b46
+D:\Java\buscrawl\.git\objects\72\db0027bbf47401025e261c73ea4344f965d44d
+D:\Java\buscrawl\.git\objects\80\af8c5b45c294f95707222bf885bae7f0c6a915
+D:\Java\buscrawl\.git\objects\91\9ce1f1f77253454105acb2aad9997c1047a0e6
+D:\Java\buscrawl\.git\objects\94\a25f7f4cb416c083d265558da75d457237d671
+D:\Java\buscrawl\.git\objects\a5\5e7a179bde3e4e772c29c0c85e53354aa54618
+D:\Java\buscrawl\.git\objects\a9\1c35d361f99fc2f23c25518bdd6c13cbc9f90f
+D:\Java\buscrawl\.git\objects\a9\6d49e6f50417ac13ed0f429464effcc8e29dc3
+D:\Java\buscrawl\.git\objects\b5\9a2fef512f4718499b9f4cdfc3a334bf2fb842
+D:\Java\buscrawl\.git\objects\c8\8efabd06625f3519030b729bc4f00a39897475
+D:\Java\buscrawl\.git\objects\d0\517ea0a03bbfce380ba909114528d156c36dc4
+D:\Java\buscrawl\.git\objects\de\55dd9374ca72c127ac11a994d44000c82f3def
+D:\Java\buscrawl\.git\objects\e1\5309b7f9443742247afaf64e15f810ca2ab808
+D:\Java\buscrawl\.git\objects\e6\9de29bb2d1d6434b8b29ae775ad8c2e48c5391
+D:\Java\buscrawl\.git\objects\ea\8440e5067c27ff7a48a06a0fda9c12bdd7fb56
+D:\Java\buscrawl\.git\objects\ec\e62ec39d50c4db4f7efba557a2378c73c167ea
+D:\Java\buscrawl\.git\objects\ee\9f0bc23abfa901d7c83727c36bc54d00133696
+D:\Java\buscrawl\.git\objects\f5\356f88f40f4591966dc2f707f620dbeccaee88
+D:\Java\buscrawl\.git\objects\f6\3e5a30ae8b5a49a29ebc29d1af596ffa87f782
+D:\Java\buscrawl\.git\refs\heads
+D:\Java\buscrawl\.git\refs\remotes
+D:\Java\buscrawl\.git\refs\tags
+D:\Java\buscrawl\.git\refs\heads\master
+D:\Java\buscrawl\.git\refs\remotes\origin
+D:\Java\buscrawl\.git\refs\remotes\origin\master
+D:\Java\buscrawl\.idea\.gitignore
+D:\Java\buscrawl\.idea\codeStyles
+D:\Java\buscrawl\.idea\compiler.xml
+D:\Java\buscrawl\.idea\dbnavigator.xml
+D:\Java\buscrawl\.idea\jarRepositories.xml
+D:\Java\buscrawl\.idea\misc.xml
+D:\Java\buscrawl\.idea\sbt.xml
+D:\Java\buscrawl\.idea\vcs.xml
+D:\Java\buscrawl\.idea\workspace.xml
+D:\Java\buscrawl\.idea\codeStyles\codeStyleConfig.xml
+D:\Java\buscrawl\.idea\codeStyles\Project.xml
+D:\Java\buscrawl\bus-data-checkpoint\.metadata.crc
+D:\Java\buscrawl\bus-data-checkpoint\commits
+D:\Java\buscrawl\bus-data-checkpoint\metadata
+D:\Java\buscrawl\bus-data-checkpoint\offsets
+D:\Java\buscrawl\bus-data-checkpoint\offsets\.0.crc
+D:\Java\buscrawl\bus-data-checkpoint\offsets\0
+D:\Java\buscrawl\bus-data-parquet\_spark_metadata
+D:\Java\buscrawl\src\main
+D:\Java\buscrawl\src\test
+D:\Java\buscrawl\src\main\java
+D:\Java\buscrawl\src\main\resources
+D:\Java\buscrawl\src\main\java\BusDataSparkStreaming.java
+D:\Java\buscrawl\src\main\java\BusDataTcpServer.java
+D:\Java\buscrawl\src\main\java\BusRealtimeClient.java
+D:\Java\buscrawl\src\main\java\ReadBusDataFromParquet.java
+D:\Java\buscrawl\src\main\java\RouteMapper.java
+D:\Java\buscrawl\src\main\resources\routes.json
+D:\Java\buscrawl\src\test\java
+D:\Java\buscrawl\target\buscrawl-1.0-SNAPSHOT.jar
+D:\Java\buscrawl\target\classes
+D:\Java\buscrawl\target\generated-sources
+D:\Java\buscrawl\target\maven-archiver
+D:\Java\buscrawl\target\maven-status
+D:\Java\buscrawl\target\classes\BusDataSparkStreaming.class
+D:\Java\buscrawl\target\classes\BusDataTcpServer.class
+D:\Java\buscrawl\target\classes\BusRealtimeClient.class
+D:\Java\buscrawl\target\classes\ReadBusDataFromParquet.class
+D:\Java\buscrawl\target\classes\RouteMapper.class
+D:\Java\buscrawl\target\classes\routes.json
+D:\Java\buscrawl\target\generated-sources\annotations
+D:\Java\buscrawl\target\maven-archiver\pom.properties
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\compile
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\testCompile
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\compile\default-compile
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\compile\default-compile\createdFiles.lst
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\compile\default-compile\inputFiles.lst
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\testCompile\default-testCompile
+D:\Java\buscrawl\target\maven-status\maven-compiler-plugin\testCompile\default-testCompile\inputFiles.lst
+  
+����ন��� 䠩���:  
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.example</groupId>
+    <artifactId>buscrawl</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+    </properties>
+
+        <dependencies>
+        <!-- Java-клиент для socket.io -->
+            <dependency>
+                <groupId>io.socket</groupId>
+                <artifactId>socket.io-client</artifactId>
+                <version>1.0.1</version>
+            </dependency>
+
+        <!-- Зависимость для работы с JSON -->
+        <dependency>
+            <groupId>org.json</groupId>
+            <artifactId>json</artifactId>
+            <version>20240303</version>
+        </dependency>
+
+         <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>logging-interceptor</artifactId>
+                <version>3.12.12</version> <!-- Совместима с текущей версией okhttp -->
+         </dependency>
+
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-core_2.12</artifactId>
+                <version>3.5.1</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-sql_2.12</artifactId>
+                <version>3.5.1</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-streaming_2.12</artifactId>
+                <version>3.5.1</version>
+            </dependency>
+
+        </dependencies>
+</project>

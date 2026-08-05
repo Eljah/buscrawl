@@ -1,0 +1,131 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta http-equiv="Pragma" content="no-cache">
+<meta HTTP-equiv="Cache-Control" content="no-cache">
+<meta HTTP-EQUIV="Expires" CONTENT="Mon, 01 Jan 1990 00:00:01 GMT">
+
+<meta http-equiv="Refresh" content="300;url=http://192.168.0.1/relogin.htm">
+<title>??N?????</title>
+
+<link href="/style.css" rel="stylesheet" type="text/css">
+<script>
+if (window!=window.top) { 
+/* N?N?N??°????N??° ?·?°??N?N??¶?µ???° ???? N?N??µ???? */ 
+top.location.href='/login.htm';
+} 
+var map2 = ' b^4!Q#:tn),`\\68H0kg[\'/GchyVmFK.1xf;dY<WPv72?B=Nl*T(p]Iq}"~iwROrXoM{U3&ZS_aD$E5>-|s@ACuL9z+%eJj';
+function enc(str) {
+    var encoded = "";
+    for (var i=0; i<str.length; i++) {
+        var a = str.charCodeAt(i);
+        var b = map2.charAt(a - 32);    // bitwise XOR with any number, e.g. 123
+       encoded += b;
+    }
+    return encoded;
+}
+
+function flogin(){
+	var before = document.getElementById("username").value + document.getElementById("password").value ;
+	document.getElementById("credit").value =  enc(before);
+	document.getElementById("username").value = "";
+	document.getElementById("password").value = "";
+	return true;
+}
+
+
+
+function getSearchParameters() {
+      var prmstr = window.location.search.substr(1);
+      return prmstr != null && prmstr != "" ? transformToAssocArray(prmstr) : {};
+}
+
+function transformToAssocArray( prmstr ) {
+    var params = {};
+    var prmarr = prmstr.split("&");
+    for ( var i = 0; i < prmarr.length; i++) {
+        var tmparr = prmarr[i].split("=");
+        params[tmparr[0]] = tmparr[1];
+    }
+    return params;
+}
+var params = getSearchParameters();
+var next_link = params.next_link;
+var wait = 3488799;
+var limit_login = 0;
+
+</script>
+</head>
+
+
+<BODY >
+<blockquote>
+<img src="/topbar.png" width="200" height="100" border="0" align="middle" style="margin-top: 12px;">
+<form action=/boafrm/formLoginCookie id="form_login" method=POST name="login">
+	<div class="data_common data_common_notitle" id="login">
+		<table>
+			<tr>
+				<th width="25%">?????µ????N??µ ????N? ?????»N??·?????°N??µ?»N?</th>
+				<td><input type="text" id="username" name="login"></td>
+				
+			</tr>
+			<tr>
+				<th width="25%">?????µ????N??µ ???°N????»N?</th>
+				<td><input type="password" id="password" name="pass"></td>					
+			</tr>
+			<tr>
+				<td id="login_warning" style="display:none"> <div style="color: red; font-size: 14px;">
+					?????????°?????µ! ??N??»?? ??N??????·???µ???µ??N? ??????N?N????? ??????N??? N? ???µ??N??°?????»N???N??? ?????µ???µ?? ?????»N??·?????°N??µ?»N? ??/???»?? ???°N????»?µ??!</div></td>
+				</tr>
+		</table>
+		<div class="adsl clearfix btn_center">		
+			<input id="next_link" type="hidden" name="next_link">
+			<input id="credit" type="hidden" name="credit">
+			<input class="link_bg" type="submit" name="continue" onClick="return flogin();" value="??????N???" >
+		</div>
+	</div>
+	
+		<div class="data_common data_common_notitle" id="wait" style="display:none">
+			<table>
+				<tr>
+					<td class="data_prompt_td_info"> ??N??µ??N?N??µ???? ?????»??N??µN?N????? ??????N?N?????! </td>
+				</tr>
+				<tr>
+					<td class="data_prompt_td_info">?????????¶????N??µ: <span id="show_sec"></span> N??µ??N????? ???· 60</td>
+				</tr>
+			</table>
+	</div>
+</form>
+<script>
+	var count = 0;
+	function  do_count(){
+				
+		if (count == 0) {
+			top.location.href="/home.htm";
+		}
+		document.getElementById("show_sec").innerHTML = count;
+		if (count > 0) {
+			count--;
+			setTimeout('do_count()',1000);
+		}
+	}
+	
+	
+	document.getElementById("next_link").value= next_link;
+	if (limit_login > 0){
+		document.getElementById("login_warning").style.display =""
+	}
+	
+	if (limit_login > 2){
+		document.getElementById("wait").style.display =""
+		document.getElementById("login").style.display ="none"
+		count = 60 - wait;
+		do_count();
+	}
+</script>
+<blockquote>
+</body>
+</html>
+
+
+

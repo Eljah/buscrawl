@@ -1,0 +1,32 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="generator" content="PSPad editor, www.pspad.com">
+  <link rel="stylesheet" rev="stylesheet" href="style.css" type="text/css">
+  <script language="Javascript" src="navigation.js"></script>
+  <script language="Javascript" src="fadeFont.js"></script>
+  <title>test</title>
+  </head>
+  <body style="background-color: #3B9DCC" marginwidth="0" marginheight="0">
+  <script language="Javascript">
+   var userDegreeFlag = 2;
+ 	draw_subnav_head();
+	//draw_subnav_firewall(1, 1, 1,0,0,0,userDegreeFlag);
+
+	add_subMenuItem("portfw.htm","Проброс портов");
+	add_subMenuItem("app.html?ipfilter","Фильтр IP");
+	add_subMenuItem("app.html?macfilter","Фильтр MAC");
+	add_subMenuItem("app.html?macwhite","Белый список");
+	add_subMenuItem("urlfilter.htm","Фильтр URL");
+	add_subMenuItem("dos.htm","Защита от DOS");
+	add_subMenuItem("dmz.htm","DMZ");
+	add_subMenuItem("algctl.htm","ALG");
+	add_subMenuItem("accessctl.htm","Контроль доступа");
+	
+	init_submenu("Проброс портов");
+	draw_subnav_tail();
+	//init_submenu("Port Filtering");	
+	
+  </script><table id="topnav_container" border="0" cellspacing="1" summary=""><tbody><tr height="35"><td class="topnavoff nav navactive"><a href="portfw.htm" target="content" id="Проброс портов" rel="Проброс портов" onclick="return on_click_menu(this);">Проброс портов</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="app.html?ipfilter" target="content" id="Фильтр IP" rel="Фильтр IP" onclick="return on_click_menu(this);">Фильтр IP</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="app.html?macfilter" target="content" id="Фильтр MAC" rel="Фильтр MAC" onclick="return on_click_menu(this);">Фильтр MAC</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="app.html?macwhite" target="content" id="Белый список" rel="Белый список" onclick="return on_click_menu(this);">Белый список</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="urlfilter.htm" target="content" id="Фильтр URL" rel="Фильтр URL" onclick="return on_click_menu(this);">Фильтр URL</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="dos.htm" target="content" id="Защита от DOS" rel="Защита от DOS" onclick="return on_click_menu(this);">Защита от DOS</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="dmz.htm" target="content" id="DMZ" rel="DMZ" onclick="return on_click_menu(this);">DMZ</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="algctl.htm" target="content" id="ALG" rel="ALG" onclick="return on_click_menu(this);">ALG</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="accessctl.htm" target="content" id="Контроль доступа" rel="Контроль доступа" onclick="return on_click_menu(this);">Контроль доступа</a></td></tr><tr><td class="subMenuDummy"></td></tr></tbody></table>
+  
+
+</body></html>

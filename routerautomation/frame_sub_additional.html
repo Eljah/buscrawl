@@ -1,0 +1,31 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="generator" content="PSPad editor, www.pspad.com">
+  
+ 
+  <link rel="stylesheet" rev="stylesheet" href="style.css" type="text/css">
+  <script language="Javascript" src="navigation.js"></script>
+  <script language="Javascript" src="fadeFont.js"></script>
+  <title>test</title>
+  </head>
+  <body style="background-color: #3B9DCC" marginwidth="0" marginheight="0">
+  <script language="Javascript">
+  draw_subnav_head();
+  
+  //add_subMenuItem("8021q_vlan.htm","Группировка портов");
+  add_subMenuItem("ddns.htm","DDNS");
+  add_subMenuItem("route.htm","Маршрутизация");
+ 
+  var issuperuser = 0;
+  if (issuperuser == 1 ){
+	   add_subMenuItem("traffic_shaping.htm","QoS");
+	   add_subMenuItem("qos_policy.htm","QoS Политики");
+	   add_subMenuItem("qos_classification.htm","QoS Классификация");
+  }
+  //init_submenu("Группировка портов");
+  init_submenu("DDNS");
+  draw_subnav_tail();
+  </script><table id="topnav_container" border="0" cellspacing="1" summary=""><tbody><tr height="35"><td class="topnavoff nav navactive"><a href="ddns.htm" target="content" id="DDNS" rel="DDNS" onclick="return on_click_menu(this);">DDNS</a></td></tr><tr height="35"><td class="topnavoff nav"><a href="route.htm" target="content" id="Маршрутизация" rel="Маршрутизация" onclick="return on_click_menu(this);">Маршрутизация</a></td></tr><tr><td class="subMenuDummy"></td></tr></tbody></table>
+  
+
+</body></html>

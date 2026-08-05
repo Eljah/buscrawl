@@ -1,0 +1,394 @@
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Проброс портов</title>
+<script type="text/javascript" src="util_gw.js"> </script>
+<link rel="stylesheet" href="style.css">
+<script type="text/javascript" src="/app.js"> </script>
+<link rel="stylesheet" href="/app.css">
+<script>
+var portfw_extend =1;
+var wanNums = 8;
+
+function addClick()
+{
+	if (!document.formPortFwAdd.enabled.checked)
+		return true;
+	
+	if (document.formPortFwAdd.ip.value=="" && document.formPortFwAdd.fromPort.value=="" &&
+	document.formPortFwAdd.toPort.value=="" && document.formPortFwAdd.comment.value=="" )
+	return true;
+	
+	if(checkHostIPValid(document.formPortFwAdd.ip,document.formPortFwAdd.lan_mask,'Неверный IP-адрес') == false)
+	return false;
+	
+	/*if ( checkIpAddr(document.formPortFwAdd.ip, 'Invalid IP address') == false )
+			return false;
+	*/
+
+	if (document.formPortFwAdd.fromPort.value=="") {
+	alert("Диапазон портов не может быть пустым! Вы должны установить значение между 1-65535.");
+	document.formPortFwAdd.fromPort.focus();
+	return false;
+	}
+	if ( validateKey( document.formPortFwAdd.fromPort.value ) == 0 ) {
+	alert("Неверный номер порта! Номер должен содержать только цифры (0-9).");
+	document.formPortFwAdd.fromPort.focus();
+	return false;
+	}
+	d1 = getDigit(document.formPortFwAdd.fromPort.value, 1);
+	if (d1 > 65535 || d1 < 1) {
+	alert("Неверный номер порта! Вы должны установить значение между 1-65535.");
+	document.formPortFwAdd.fromPort.focus();
+	return false;
+	}
+	
+	if (document.formPortFwAdd.toPort.value!="") {
+		if ( validateKey( document.formPortFwAdd.toPort.value ) == 0 ) {
+		alert("Неверный номер порта! Номер должен содержать только цифры (0-9).");
+		document.formPortFwAdd.toPort.focus();
+		return false;
+		}
+	d2 = getDigit(document.formPortFwAdd.toPort.value, 1);
+	if (d2 > 65535 || d2 < 1) {
+		alert("Неверный номер порта! Вы должны установить значение между 1-65535.");
+		document.formPortFwAdd.toPort.focus();
+		return false;
+		}
+	if (d1 > d2 ) {
+		alert("Неверный диапазон портов! 1st port value should be less than 2nd value.");
+		document.formPortFwAdd.fromPort.focus();
+		return false;
+	}
+	 }
+	
+	if (portfw_extend)
+	{
+		 if (document.formPortFwAdd.externalFromPort.value=="") {
+		alert("Внешний порт не может быть пустым! Вы должны установить значение между 1-65535.");
+		document.formPortFwAdd.externalFromPort.focus();
+		return false;
+		}
+
+		if ((validateKey( document.formPortFwAdd.externalFromPort.value ) == 0) ) {
+		alert("Неверный номер порта! Номер должен содержать только цифры (0-9).");
+		document.formPortFwAdd.externalFromPort.focus();
+		return false;
+		}
+		d1 = getDigit(document.formPortFwAdd.externalFromPort.value, 1);
+		if (d1 > 65535 || d1 < 1) {
+		alert("Неверный номер порта! Вы должны установить значение между 1-65535.");
+		document.formPortFwAdd.externalFromPort.focus();
+		return false;
+		}
+
+	if (document.formPortFwAdd.externalToPort.value!="") {
+			if ( validateKey( document.formPortFwAdd.externalToPort.value ) == 0 ) {
+			alert("Неверный номер порта! Номер должен содержать только цифры (0-9).");
+			document.formPortFwAdd.externalToPort.focus();
+			return false;
+			}
+		d2 = getDigit(document.formPortFwAdd.externalToPort.value, 1);
+		if (d2 > 65535 || d2 < 1) {
+			alert("Неверный номер порта! Неверный номер порта!.");
+			document.formPortFwAdd.externalToPort.focus();
+			return false;
+			}
+		if (d1 > d2 ) {
+			alert("Неверный номер порта! Значение 1го порта должно быть меньше значения 2го");
+			document.formPortFwAdd.externalToPort.focus();
+			return false;
+
+		}
+
+		local_from_port = getDigit(document.formPortFwAdd.fromPort.value, 1);
+		local_to_port = getDigit(document.formPortFwAdd.toPort.value, 1);
+		if( (d2 - d1) != (local_to_port - local_from_port) ) {
+			alert("Некорректный диапазон портов! Диапазоны локальных и внешних портов должны быть равны!");
+			document.formPortFwAdd.externalToPort.focus();
+			return false;
+		}
+		 }
+	}
+	fromport = parseInt(document.formPortFwAdd.externalFromPort.value, 0);
+	toport = parseInt(document.formPortFwAdd.externalToPort.value, 0);
+	//if fromport or fromport is nan
+	if ((fromport == 7547) || (toport == 7547)){
+		alert("Нельзя пробросить на порт 7547");
+		document.formPortFwAdd.externalFromPort.focus();
+		return false;
+	}
+
+	if ((fromport <= 7547) && (7547 <= toport)){
+		alert("Нельзя пробросить на порт 7547");
+		document.formPortFwAdd.externalFromPort.focus();
+		return false;
+	}
+
+	 return true;
+}
+
+
+function deleteClick()
+{
+	if ( !confirm('Вы действительно хотите удалить выбранные записи?') ) {
+	return false;
+	}
+	else
+	return true;
+}
+
+function deleteAllClick()
+{
+	 if ( !confirm('Вы действительно хотите удалить все записи?') ) {
+	return false;
+	}
+	else
+	return true;
+}
+function disableDelButton()
+{
+	disableButton(document.formPortFwDel.deleteSelPortFw);
+	disableButton(document.formPortFwDel.deleteAllPortFw);
+}
+
+function updateState()
+{
+	function pfw_wans_disable(yes){
+		for(var i=1;i<=wanNums;i++)	{
+			var e =get_by_id("pfw_wan_enadbled"+i)
+			if (e && e.disabled ) e.disabled = yes;
+		}
+	} 
+	if (document.formPortFwAdd.enabled.checked) {
+		/* WAN Checkbox */
+	if(wanNums > 0)
+		enableCheckBox(document.formPortFwAdd.pfw_all_wan);
+
+	pfw_wans_disable(false);
+	enableTextField(document.formPortFwAdd.ip);
+	enableTextField(document.formPortFwAdd.protocol);
+	enableTextField(document.formPortFwAdd.fromPort);
+	enableTextField(document.formPortFwAdd.toPort);
+
+	if (portfw_extend)
+	{
+		enableTextField(document.formPortFwAdd.rmtip);
+		enableTextField(document.formPortFwAdd.externalFromPort);
+		enableTextField(document.formPortFwAdd.externalToPort);
+	}
+
+	enableTextField(document.formPortFwAdd.comment);
+	}
+	else {
+		/* WAN Checkbox */
+	if(wanNums > 0)
+		disableCheckBox(document.formPortFwAdd.pfw_all_wan);
+
+	pfw_wans_disable(true);
+	disableTextField(document.formPortFwAdd.ip);
+	disableTextField(document.formPortFwAdd.protocol);
+	disableTextField(document.formPortFwAdd.fromPort);
+	disableTextField(document.formPortFwAdd.toPort);
+	if (portfw_extend)
+	{
+		disableTextField(document.formPortFwAdd.rmtip);
+		disableTextField(document.formPortFwAdd.externalFromPort);
+		disableTextField(document.formPortFwAdd.externalToPort);
+	}
+
+	disableTextField(document.formPortFwAdd.comment);
+	}
+}
+
+function Load_Setting()
+{
+	if ( 1 )
+		document.formPortFwAdd.enabled.checked = true;
+	updateState();
+}
+function show_edit_port_info()
+{
+		document.write("<tr><td>");
+	document.write("<p><font size=2><b>Локальный IP адрес:</b><input type='text' name='ip' size='10' maxlength='15'>");  
+	document.write("<b>Диапазон локальных портов:</b><input type='text' name='fromPort' size='10'>");
+	document.write("<b>-</b><input type='text' name='toPort' size='10'></font>");
+
+	if (portfw_extend)
+	{
+		document.write("<br>");
+	}
+	
+	document.write("<b>Протокол:</b><select name='protocol' maxlength='20'> <option select value='0'>TCP/UDP</option>");
+	document.write("<option value='1'>TCP</option><option value='2'>UDP</option> </select>");		
+	
+	if (portfw_extend)
+	{		
+		document.write("<br><font size=2><b>Удаленный IP адрес:</b><input type='text' name='rmtip' size='10' maxlength='15'>");
+		document.write("<b>Диапазон удаленных портов:</b><input type='text' name='externalFromPort' size='10'>");
+		document.write("<b>-</b><input type='text' name='externalToPort' size='10'></font> <br>");
+	}
+
+	document.write("<b>Комментарий:</b> <input type='text' name='comment' size='6' maxlength='20'></font></p>");
+	document.write("</td></tr>");
+}
+var wan_enabled = [
+	0,
+	1, 
+	1, 
+	1, 
+	0,
+	0,
+	0,
+	0,
+	0
+	];
+var wan_type = [
+	0,
+	3, 
+	1,
+	0, 
+	1, 
+	1, 
+	1, 
+	1, 
+	1 
+	];	
+var WAN_TYPE_BRIDGE = 20;
+var isCheckAll = false;  
+function allWanClick() 
+{  
+	if (isCheckAll) 
+	{  		
+		for(var i=1;i<=wanNums;i++)
+		{	
+			if (wan_type[i] == WAN_TYPE_BRIDGE){
+				continue;
+			}
+			if (wan_enabled[i] == 1){		
+				get_by_id("pfw_wan_enadbled"+i).checked = false;
+			}	
+		}			
+		isCheckAll = false;  	
+	} else 
+	{  		
+		for(var i=1;i<=wanNums;i++)
+		{	
+			if (wan_type[i] == WAN_TYPE_BRIDGE){
+				continue;
+			}
+			if (wan_enabled[i] == 1){			
+				get_by_id("pfw_wan_enadbled"+i).checked = true;		
+			}
+		} 		
+		isCheckAll = true;  	
+	}  
+}  
+
+
+function show_wan_checkbox()
+{	
+	document.write("<p><tr><td>");	
+	if(wanNums > 0)
+		document.write("<input type='checkbox' id='pfw_all_wan' name='pfw_all_wan' onclick='allWanClick()'>&nbsp;&nbsp;Все WAN&nbsp;&nbsp;");
+	for(var i=1;i<=wanNums;i++)	
+	{	
+		if (wan_type[i] == WAN_TYPE_BRIDGE){
+			continue;
+		}
+		if (wan_enabled[i] == 0){
+			document.write("<div style='display:None'><input type='checkbox'  id='pfw_wan_enadbled"+i+"' name='WAN"+i+"' value=\"ON\">&nbsp;&nbsp;WAN"+i+"</div>");	
+		}	else {
+			document.write("<div><input type='checkbox' id='pfw_wan_enadbled"+i+"' name='WAN"+i+"' value=\"ON\">&nbsp;&nbsp;WAN"+i+"</div>");
+		}
+		
+	}
+	document.write("</td></tr></p>");	
+}
+
+</script>
+</head>
+
+<body onload="Load_Setting();" marginwidth="0" marginheight="0">
+<blockquote>
+<h2>Проброс портов</h2>
+
+<p></p><p></p><table border="0" width="700" cellspacing="4" cellpadding="0">
+<tbody><tr><td><font size="2">
+ 
+ Записи в этой таблице позволяют автоматически перенаправлять общие сетевые службы
+к конкретному устройству, находящемуся за NAT firewall. Эти настройки необходимы только,
+&nbsp;если вы хотите разместить какой-либо сервер, например, веб-сервер или почтовый сервер, внутри
+ частной локальной сети находящейся за NAT firewall вашего роутера.
+</font></td></tr>
+
+<tr><td><hr size="1" noshade="" align="top"></td></tr>
+
+<form action="/boafrm/formPortFw" method="POST" name="formPortFwAdd"></form>
+<input type="hidden" name="lan_mask" value="255.255.255.0">
+<tr><td><font size="2"><b>
+	<input type="checkbox" name="enabled" value="ON" onclick="updateState()">&nbsp;&nbsp;Включить проброс портов</b><br>
+		</font></td>
+</tr>
+
+
+	<script> 
+	show_wan_checkbox(); 
+	show_edit_port_info(); 
+	</script><tr><td><input type="checkbox" id="pfw_all_wan" name="pfw_all_wan" onclick="allWanClick()">&nbsp;&nbsp;Все WAN&nbsp;&nbsp;<div><input type="checkbox" id="pfw_wan_enadbled1" name="WAN1" value="ON">&nbsp;&nbsp;WAN1</div><div><input type="checkbox" id="pfw_wan_enadbled2" name="WAN2" value="ON">&nbsp;&nbsp;WAN2</div><div><input type="checkbox" id="pfw_wan_enadbled3" name="WAN3" value="ON">&nbsp;&nbsp;WAN3</div><div style="display:None"><input type="checkbox" id="pfw_wan_enadbled4" name="WAN4" value="ON">&nbsp;&nbsp;WAN4</div><div style="display:None"><input type="checkbox" id="pfw_wan_enadbled5" name="WAN5" value="ON">&nbsp;&nbsp;WAN5</div><div style="display:None"><input type="checkbox" id="pfw_wan_enadbled6" name="WAN6" value="ON">&nbsp;&nbsp;WAN6</div><div style="display:None"><input type="checkbox" id="pfw_wan_enadbled7" name="WAN7" value="ON">&nbsp;&nbsp;WAN7</div><div style="display:None"><input type="checkbox" id="pfw_wan_enadbled8" name="WAN8" value="ON">&nbsp;&nbsp;WAN8</div></td></tr><tr><td><p><font size="2"><b>Локальный IP адрес:</b><input type="text" name="ip" size="10" maxlength="15"><b>Диапазон локальных портов:</b><input type="text" name="fromPort" size="10"><b>-</b><input type="text" name="toPort" size="10"></font><br><b>Протокол:</b><select name="protocol" maxlength="20"> <option select="" value="0">TCP/UDP</option><option value="1">TCP</option><option value="2">UDP</option> </select><br><font size="2"><b>Удаленный IP адрес:</b><input type="text" name="rmtip" size="10" maxlength="15"><b>Диапазон удаленных портов:</b><input type="text" name="externalFromPort" size="10"><b>-</b><input type="text" name="externalToPort" size="10"></font> <br><b>Комментарий:</b> <input type="text" name="comment" size="6" maxlength="20"></p></td></tr>
+
+<tr><td>
+
+	<input type="submit" value="Сохранить и применить" name="save_apply" onclick="return addClick()">&nbsp;&nbsp;
+		<input type="reset" value="Сбросить" name="reset"><p></p>
+		<input type="hidden" value="1" name="addPortFwFlag">  
+	<input type="hidden" value="/portfw.htm" name="submit-url">
+</td></tr>
+	<script>
+		updateState();
+	</script>
+
+</tbody></table>
+
+
+<br>
+<form action="/boafrm/formPortFw" method="POST" name="formPortFwDel">
+<table class="rt_table auto">
+	<tbody><tr><th colspan="9">Таблица пробрасываемых портов:</th></tr>
+	<tr class="tbl_head"><td align="center" width="15%"><font size="2"><b>Локальный IP адрес</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Диапазон локальных портов</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Протокол</b></font></td>
+<td align="center" width="15%"><font size="2"><b>Удаленный IP адрес</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Диапазон удаленных портов</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Wan</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Статус</b></font></td>
+<td align="center" width="20%"><font size="2"><b>Комментарий</b></font></td>
+<td align="center" width="10%"><font size="2"><b>Выбрать</b></font></td></tr>
+<tr><td align="center" width="15%"><font size="2">192.168.0.120</font></td>
+<td align="center" width="10%"><font size="2">443</font></td>
+<td align="center" width="10%"><font size="2">TCP</font></td>
+<td align="center" width="10%"><font size="2">0.0.0.0</font></td>
+<td align="center" width="15%"><font size="2">443</font></td>
+<td align="center" width="20%"><font size="2">Wan1</font></td>
+<td align="center" width="10%"><font size="2">Enabled</font></td>
+<td align="center" width="20%"><font size="2">buscrawl-https</font></td>
+<td align="center" width="10%"><input type="checkbox" name="select1" value="ON"></td></tr>
+
+</tbody></table>
+
+ <br><input type="submit" value="Удалить выбранное" name="deleteSelPortFw" onclick="return deleteClick()">&nbsp;&nbsp;
+		 <input type="submit" value="Удалить все" name="deleteAllPortFw" onclick="return deleteAllClick()">&nbsp;&nbsp;&nbsp;
+		 <input type="reset" value="Сбросить" name="reset">
+ <script>
+	if ( 1 == 0 )
+		disableDelButton();
+ </script>
+		 <input type="hidden" value="/portfw.htm" name="submit-url">
+</form>
+
+
+
+</blockquote>
+
+
+
+</body></html>

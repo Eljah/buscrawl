@@ -3,6 +3,14 @@ set -euo pipefail
 
 cd /home/eljah/apps/buscrawl
 
+LOCK_FILE=${BUS_DASHBOARD_LOCK_FILE:-/home/eljah/data/buscrawl/dashboard-server.lock}
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "$(date -Is) dashboard server skipped: another instance is active lock=$LOCK_FILE"
+  exit 0
+fi
+
 export BUS_PARQUET_DIR=${BUS_PARQUET_DIR:-/home/eljah/data/buscrawl/bus-data-parquet-compacted}
 export BUS_TRAFFIC_BEHAVIOR_DIR=${BUS_TRAFFIC_BEHAVIOR_DIR:-/home/eljah/data/buscrawl/traffic-behavior}
 export BUS_DASHBOARD_CACHE_FILE=${BUS_DASHBOARD_CACHE_FILE:-/home/eljah/apps/buscrawl/dashboard-cache/stats.json}

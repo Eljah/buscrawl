@@ -1,5 +1,7 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -1412,40 +1414,85 @@ public class BusDashboardServer {
         if (!originFile.startsWith(accessibilityMapDir) || !Files.isRegularFile(originFile)) {
             return normalized;
         }
-        try {
-            Map<String, Object> originPayload = MAPPER.readValue(originFile.toFile(), new TypeReference<>() {
-            });
-            Object originStopName = originPayload.get("originStopName");
-            if (originStopName != null && !String.valueOf(originStopName).isBlank()) {
-                normalized.put("label", originStopName);
-            }
-            Object originStops = originPayload.get("originStops");
-            if (originStops instanceof List<?>) {
-                List<String> ids = new ArrayList<>();
-                List<String> names = new ArrayList<>();
-                for (Object stopValue : (List<?>) originStops) {
-                    if (!(stopValue instanceof Map<?, ?>)) {
-                        continue;
-                    }
-                    Map<?, ?> stop = (Map<?, ?>) stopValue;
-                    if (stop.get("stopId") != null) {
-                        ids.add(String.valueOf(stop.get("stopId")));
-                    }
-                    if (stop.get("stopName") != null) {
-                        names.add(String.valueOf(stop.get("stopName")));
-                    }
+        try (JsonParser parser = MAPPER.getFactory().createParser(originFile.toFile())) {
+            while (parser.nextToken() != null) {
+                if (parser.currentToken() != JsonToken.FIELD_NAME) {
+                    continue;
                 }
-                if (!ids.isEmpty()) {
-                    normalized.put("stopIds", ids);
-                }
-                if (!names.isEmpty()) {
-                    normalized.put("stopNames", names);
+                String fieldName = parser.currentName();
+                JsonToken valueToken = parser.nextToken();
+                if ("originStopName".equals(fieldName) && valueToken == JsonToken.VALUE_STRING) {
+                    String originStopName = parser.getValueAsString();
+                    if (originStopName != null && !originStopName.isBlank()) {
+                        normalized.put("label", originStopName);
+                    }
+                } else if ("originStops".equals(fieldName) && valueToken == JsonToken.START_ARRAY) {
+                    List<String> ids = new ArrayList<>();
+                    List<String> names = new ArrayList<>();
+                    readAccessibilityOriginStops(parser, ids, names);
+                    if (!ids.isEmpty()) {
+                        normalized.put("stopIds", ids);
+                    }
+                    if (!names.isEmpty()) {
+                        normalized.put("stopNames", names);
+                    }
+                } else if ("serviceDates".equals(fieldName) && valueToken == JsonToken.START_ARRAY) {
+                    normalized.put("dates", readStringArray(parser));
+                } else if ("departureTimes".equals(fieldName) && valueToken == JsonToken.START_ARRAY) {
+                    normalized.put("departureTimes", readStringArray(parser));
+                } else if ("availableModes".equals(fieldName) && valueToken == JsonToken.START_ARRAY) {
+                    normalized.put("availableModes", readStringArray(parser));
+                } else {
+                    parser.skipChildren();
                 }
             }
         } catch (Exception ignored) {
             return normalized;
         }
         return normalized;
+    }
+
+    private static List<String> readStringArray(JsonParser parser) throws IOException {
+        List<String> values = new ArrayList<>();
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() == JsonToken.VALUE_STRING || parser.currentToken() == JsonToken.VALUE_NUMBER_INT) {
+                values.add(parser.getValueAsString());
+            } else {
+                parser.skipChildren();
+            }
+        }
+        return values;
+    }
+
+    private static void readAccessibilityOriginStops(JsonParser parser, List<String> ids, List<String> names) throws IOException {
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+            String stopId = null;
+            String stopName = null;
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                if (parser.currentToken() != JsonToken.FIELD_NAME) {
+                    continue;
+                }
+                String fieldName = parser.currentName();
+                JsonToken valueToken = parser.nextToken();
+                if ("stopId".equals(fieldName) && (valueToken == JsonToken.VALUE_STRING || valueToken == JsonToken.VALUE_NUMBER_INT)) {
+                    stopId = parser.getValueAsString();
+                } else if ("stopName".equals(fieldName) && valueToken == JsonToken.VALUE_STRING) {
+                    stopName = parser.getValueAsString();
+                } else {
+                    parser.skipChildren();
+                }
+            }
+            if (stopId != null) {
+                ids.add(stopId);
+            }
+            if (stopName != null) {
+                names.add(stopName);
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

@@ -194,7 +194,20 @@ function routeShape(routeNumber, origin){
 }
 function renderOverlay(){
   const origin=getViewportOrigin(); const items=filteredItems();
-  if(state.mode==='point'){ overlayEl.innerHTML=''; return; }
+  if(state.mode==='point'){
+    const maxSamples=Math.max(...items.map(sampleCount),1);
+    overlayEl.setAttribute('viewBox',`0 0 ${mapEl.clientWidth} ${mapEl.clientHeight}`);
+    overlayEl.innerHTML=items.map(item => {
+      const lat=Number(item.pointLatitude), lon=Number(item.pointLongitude);
+      if(!Number.isFinite(lat) || !Number.isFinite(lon)) return '';
+      const p=project(lat,lon,state.zoom);
+      const key=itemKey(item); const active=key===state.selectedKey;
+      const radius=active?8:Math.max(3, 3 + sampleCount(item)/maxSamples*9);
+      return `<circle data-key="${escapeAttr(key)}" cx="${(p.x-origin.left).toFixed(2)}" cy="${(p.y-origin.top).toFixed(2)}" r="${radius.toFixed(1)}" fill="${speedColor(item.avgSpeedKmh)}" opacity="${active?0.92:0.58}" stroke="rgba(20,28,23,.65)" stroke-width="${active?2:0.5}" style="cursor:pointer"><title>${escapeAttr(label(item))}</title></circle>`;
+    }).join('');
+    overlayEl.querySelectorAll('[data-key]').forEach(el=>el.addEventListener('click',()=>{ state.selectedKey=el.dataset.key; renderAll(); }));
+    return;
+  }
   const maxSamples=Math.max(...items.map(sampleCount),1);
   const parts=[];
   for(const item of items){
