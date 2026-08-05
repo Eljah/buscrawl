@@ -123,6 +123,10 @@ public class BusAccessibilityMapCacheJob {
             "BUS_ACCESSIBILITY_SNAPSHOT_DISK_WAIT_MAX_MILLIS",
             "60000"
     ));
+    private static final int SNAPSHOT_METADATA_FLUSH_INTERVAL = Integer.parseInt(System.getenv().getOrDefault(
+            "BUS_ACCESSIBILITY_SNAPSHOT_METADATA_FLUSH_INTERVAL",
+            "8"
+    ));
 
     public static void main(String[] args) throws Exception {
         ImageIO.setUseCache(false);
@@ -277,6 +281,7 @@ public class BusAccessibilityMapCacheJob {
                             ? buildAccessibilitySegments(roadGraph, roads, reachability.stopTimes)
                             : buildAccessibilitySegments(walkCache, reachability.stopTimes);
                     String snapshotId = snapshotId(snapshotDate, snapshotTime);
+                    SegmentValues segmentValues = SegmentValues.fromSegments(segments, renderCache == null ? -1 : renderCache.segmentCount);
                     debugTopTotalSegments(snapshotDate, snapshotTime, segments);
                     Path finalSnapshotRoot = tileBaseRoot.resolve(snapshotId);
                     Path snapshotRoot = createSnapshotStagingRoot(tileStagingRoot, originSlug, snapshotId);
@@ -290,30 +295,30 @@ public class BusAccessibilityMapCacheJob {
                                 ? buildTileIndexes(segments, Double.POSITIVE_INFINITY)
                                 : Map.of();
                         logSnapshotStage(snapshotId, "render total tiles start");
-                        ColorScale totalColorScale = renderTiles(segments, totalTileRoot, ColorMetric.TOTAL, tileIndexes, renderCache);
+                        ColorScale totalColorScale = renderTiles(segments, segmentValues, totalTileRoot, ColorMetric.TOTAL, tileIndexes, renderCache);
                         logSnapshotStage(snapshotId, "render total tiles done");
                         ColorScale totalNormalizedColorScale = null;
                         if (renderModes.contains("totalNormalized")) {
                             logSnapshotStage(snapshotId, "render totalNormalized tiles start");
-                            totalNormalizedColorScale = renderTiles(segments, totalNormalizedTileRoot, ColorMetric.TOTAL_NORMALIZED, tileIndexes, renderCache);
+                            totalNormalizedColorScale = renderTiles(segments, segmentValues, totalNormalizedTileRoot, ColorMetric.TOTAL_NORMALIZED, tileIndexes, renderCache);
                             logSnapshotStage(snapshotId, "render totalNormalized tiles done");
                         }
                         ColorScale totalLogColorScale = null;
                         if (renderModes.contains("totalLog")) {
                             logSnapshotStage(snapshotId, "render totalLog tiles start");
-                            totalLogColorScale = renderTiles(segments, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes, renderCache);
+                            totalLogColorScale = renderTiles(segments, segmentValues, totalLogTileRoot, ColorMetric.TOTAL_LOG, tileIndexes, renderCache);
                             logSnapshotStage(snapshotId, "render totalLog tiles done");
                         }
                         ColorScale walkColorScale = null;
                         if (renderModes.contains("walk")) {
                             logSnapshotStage(snapshotId, "render walk tiles start");
-                            walkColorScale = renderTiles(segments, walkTileRoot, ColorMetric.WALK, tileIndexes, renderCache);
+                            walkColorScale = renderTiles(segments, segmentValues, walkTileRoot, ColorMetric.WALK, tileIndexes, renderCache);
                             logSnapshotStage(snapshotId, "render walk tiles done");
                         }
                         ColorScale stopTransportColorScale = null;
                         if (renderModes.contains("stopTransport")) {
                             logSnapshotStage(snapshotId, "render stopTransport tiles start");
-                            stopTransportColorScale = renderTiles(segments, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes, renderCache);
+                            stopTransportColorScale = renderTiles(segments, segmentValues, stopTransportTileRoot, ColorMetric.STOP_TRANSPORT, tileIndexes, renderCache);
                             logSnapshotStage(snapshotId, "render stopTransport tiles done");
                         }
                         logSnapshotStage(snapshotId, "calculate contours start");
@@ -338,8 +343,10 @@ public class BusAccessibilityMapCacheJob {
                                 stopTransportColorScale,
                                 tileUrlPrefix
                         ));
-                        writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
-                        writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
+                        if (shouldFlushSnapshotMetadata(snapshots.size())) {
+                            writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
+                            writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
+                        }
                         System.out.printf(
                                 Locale.ROOT,
                                 "BusAccessibilityMapCacheJob: rendered snapshot %s stops=%d segments=%d%n",
@@ -355,6 +362,7 @@ public class BusAccessibilityMapCacheJob {
                     }
                 }
             }
+            writeContourStats(spark, contourStatsDir, originSlug, originStopQuery, snapshots);
             writePayload(outputFile, tileBaseRoot, originStopQuery, sourceMode, roads, serviceDates, departureTimes, snapshots);
             SnapshotPayload first = snapshots.isEmpty() ? null : snapshots.get(0);
             System.out.printf(
@@ -1952,17 +1960,21 @@ public class BusAccessibilityMapCacheJob {
 
     private static ColorScale renderTiles(
             List<AccessibleSegment> segments,
+            SegmentValues segmentValues,
             Path tileRoot,
             ColorMetric metric,
             Map<Integer, Map<String, List<AccessibleSegment>>> tileIndexes,
             RenderCache renderCache
     ) throws Exception {
-        ColorScale colorScale = ColorScale.fromSegments(segments, metric);
+        ColorScale colorScale = ColorScale.fromSegmentValues(segmentValues, segments, metric);
         Path tempRoot = tileRoot.resolveSibling(tileRoot.getFileName() + ".tmp-" + System.currentTimeMillis());
         Files.createDirectories(tempRoot);
         try {
-            if (renderCache != null && renderCache.segmentCount > 0 && segments.stream().allMatch(segment -> segment.segmentIndex >= 0)) {
-                double[] valuesBySegmentIndex = metricValuesBySegmentIndex(segments, metric, renderCache.segmentCount);
+            if (renderCache != null && renderCache.segmentCount > 0 && !segmentValues.cacheBacked) {
+                throw new IllegalStateException("Render cache is enabled, but accessible segment indexes do not match cache segment indexes");
+            }
+            if (renderCache != null && renderCache.segmentCount > 0 && segmentValues.cacheBacked) {
+                double[] valuesBySegmentIndex = segmentValues.values(metric);
                 renderCache.tiles.stream()
                         .filter(tile -> tile.zoom >= MIN_ZOOM && tile.zoom <= OVERLAY_MAX_ZOOM)
                         .parallel()
@@ -1994,6 +2006,12 @@ public class BusAccessibilityMapCacheJob {
             cleanupTempRootQuietly(tempRoot);
             throw e;
         }
+    }
+
+    private static boolean shouldFlushSnapshotMetadata(int snapshotCount) {
+        return SNAPSHOT_METADATA_FLUSH_INTERVAL > 0
+                && snapshotCount > 0
+                && snapshotCount % SNAPSHOT_METADATA_FLUSH_INTERVAL == 0;
     }
 
     private static Path createSnapshotStagingRoot(Path stagingRoot, String originSlug, String snapshotId) throws Exception {
@@ -3693,6 +3711,64 @@ public class BusAccessibilityMapCacheJob {
         }
     }
 
+    private static final class SegmentValues {
+        private final boolean cacheBacked;
+        private final int segmentCount;
+        private final double[] totalMinutes;
+        private final double[] walkMinutes;
+        private final double[] stopTransportMinutes;
+
+        private SegmentValues(
+                boolean cacheBacked,
+                int segmentCount,
+                double[] totalMinutes,
+                double[] walkMinutes,
+                double[] stopTransportMinutes
+        ) {
+            this.cacheBacked = cacheBacked;
+            this.segmentCount = segmentCount;
+            this.totalMinutes = totalMinutes;
+            this.walkMinutes = walkMinutes;
+            this.stopTransportMinutes = stopTransportMinutes;
+        }
+
+        private static SegmentValues fromSegments(List<AccessibleSegment> segments, int renderCacheSegmentCount) {
+            boolean cacheBacked = renderCacheSegmentCount > 0;
+            int size = cacheBacked ? renderCacheSegmentCount : segments.size();
+            double[] total = new double[size];
+            double[] walk = new double[size];
+            double[] stopTransport = new double[size];
+            Arrays.fill(total, Double.NaN);
+            Arrays.fill(walk, Double.NaN);
+            Arrays.fill(stopTransport, Double.NaN);
+            for (int i = 0; i < segments.size(); i++) {
+                AccessibleSegment segment = segments.get(i);
+                int index = cacheBacked ? segment.segmentIndex : i;
+                if (index < 0 || index >= size) {
+                    cacheBacked = false;
+                    break;
+                }
+                total[index] = segment.totalMinutes;
+                walk[index] = segment.walkMinutes;
+                stopTransport[index] = segment.nearestStopTransportMinutes;
+            }
+            if (!cacheBacked && renderCacheSegmentCount > 0) {
+                return fromSegments(segments, -1);
+            }
+            return new SegmentValues(cacheBacked, size, total, walk, stopTransport);
+        }
+
+        private double[] values(ColorMetric metric) {
+            if (metric == ColorMetric.WALK) {
+                return walkMinutes;
+            }
+            if (metric == ColorMetric.STOP_TRANSPORT) {
+                return stopTransportMinutes;
+            }
+            return totalMinutes;
+        }
+    }
+
     private static final class CachedTile {
         private final String key;
         private final int zoom;
@@ -3851,6 +3927,10 @@ public class BusAccessibilityMapCacheJob {
         }
 
         private static ColorScale fromSegments(List<AccessibleSegment> segments, ColorMetric metric) {
+            return fromSegmentValues(null, segments, metric);
+        }
+
+        private static ColorScale fromSegmentValues(SegmentValues segmentValues, List<AccessibleSegment> fallbackSegments, ColorMetric metric) {
             if (metric == ColorMetric.WALK) {
                 return new ColorScale(metric, 0.0, EFFECTIVE_WALK_RADIUS_METERS / WALK_SPEED_MPS / 60.0);
             }
@@ -3863,29 +3943,55 @@ public class BusAccessibilityMapCacheJob {
             if (COLOR_MAX_MINUTES > COLOR_MIN_MINUTES) {
                 return new ColorScale(metric, COLOR_MIN_MINUTES, COLOR_MAX_MINUTES);
             }
-            if (segments.isEmpty()) {
+            double[] sourceValues = segmentValues == null ? null : segmentValues.values(metric);
+            if ((sourceValues == null || sourceValues.length == 0) && fallbackSegments.isEmpty()) {
                 return new ColorScale(metric, 0.0, 120.0);
             }
-            List<Double> values = segments.stream()
-                    .map(metric::value)
-                    .filter(value -> Double.isFinite(value) && value >= 0)
-                    .sorted()
-                    .collect(Collectors.toList());
-            if (values.isEmpty()) {
+            double[] values = finiteMetricValues(sourceValues, fallbackSegments, metric);
+            if (values.length == 0) {
                 return new ColorScale(metric, 0.0, 120.0);
             }
-            double min = COLOR_MIN_MINUTES > 0 ? COLOR_MIN_MINUTES : values.get(0);
+            Arrays.sort(values);
+            double min = COLOR_MIN_MINUTES > 0 ? COLOR_MIN_MINUTES : values[0];
             double max;
             if (metric == ColorMetric.TOTAL_FULL || metric == ColorMetric.TOTAL_LOG) {
-                max = values.get(values.size() - 1);
+                max = values[values.length - 1];
             } else {
-                int percentileIndex = (int) Math.floor(Math.max(0.0, Math.min(1.0, COLOR_MAX_PERCENTILE)) * (values.size() - 1));
-                max = values.get(percentileIndex);
+                int percentileIndex = (int) Math.floor(Math.max(0.0, Math.min(1.0, COLOR_MAX_PERCENTILE)) * (values.length - 1));
+                max = values[percentileIndex];
             }
             if (max <= min + 1.0) {
                 max = min + 120.0;
             }
             return new ColorScale(metric, min, max, metric == ColorMetric.TOTAL_LOG);
+        }
+
+        private static double[] finiteMetricValues(double[] sourceValues, List<AccessibleSegment> fallbackSegments, ColorMetric metric) {
+            if (sourceValues != null) {
+                int count = 0;
+                for (double value : sourceValues) {
+                    if (Double.isFinite(value) && value >= 0) {
+                        count++;
+                    }
+                }
+                double[] values = new double[count];
+                int index = 0;
+                for (double value : sourceValues) {
+                    if (Double.isFinite(value) && value >= 0) {
+                        values[index++] = value;
+                    }
+                }
+                return values;
+            }
+            double[] values = new double[fallbackSegments.size()];
+            int count = 0;
+            for (AccessibleSegment segment : fallbackSegments) {
+                double value = metric.value(segment);
+                if (Double.isFinite(value) && value >= 0) {
+                    values[count++] = value;
+                }
+            }
+            return count == values.length ? values : Arrays.copyOf(values, count);
         }
     }
 
