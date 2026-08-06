@@ -637,7 +637,9 @@ public class BusTransferPotentialJob {
             int currentRideCount,
             int maxCandidateEventsPerRoutePattern
     ) {
-        List<Event> startEvents = eventsByStartStop.get(rideEdge.fromStopId);
+        List<Event> startEvents = rideEdge.exactRoutePattern()
+                ? searchIndex.eventsByStopRoutePattern(rideEdge.fromStopId, rideEdge.routePatternKey())
+                : eventsByStartStop.get(rideEdge.fromStopId);
         if (startEvents == null || startEvents.isEmpty()) {
             return null;
         }
@@ -784,34 +786,16 @@ public class BusTransferPotentialJob {
             if (current.previous != null && !searchIndex.isTransferStop(current.stopId)) {
                 continue;
             }
-            List<Event> events = eventsByStartStop.get(current.stopId);
-            if (events == null || events.isEmpty()) {
+            Set<String> routePatterns = searchIndex.routePatternsByStop.getOrDefault(current.stopId, Set.of());
+            if (routePatterns.isEmpty()) {
                 continue;
             }
-            int startIndex = lowerBoundByDeparture(events, current.arrivalSecond);
-            Map<String, Integer> acceptedByPattern = new HashMap<>();
-            Set<String> usedOutgoingKeys = new HashSet<>();
-            int stopPatternCount = searchIndex.routePatternsByStop.getOrDefault(current.stopId, Set.of()).size();
-            int fullPatternCount = 0;
-            for (int i = startIndex; i < events.size(); i++) {
-                if (stopPatternCount > 0 && fullPatternCount >= stopPatternCount) {
-                    break;
-                }
-                Event event = events.get(i);
-                String patternKey = event.routePatternKey();
-                int accepted = acceptedByPattern.getOrDefault(patternKey, 0);
-                if (accepted >= maxCandidateEventsPerRoutePattern) {
-                    continue;
-                }
-                String outgoingKey = event.rideKey() + "|" + event.segmentId;
-                if (!usedOutgoingKeys.add(outgoingKey)) {
-                    continue;
-                }
-                int newAccepted = accepted + 1;
-                acceptedByPattern.put(patternKey, newAccepted);
-                if (newAccepted == maxCandidateEventsPerRoutePattern) {
-                    fullPatternCount++;
-                }
+            List<Event> candidateEvents = searchIndex.candidateEventsByStopRoutePatterns(
+                    current.stopId,
+                    current.arrivalSecond,
+                    maxCandidateEventsPerRoutePattern
+            );
+            for (Event event : candidateEvents) {
                 int rideCount = event.rideKey().equals(current.rideKey) ? current.rideCount : current.rideCount + 1;
                 if (rideCount > maxRides) {
                     continue;
@@ -1119,6 +1103,14 @@ public class BusTransferPotentialJob {
         return left;
     }
 
+    private static Comparator<Event> departureComparator() {
+        return Comparator
+                .comparingInt((Event event) -> event.departureSecond)
+                .thenComparing(event -> event.arrivalSecond)
+                .thenComparing(event -> event.routeNumber)
+                .thenComparing(event -> event.plate);
+    }
+
     private static String stateKey(StateNode node) {
         return node.stopId + "|" + node.rideKey + "|" + node.rideCount;
     }
@@ -1397,6 +1389,8 @@ public class BusTransferPotentialJob {
     private static final class SearchIndex {
         private final Map<String, List<Event>> eventsByRideKey;
         private final IdentityHashMap<Event, Integer> eventIndexByIdentity;
+        private final IdentityHashMap<Event, Integer> eventIndexByStartStopIdentity;
+        private final Map<String, Map<String, List<Event>>> eventsByStopRoutePattern;
         private final Map<String, Set<String>> routePatternsByStop;
         private final Map<String, StopOnRoute> stopsByRoutePatternStop;
         private final Set<String> transferStops;
@@ -1404,12 +1398,16 @@ public class BusTransferPotentialJob {
         private SearchIndex(
                 Map<String, List<Event>> eventsByRideKey,
                 IdentityHashMap<Event, Integer> eventIndexByIdentity,
+                IdentityHashMap<Event, Integer> eventIndexByStartStopIdentity,
+                Map<String, Map<String, List<Event>>> eventsByStopRoutePattern,
                 Map<String, Set<String>> routePatternsByStop,
                 Map<String, StopOnRoute> stopsByRoutePatternStop,
                 Set<String> transferStops
         ) {
             this.eventsByRideKey = eventsByRideKey;
             this.eventIndexByIdentity = eventIndexByIdentity;
+            this.eventIndexByStartStopIdentity = eventIndexByStartStopIdentity;
+            this.eventsByStopRoutePattern = eventsByStopRoutePattern;
             this.routePatternsByStop = routePatternsByStop;
             this.stopsByRoutePatternStop = stopsByRoutePatternStop;
             this.transferStops = transferStops;
@@ -1432,10 +1430,19 @@ public class BusTransferPotentialJob {
 
             Map<String, Set<String>> routePatternsByStop = new HashMap<>();
             Map<String, StopOnRoute> stopsByRoutePatternStop = new HashMap<>();
+            Map<String, Map<String, List<Event>>> eventsByStopRoutePattern = new HashMap<>();
+            IdentityHashMap<Event, Integer> eventIndexByStartStopIdentity = new IdentityHashMap<>();
             for (Map.Entry<String, List<Event>> entry : eventsByStartStop.entrySet()) {
                 Set<String> patterns = routePatternsByStop.computeIfAbsent(entry.getKey(), ignored -> new HashSet<>());
-                for (Event event : entry.getValue()) {
+                List<Event> stopEvents = entry.getValue();
+                for (int i = 0; i < stopEvents.size(); i++) {
+                    Event event = stopEvents.get(i);
+                    eventIndexByStartStopIdentity.put(event, i);
                     patterns.add(event.routePatternKey());
+                    eventsByStopRoutePattern
+                            .computeIfAbsent(entry.getKey(), ignored -> new HashMap<>())
+                            .computeIfAbsent(event.routePatternKey(), ignored -> new ArrayList<>())
+                            .add(event);
                     stopsByRoutePatternStop.putIfAbsent(
                             event.routePatternKey() + "|" + event.startStopId,
                             new StopOnRoute(event.startStopId, event.startStopName, event.startStopOrder)
@@ -1444,6 +1451,12 @@ public class BusTransferPotentialJob {
                             event.routePatternKey() + "|" + event.endStopId,
                             new StopOnRoute(event.endStopId, event.endStopName, event.endStopOrder)
                     );
+                }
+            }
+            Comparator<Event> departureComparator = departureComparator();
+            for (Map<String, List<Event>> patternEventsByStop : eventsByStopRoutePattern.values()) {
+                for (List<Event> patternEvents : patternEventsByStop.values()) {
+                    patternEvents.sort(departureComparator);
                 }
             }
             for (Event event : events) {
@@ -1461,7 +1474,15 @@ public class BusTransferPotentialJob {
                     .filter(entry -> entry.getValue().size() > 1)
                     .map(Map.Entry::getKey)
                     .collect(Collectors.toSet());
-            return new SearchIndex(eventsByRideKey, eventIndexByIdentity, routePatternsByStop, stopsByRoutePatternStop, transferStops);
+            return new SearchIndex(
+                    eventsByRideKey,
+                    eventIndexByIdentity,
+                    eventIndexByStartStopIdentity,
+                    eventsByStopRoutePattern,
+                    routePatternsByStop,
+                    stopsByRoutePatternStop,
+                    transferStops
+            );
         }
 
         private boolean isTransferStop(String stopId) {
@@ -1470,6 +1491,39 @@ public class BusTransferPotentialJob {
 
         private StopOnRoute stopOnRoute(String routePatternKey, String stopId) {
             return stopsByRoutePatternStop.get(routePatternKey + "|" + stopId);
+        }
+
+        private List<Event> eventsByStopRoutePattern(String stopId, String routePatternKey) {
+            Map<String, List<Event>> patternEvents = eventsByStopRoutePattern.get(stopId);
+            return patternEvents == null ? null : patternEvents.get(routePatternKey);
+        }
+
+        private List<Event> candidateEventsByStopRoutePatterns(
+                String stopId,
+                int departureSecond,
+                int maxCandidateEventsPerRoutePattern
+        ) {
+            Map<String, List<Event>> patternEvents = eventsByStopRoutePattern.get(stopId);
+            if (patternEvents == null || patternEvents.isEmpty()) {
+                return List.of();
+            }
+            List<Event> candidates = new ArrayList<>(patternEvents.size() * Math.max(1, maxCandidateEventsPerRoutePattern));
+            for (List<Event> events : patternEvents.values()) {
+                int startIndex = lowerBoundByDeparture(events, departureSecond);
+                Set<String> usedOutgoingKeys = new HashSet<>();
+                int accepted = 0;
+                for (int i = startIndex; i < events.size() && accepted < maxCandidateEventsPerRoutePattern; i++) {
+                    Event event = events.get(i);
+                    String outgoingKey = event.rideKey() + "|" + event.segmentId;
+                    if (!usedOutgoingKeys.add(outgoingKey)) {
+                        continue;
+                    }
+                    candidates.add(event);
+                    accepted++;
+                }
+            }
+            candidates.sort(Comparator.comparingInt(event -> eventIndexByStartStopIdentity.getOrDefault(event, Integer.MAX_VALUE)));
+            return candidates;
         }
     }
 
@@ -1804,6 +1858,14 @@ public class BusTransferPotentialJob {
                     && internalRouteId.equals(event.internalRouteId)
                     && (routeNumber.isBlank() || routeNumber.equals(event.routeNumber))
                     && (direction == Integer.MIN_VALUE || direction == event.direction);
+        }
+
+        private boolean exactRoutePattern() {
+            return !routeNumber.isBlank() && direction != Integer.MIN_VALUE;
+        }
+
+        private String routePatternKey() {
+            return internalRouteId + "|" + routeNumber + "|" + direction;
         }
     }
 
