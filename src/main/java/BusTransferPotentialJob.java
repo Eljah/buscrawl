@@ -60,7 +60,7 @@ public class BusTransferPotentialJob {
             System.getenv().getOrDefault("BUS_TRANSFER_MAX_RIDE_SEGMENT_GAP_SECONDS", "1800")
     );
     private static final boolean TRANSFER_PROFILE_ENABLED = Boolean.parseBoolean(
-            System.getenv().getOrDefault("BUS_TRANSFER_PROFILE", "true")
+            System.getenv().getOrDefault("BUS_TRANSFER_PROFILE", "false")
     );
 
     public static void main(String[] args) throws Exception {
