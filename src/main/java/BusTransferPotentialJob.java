@@ -122,6 +122,7 @@ public class BusTransferPotentialJob {
         String targetDateText = System.getenv().getOrDefault("BUS_TRANSFER_TARGET_DATE", "").trim();
         boolean backfill = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TRANSFER_BACKFILL", "false"));
         int writeBatchRows = Integer.parseInt(System.getenv().getOrDefault("BUS_TRANSFER_WRITE_BATCH_ROWS", "100000"));
+        boolean flushEveryBucket = Boolean.parseBoolean(System.getenv().getOrDefault("BUS_TRANSFER_FLUSH_EVERY_BUCKET", "true"));
         Instant stopDeadline = computeStopDeadline(cityZone, stopBeforeLocalTimeText);
 
         Files.createDirectories(outputRoot);
@@ -189,6 +190,7 @@ public class BusTransferPotentialJob {
                         originStopFilter,
                         outputPartitions,
                         writeBatchRows,
+                        flushEveryBucket,
                         state.processedBucketKeys,
                         remainingBuckets,
                         stopDeadline
@@ -262,6 +264,7 @@ public class BusTransferPotentialJob {
             Set<String> originStopFilter,
             int outputPartitions,
             int writeBatchRows,
+            boolean flushEveryBucket,
             Collection<String> alreadyProcessedBucketKeys,
             int maxBucketsToProcess,
             Instant stopDeadline
@@ -367,6 +370,10 @@ public class BusTransferPotentialJob {
         int lastBucket = floorToBucket(maxDepartureSecond, bucketMinutes);
         List<String> processedBucketKeys = new ArrayList<>();
         Set<String> processedBucketKeySet = new HashSet<>(alreadyProcessedBucketKeys);
+        List<String> pendingStateBucketKeys = new ArrayList<>();
+        List<Row> bufferedJourneyRows = new ArrayList<>();
+        List<Row> bufferedFragmentRows = new ArrayList<>();
+        List<Row> bufferedCountRows = new ArrayList<>();
         long detailedJourneyCount = 0L;
         long possiblePerOrigin = Math.max(0, orderedStops.size() - 1L);
 
@@ -395,9 +402,9 @@ public class BusTransferPotentialJob {
             long possibleRequests = possiblePerOrigin * orderedOriginStops.size();
             long reachableRequests = 0L;
             long fragmentCount = 0L;
-            List<Row> journeyRows = new ArrayList<>();
-            List<Row> fragmentRows = new ArrayList<>();
-            List<Row> countRows = new ArrayList<>();
+            List<Row> journeyRows = flushEveryBucket ? new ArrayList<>() : bufferedJourneyRows;
+            List<Row> fragmentRows = flushEveryBucket ? new ArrayList<>() : bufferedFragmentRows;
+            List<Row> countRows = flushEveryBucket ? new ArrayList<>() : bufferedCountRows;
             TransferSearchStats stats = TRANSFER_PROFILE_ENABLED ? new TransferSearchStats(serviceDateText, bucketMinute) : null;
             clearBucketPartition(outputRoot.resolve(JOURNEYS_DIR), serviceDateText, bucketMinute);
             clearBucketPartition(outputRoot.resolve(FRAGMENTS_DIR), serviceDateText, bucketMinute);
@@ -497,7 +504,7 @@ public class BusTransferPotentialJob {
                     }
                     fragmentCount += fragments.size();
                     detailedJourneyCount++;
-                    if (journeyRows.size() >= writeBatchRows || fragmentRows.size() >= writeBatchRows) {
+                    if (flushEveryBucket && (journeyRows.size() >= writeBatchRows || fragmentRows.size() >= writeBatchRows)) {
                         long flushStarted = System.nanoTime();
                         flushRows(spark, journeyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
                         flushRows(spark, fragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
@@ -519,14 +526,19 @@ public class BusTransferPotentialJob {
                     detailedJourneyCount >= maxDetailedJourneysPerDay
             ));
             processedBucketKeys.add(bucketKey);
+            pendingStateBucketKeys.add(bucketKey);
             long flushStarted = System.nanoTime();
-            flushRows(spark, journeyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
-            flushRows(spark, fragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
-            flushRows(spark, countRows, requestCountSchema(), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
+            if (flushEveryBucket || journeyRows.size() >= writeBatchRows || fragmentRows.size() >= writeBatchRows) {
+                flushRows(spark, journeyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
+                flushRows(spark, fragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
+                flushRows(spark, countRows, requestCountSchema(), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
+                updateState(stateFile, pendingStateBucketKeys);
+                processedBucketKeySet.addAll(pendingStateBucketKeys);
+                pendingStateBucketKeys.clear();
+            }
             if (stats != null) {
                 stats.flushNanos += System.nanoTime() - flushStarted;
             }
-            updateState(stateFile, List.of(bucketKey));
             if (stats != null) {
                 stats.log();
             }
@@ -540,6 +552,15 @@ public class BusTransferPotentialJob {
                     fragmentCount,
                     detailedJourneyCount >= maxDetailedJourneysPerDay
             );
+        }
+
+        if (!pendingStateBucketKeys.isEmpty()) {
+            flushRows(spark, bufferedJourneyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
+            flushRows(spark, bufferedFragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
+            flushRows(spark, bufferedCountRows, requestCountSchema(), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
+            updateState(stateFile, pendingStateBucketKeys);
+            processedBucketKeySet.addAll(pendingStateBucketKeys);
+            pendingStateBucketKeys.clear();
         }
 
         if (processedBucketKeys.isEmpty()) {
