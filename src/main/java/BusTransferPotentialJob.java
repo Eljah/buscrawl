@@ -59,6 +59,9 @@ public class BusTransferPotentialJob {
     private static final int MAX_RIDE_SEGMENT_GAP_SECONDS = Integer.parseInt(
             System.getenv().getOrDefault("BUS_TRANSFER_MAX_RIDE_SEGMENT_GAP_SECONDS", "1800")
     );
+    private static final boolean TRANSFER_PROFILE_ENABLED = Boolean.parseBoolean(
+            System.getenv().getOrDefault("BUS_TRANSFER_PROFILE", "true")
+    );
 
     public static void main(String[] args) throws Exception {
         Path trafficBehaviorDir = Path.of(System.getenv().getOrDefault(
@@ -289,12 +292,15 @@ public class BusTransferPotentialJob {
                 )
                 .filter(col("travelDurationSeconds").gt(0));
 
+        long collectStarted = System.nanoTime();
         List<Row> rows = dayTrips.collectAsList();
+        long collectNanos = System.nanoTime() - collectStarted;
         if (rows.isEmpty()) {
             System.out.println("BusTransferPotentialJob: no segment trips for " + serviceDateText);
             return ProcessResult.empty();
         }
 
+        long indexStarted = System.nanoTime();
         List<Event> events = new ArrayList<>(rows.size());
         Set<String> stopIds = new TreeSet<>(topologyStops);
         int weekdayIso = 0;
@@ -327,6 +333,20 @@ public class BusTransferPotentialJob {
         }
         SearchIndex searchIndex = SearchIndex.from(events, eventsByStartStop);
         SearchMode parsedSearchMode = SearchMode.parse(searchMode);
+        long indexNanos = System.nanoTime() - indexStarted;
+        if (TRANSFER_PROFILE_ENABLED) {
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusTransferPotentialJob: profile date=%s collectMs=%d indexMs=%d rows=%d events=%d startStops=%d stopPatterns=%d%n",
+                    serviceDateText,
+                    nanosToMillis(collectNanos),
+                    nanosToMillis(indexNanos),
+                    rows.size(),
+                    events.size(),
+                    eventsByStartStop.size(),
+                    searchIndex.stopPatternCount()
+            );
+        }
 
         List<String> orderedStops = new ArrayList<>(stopIds);
         List<String> orderedOriginStops = orderedStops;
@@ -378,11 +398,13 @@ public class BusTransferPotentialJob {
             List<Row> journeyRows = new ArrayList<>();
             List<Row> fragmentRows = new ArrayList<>();
             List<Row> countRows = new ArrayList<>();
+            TransferSearchStats stats = TRANSFER_PROFILE_ENABLED ? new TransferSearchStats(serviceDateText, bucketMinute) : null;
             clearBucketPartition(outputRoot.resolve(JOURNEYS_DIR), serviceDateText, bucketMinute);
             clearBucketPartition(outputRoot.resolve(FRAGMENTS_DIR), serviceDateText, bucketMinute);
             clearBucketPartition(outputRoot.resolve(REQUEST_COUNTS_DIR), serviceDateText, bucketMinute);
 
             for (String originStopId : orderedOriginStops) {
+                long searchStarted = System.nanoTime();
                 Map<String, StateNode> bestByDestination = findBestJourneys(
                         originStopId,
                         bucketSecond,
@@ -394,8 +416,12 @@ public class BusTransferPotentialJob {
                         parsedSearchMode,
                         staticGraphCache,
                         staticRouteNetworkFallback,
-                        staticFallbackMinDestinations
+                        staticFallbackMinDestinations,
+                        stats
                 );
+                if (stats != null) {
+                    stats.searchNanos += System.nanoTime() - searchStarted;
+                }
                 for (Map.Entry<String, StateNode> entry : bestByDestination.entrySet()) {
                     String destinationStopId = entry.getKey();
                     if (originStopId.equals(destinationStopId)) {
@@ -406,7 +432,11 @@ public class BusTransferPotentialJob {
                     if (detailedJourneyCount >= maxDetailedJourneysPerDay) {
                         continue;
                     }
+                    long reconstructStarted = System.nanoTime();
                     List<Event> path = reconstructPath(destination);
+                    if (stats != null) {
+                        stats.reconstructNanos += System.nanoTime() - reconstructStarted;
+                    }
                     if (path.isEmpty()) {
                         continue;
                     }
@@ -468,8 +498,12 @@ public class BusTransferPotentialJob {
                     fragmentCount += fragments.size();
                     detailedJourneyCount++;
                     if (journeyRows.size() >= writeBatchRows || fragmentRows.size() >= writeBatchRows) {
+                        long flushStarted = System.nanoTime();
                         flushRows(spark, journeyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
                         flushRows(spark, fragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
+                        if (stats != null) {
+                            stats.flushNanos += System.nanoTime() - flushStarted;
+                        }
                     }
                 }
             }
@@ -485,10 +519,17 @@ public class BusTransferPotentialJob {
                     detailedJourneyCount >= maxDetailedJourneysPerDay
             ));
             processedBucketKeys.add(bucketKey);
+            long flushStarted = System.nanoTime();
             flushRows(spark, journeyRows, journeySchema(), outputRoot.resolve(JOURNEYS_DIR), outputPartitions);
             flushRows(spark, fragmentRows, fragmentSchema(), outputRoot.resolve(FRAGMENTS_DIR), outputPartitions);
             flushRows(spark, countRows, requestCountSchema(), outputRoot.resolve(REQUEST_COUNTS_DIR), outputPartitions);
+            if (stats != null) {
+                stats.flushNanos += System.nanoTime() - flushStarted;
+            }
             updateState(stateFile, List.of(bucketKey));
+            if (stats != null) {
+                stats.log();
+            }
             System.out.printf(
                     Locale.ROOT,
                     "BusTransferPotentialJob: finished and wrote %s bucketMinute=%d reachable=%d detailed=%d fragments=%d truncated=%s%n",
@@ -524,9 +565,13 @@ public class BusTransferPotentialJob {
             SearchMode searchMode,
             StaticGraphCache staticGraphCache,
             boolean staticRouteNetworkFallback,
-            int staticFallbackMinDestinations
+            int staticFallbackMinDestinations,
+            TransferSearchStats stats
     ) {
         if (searchMode == SearchMode.STATIC_GRAPH_CACHE) {
+            if (stats != null) {
+                stats.staticGraphCalls++;
+            }
             Map<String, StateNode> staticBest = findBestJourneysByStaticGraphCache(
                     originStopId,
                     requestedSecond,
@@ -534,7 +579,8 @@ public class BusTransferPotentialJob {
                     searchIndex,
                     staticGraphCache,
                     maxRides,
-                    maxCandidateEventsPerRoutePattern
+                    maxCandidateEventsPerRoutePattern,
+                    stats
             );
             if (staticRouteNetworkFallback && staticBest.size() < staticFallbackMinDestinations) {
                 Map<String, StateNode> fallbackBest = findBestJourneysByRouteNetwork(
@@ -543,7 +589,8 @@ public class BusTransferPotentialJob {
                         eventsByStartStop,
                         searchIndex,
                         maxRides,
-                        maxCandidateEventsPerRoutePattern
+                        maxCandidateEventsPerRoutePattern,
+                        stats
                 );
                 fallbackBest.forEach((stopId, node) -> staticBest.merge(
                         stopId,
@@ -560,7 +607,8 @@ public class BusTransferPotentialJob {
                     eventsByStartStop,
                     searchIndex,
                     maxRides,
-                    maxCandidateEventsPerRoutePattern
+                    maxCandidateEventsPerRoutePattern,
+                    stats
             );
         }
         return findBestJourneysLegacy(
@@ -568,7 +616,8 @@ public class BusTransferPotentialJob {
                 requestedSecond,
                 eventsByStartStop,
                 maxRides,
-                maxCandidateEventsPerStop
+                maxCandidateEventsPerStop,
+                stats
         );
     }
 
@@ -579,7 +628,8 @@ public class BusTransferPotentialJob {
             SearchIndex searchIndex,
             StaticGraphCache staticGraphCache,
             int maxRides,
-            int maxCandidateEventsPerRoutePattern
+            int maxCandidateEventsPerRoutePattern,
+            TransferSearchStats stats
     ) {
         Map<String, StateNode> bestByDestination = new HashMap<>();
         List<StaticPathCandidate> candidates = staticGraphCache.candidatesForOrigin(originStopId);
@@ -606,7 +656,8 @@ public class BusTransferPotentialJob {
                         eventsByStartStop,
                         searchIndex,
                         rideCount,
-                        maxCandidateEventsPerRoutePattern
+                        maxCandidateEventsPerRoutePattern,
+                        stats
                 );
                 if (next == null) {
                     failed = true;
@@ -635,18 +686,29 @@ public class BusTransferPotentialJob {
             Map<String, List<Event>> eventsByStartStop,
             SearchIndex searchIndex,
             int currentRideCount,
-            int maxCandidateEventsPerRoutePattern
+            int maxCandidateEventsPerRoutePattern,
+            TransferSearchStats stats
     ) {
+        long started = stats == null ? 0L : System.nanoTime();
+        if (stats != null) {
+            stats.staticFollowCalls++;
+        }
         List<Event> startEvents = rideEdge.exactRoutePattern()
                 ? searchIndex.eventsByStopRoutePattern(rideEdge.fromStopId, rideEdge.routePatternKey())
                 : eventsByStartStop.get(rideEdge.fromStopId);
         if (startEvents == null || startEvents.isEmpty()) {
+            if (stats != null) {
+                stats.staticFollowNanos += System.nanoTime() - started;
+            }
             return null;
         }
         int startIndex = lowerBoundByDeparture(startEvents, current.arrivalSecond);
         int accepted = 0;
         Set<String> attemptedBoardEvents = new HashSet<>();
         for (int i = startIndex; i < startEvents.size() && accepted < maxCandidateEventsPerRoutePattern; i++) {
+            if (stats != null) {
+                stats.staticBoardEventsScanned++;
+            }
             Event boardEvent = startEvents.get(i);
             if (!rideEdge.matches(boardEvent)) {
                 continue;
@@ -656,10 +718,19 @@ public class BusTransferPotentialJob {
                 continue;
             }
             accepted++;
+            if (stats != null) {
+                stats.staticBoardEventsAccepted++;
+            }
             StateNode reached = scanStaticRideToStop(current, boardEvent, rideEdge.toStopId, searchIndex, currentRideCount + 1);
             if (reached != null) {
+                if (stats != null) {
+                    stats.staticFollowNanos += System.nanoTime() - started;
+                }
                 return reached;
             }
+        }
+        if (stats != null) {
+            stats.staticFollowNanos += System.nanoTime() - started;
         }
         return null;
     }
@@ -712,8 +783,12 @@ public class BusTransferPotentialJob {
             int requestedSecond,
             Map<String, List<Event>> eventsByStartStop,
             int maxRides,
-            int maxCandidateEventsPerStop
+            int maxCandidateEventsPerStop,
+            TransferSearchStats stats
     ) {
+        if (stats != null) {
+            stats.legacyCalls++;
+        }
         PriorityQueue<StateNode> queue = new PriorityQueue<>(Comparator.comparingInt(node -> node.arrivalSecond));
         Map<String, Integer> bestStateTime = new HashMap<>();
         Map<String, StateNode> bestByDestination = new HashMap<>();
@@ -767,8 +842,12 @@ public class BusTransferPotentialJob {
             Map<String, List<Event>> eventsByStartStop,
             SearchIndex searchIndex,
             int maxRides,
-            int maxCandidateEventsPerRoutePattern
+            int maxCandidateEventsPerRoutePattern,
+            TransferSearchStats stats
     ) {
+        if (stats != null) {
+            stats.routeNetworkCalls++;
+        }
         PriorityQueue<StateNode> queue = new PriorityQueue<>(Comparator.comparingInt(node -> node.arrivalSecond));
         Map<String, int[]> bestStateTime = new HashMap<>();
         Map<String, StateNode> bestByDestination = new HashMap<>();
@@ -778,6 +857,9 @@ public class BusTransferPotentialJob {
 
         while (!queue.isEmpty()) {
             StateNode current = queue.poll();
+            if (stats != null) {
+                stats.routeStatesPolled++;
+            }
             int known = bestArrival(bestStateTime, current.stopId, current.rideCount);
             if (known != Integer.MAX_VALUE && current.arrivalSecond > known) {
                 continue;
@@ -793,14 +875,15 @@ public class BusTransferPotentialJob {
             List<Event> candidateEvents = searchIndex.candidateEventsByStopRoutePatterns(
                     current.stopId,
                     current.arrivalSecond,
-                    maxCandidateEventsPerRoutePattern
+                    maxCandidateEventsPerRoutePattern,
+                    stats
             );
             for (Event event : candidateEvents) {
                 int rideCount = event.rideKey().equals(current.rideKey) ? current.rideCount : current.rideCount + 1;
                 if (rideCount > maxRides) {
                     continue;
                 }
-                scanRideForward(current, event, searchIndex, rideCount, maxRides, queue, bestStateTime, bestByDestination);
+                scanRideForward(current, event, searchIndex, rideCount, maxRides, queue, bestStateTime, bestByDestination, stats);
             }
         }
         bestByDestination.remove(originStopId);
@@ -815,16 +898,27 @@ public class BusTransferPotentialJob {
             int maxRides,
             PriorityQueue<StateNode> queue,
             Map<String, int[]> bestStateTime,
-            Map<String, StateNode> bestByDestination
+            Map<String, StateNode> bestByDestination,
+            TransferSearchStats stats
     ) {
+        long started = stats == null ? 0L : System.nanoTime();
+        if (stats != null) {
+            stats.scanRideCalls++;
+        }
         List<Event> rideEvents = searchIndex.eventsByRideKey.get(boardEvent.rideKey());
         Integer index = searchIndex.eventIndexByIdentity.get(boardEvent);
         if (rideEvents == null || index == null) {
+            if (stats != null) {
+                stats.scanRideNanos += System.nanoTime() - started;
+            }
             return;
         }
         StateNode previous = current;
         Event last = null;
         for (int i = index; i < rideEvents.size(); i++) {
+            if (stats != null) {
+                stats.scanRideEvents++;
+            }
             Event event = rideEvents.get(i);
             if (i == index) {
                 if (!event.startStopId.equals(current.stopId) || event.departureSecond < current.arrivalSecond) {
@@ -849,6 +943,9 @@ public class BusTransferPotentialJob {
             }
             previous = next;
             last = event;
+        }
+        if (stats != null) {
+            stats.scanRideNanos += System.nanoTime() - started;
         }
     }
 
@@ -1109,6 +1206,10 @@ public class BusTransferPotentialJob {
                 .thenComparing(event -> event.arrivalSecond)
                 .thenComparing(event -> event.routeNumber)
                 .thenComparing(event -> event.plate);
+    }
+
+    private static long nanosToMillis(long nanos) {
+        return nanos / 1_000_000L;
     }
 
     private static String stateKey(StateNode node) {
@@ -1493,6 +1594,12 @@ public class BusTransferPotentialJob {
             return stopsByRoutePatternStop.get(routePatternKey + "|" + stopId);
         }
 
+        private long stopPatternCount() {
+            return eventsByStopRoutePattern.values().stream()
+                    .mapToLong(Map::size)
+                    .sum();
+        }
+
         private List<Event> eventsByStopRoutePattern(String stopId, String routePatternKey) {
             Map<String, List<Event>> patternEvents = eventsByStopRoutePattern.get(stopId);
             return patternEvents == null ? null : patternEvents.get(routePatternKey);
@@ -1501,10 +1608,18 @@ public class BusTransferPotentialJob {
         private List<Event> candidateEventsByStopRoutePatterns(
                 String stopId,
                 int departureSecond,
-                int maxCandidateEventsPerRoutePattern
+                int maxCandidateEventsPerRoutePattern,
+                TransferSearchStats stats
         ) {
+            long started = stats == null ? 0L : System.nanoTime();
+            if (stats != null) {
+                stats.candidateSelections++;
+            }
             Map<String, List<Event>> patternEvents = eventsByStopRoutePattern.get(stopId);
             if (patternEvents == null || patternEvents.isEmpty()) {
+                if (stats != null) {
+                    stats.candidateNanos += System.nanoTime() - started;
+                }
                 return List.of();
             }
             List<Event> candidates = new ArrayList<>(patternEvents.size() * Math.max(1, maxCandidateEventsPerRoutePattern));
@@ -1523,7 +1638,64 @@ public class BusTransferPotentialJob {
                 }
             }
             candidates.sort(Comparator.comparingInt(event -> eventIndexByStartStopIdentity.getOrDefault(event, Integer.MAX_VALUE)));
+            if (stats != null) {
+                stats.candidateEvents += candidates.size();
+                stats.candidateNanos += System.nanoTime() - started;
+            }
             return candidates;
+        }
+    }
+
+    private static final class TransferSearchStats {
+        private final String serviceDate;
+        private final int bucketMinute;
+        private long staticGraphCalls;
+        private long routeNetworkCalls;
+        private long legacyCalls;
+        private long staticFollowCalls;
+        private long staticBoardEventsScanned;
+        private long staticBoardEventsAccepted;
+        private long routeStatesPolled;
+        private long candidateSelections;
+        private long candidateEvents;
+        private long scanRideCalls;
+        private long scanRideEvents;
+        private long searchNanos;
+        private long candidateNanos;
+        private long staticFollowNanos;
+        private long scanRideNanos;
+        private long reconstructNanos;
+        private long flushNanos;
+
+        private TransferSearchStats(String serviceDate, int bucketMinute) {
+            this.serviceDate = serviceDate;
+            this.bucketMinute = bucketMinute;
+        }
+
+        private void log() {
+            System.out.printf(
+                    Locale.ROOT,
+                    "BusTransferPotentialJob: profile bucket date=%s bucketMinute=%d searchMs=%d candidateMs=%d staticFollowMs=%d scanRideMs=%d reconstructMs=%d flushMs=%d staticCalls=%d routeCalls=%d legacyCalls=%d staticFollowCalls=%d staticBoardScanned=%d staticBoardAccepted=%d routeStates=%d candidateSelections=%d candidateEvents=%d scanRideCalls=%d scanRideEvents=%d%n",
+                    serviceDate,
+                    bucketMinute,
+                    nanosToMillis(searchNanos),
+                    nanosToMillis(candidateNanos),
+                    nanosToMillis(staticFollowNanos),
+                    nanosToMillis(scanRideNanos),
+                    nanosToMillis(reconstructNanos),
+                    nanosToMillis(flushNanos),
+                    staticGraphCalls,
+                    routeNetworkCalls,
+                    legacyCalls,
+                    staticFollowCalls,
+                    staticBoardEventsScanned,
+                    staticBoardEventsAccepted,
+                    routeStatesPolled,
+                    candidateSelections,
+                    candidateEvents,
+                    scanRideCalls,
+                    scanRideEvents
+            );
         }
     }
 
